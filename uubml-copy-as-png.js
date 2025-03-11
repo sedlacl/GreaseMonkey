@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bookkit - Přidat tlačítko ke SVG + oprava výběru
+// @name         Bookkit - Copy uuBml as PNG to clipboard
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.9
-// @description  Přidává tlačítko pro kopírování SVG jako PNG vedle existujících tlačítek a opravuje výběr SVG elementu.
+// @version      1.0
+// @description  Adds a button to copy SVG as PNG to clipboard next to existing buttons and fixes SVG element selection.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/*
 // @grant        none
@@ -120,7 +120,7 @@
       if (!parentDiv || parentDiv.querySelector(".copy-svg-button")) return;
 
       const button = document.createElement("button");
-      button.textContent = "📷 Kopírovat jako PNG";
+      button.textContent = "📷 Copy as PNG";
       button.className = "copy-svg-button";
       button.style.margin = "5px";
       button.style.padding = "5px 10px";
