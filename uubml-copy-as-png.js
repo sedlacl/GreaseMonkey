@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bookkit - Přidat tlačítko ke SVG + oprava výběru
-// @namespace    https://raw.githubusercontent.com/sedlacl/GreaseMonkey
-// @version      1.8
+// @namespace    https://github.com/sedlacl/GreaseMonkey
+// @version      1.9
 // @description  Přidává tlačítko pro kopírování SVG jako PNG vedle existujících tlačítek a opravuje výběr SVG elementu.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/*
