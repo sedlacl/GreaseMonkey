@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bookkit - Copy uuBml as PNG to clipboard
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.0
+// @version      1.1
 // @description  Adds a button to copy SVG as PNG to clipboard next to existing buttons and fixes SVG element selection.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/*
@@ -50,6 +50,22 @@
 
     function applyStylesRecursively(original, clone) {
       copyComputedStyles(original, clone);
+    }
+    //copy stylesheets to cloned svg
+    const stylesheets = document.styleSheets;
+    for (let i = 0; i < stylesheets.length; i++) {
+      try {
+        const cssRules = stylesheets[i].cssRules;
+        for (let j = 0; j < cssRules.length; j++) {
+          if (cssRules[j] instanceof CSSStyleRule) {
+            const style = document.createElement("style");
+            style.textContent = cssRules[j].cssText;
+            clonedSvg.appendChild(style);
+          }
+        }
+      } catch (e) {
+        console.warn("Cannot access cssRules for stylesheet: ", stylesheets[i].href, e);
+      }
     }
 
     applyStylesRecursively(svgElement, clonedSvg);

@@ -18,3 +18,7 @@ Go to TamperMonkey addon
 | Copy uuBml as PNG to clipboard | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/uubml-copy-as-png.js] |
 | Autoclose authentication page | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/close-auth-page.js] |
 
+## Changelog
+
+* 1.0 - initial version
+* 1.1 - fix of block element text
