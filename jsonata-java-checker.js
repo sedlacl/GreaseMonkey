@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JSONATA JAVA Checker
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.10
+// @version      0.19
 // @description  JSONata kontrola přes lokální Java backend
 // @author       Lukáš Sedláček
 // @match        https://try.jsonata.org/*
@@ -10,7 +10,6 @@
 // @grant        unsafeWindow
 // @connect      localhost
 // @connect      127.0.0.1
-// @connect      get-shared.1g5lolddjght.us-east.codeengine.appdomain.cloud
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.js
 // @downloadURL  https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.js
 // ==/UserScript==
@@ -20,16 +19,31 @@
 
   const ENDPOINT = "http://localhost:8097/usy-idsmari-mddpg01/00361100020000000000000000000104/mddp/debug/jsonata";
   const TOOLBAR_BUTTON_ID = "jsonata-java-checker-run";
-  const PANEL_ID = "jsonata-java-checker-panel";
+  const TOOLBAR_TOGGLE_BUTTON_ID = "jsonata-java-checker-toggle-inline";
+  const INLINE_RESULT_PANEL_ID = "jsonata-java-checker-inline-result";
   const STYLE_ID = "jsonata-java-checker-style";
   const BRIDGE_SCRIPT_ID = "jsonata-java-checker-bridge";
   const BRIDGE_REQUEST_EVENT = "jsonata-java-checker:bridge-request";
   const BRIDGE_RESPONSE_EVENT = "jsonata-java-checker:bridge-response";
-  const SHARED_ENDPOINT = "https://get-shared.1g5lolddjght.us-east.codeengine.appdomain.cloud?id=";
-
+  const BOOTSTRAP_RETRY_LIMIT = 40;
+  const BOOTSTRAP_RETRY_DELAY = 500;
   const state = {
-    collapsed: true,
+    status: { label: "Idle", tone: "" },
+    inlineResultAvailable: false,
+    inlineResultVisible: false,
   };
+
+  function formatRunButtonLabel(statusLabel) {
+    return `Java check: ${statusLabel}`;
+  }
+
+  function formatToggleButtonLabel(isVisible) {
+    return isVisible ? "Hide Java" : "Show Java";
+  }
+
+  function shouldShowInlineResult(statusLabel) {
+    return statusLabel === "Mismatch" || statusLabel === "Error" || statusLabel === "Local error";
+  }
 
   function safeGetText(element) {
     return element?.textContent?.replace(/\s+/g, " ").trim() || "";
@@ -83,7 +97,6 @@
       (() => {
         const requestEvent = ${JSON.stringify(BRIDGE_REQUEST_EVENT)};
         const responseEvent = ${JSON.stringify(BRIDGE_RESPONSE_EVENT)};
-        const sharedEndpoint = ${JSON.stringify(SHARED_ENDPOINT)};
 
         function normalizeValue(value) {
           if (Array.isArray(value)) {
@@ -188,23 +201,6 @@
           return findStateNodeFromElementTree(rootElement);
         }
 
-        async function getSharedDocument() {
-          const pathParts = window.location.pathname.split("/").filter(Boolean);
-          const sharedId = pathParts[0];
-
-          if (!sharedId) {
-            return null;
-          }
-
-          const response = await fetch(sharedEndpoint + encodeURIComponent(sharedId));
-          const payload = await response.json();
-          if (!response.ok) {
-            throw new Error(payload?.error || "Failed to load shared document");
-          }
-
-          return payload;
-        }
-
         async function getExerciserValues() {
           const stateNode = getExerciserStateNode();
           if (stateNode?.state) {
@@ -219,20 +215,7 @@
             };
           }
 
-          const sharedDocument = await getSharedDocument();
-          if (sharedDocument) {
-            return {
-              source: "shared-document",
-              json: typeof sharedDocument.json === "undefined" ? "" : JSON.stringify(sharedDocument.json, null, 2),
-              jsonata: sharedDocument.jsonata || "",
-              bindings: sharedDocument.bindings || "",
-              result: sharedDocument.result || "",
-              panelStates: null,
-              externalLibsCount: Array.isArray(sharedDocument.externalLibs) ? sharedDocument.externalLibs.length : 0,
-            };
-          }
-
-          throw new Error("Exerciser state not found in React tree and shared document is unavailable.");
+          throw new Error("Exerciser state not found in React tree.");
         }
 
         function serializeModels() {
@@ -407,7 +390,7 @@
       location: window.location.href,
       userAgent: navigator.userAgent,
       userscript: {
-        panelPresent: Boolean(document.getElementById(PANEL_ID)),
+        panelPresent: Boolean(document.getElementById(INLINE_RESULT_PANEL_ID)),
         toolbarButtonPresent: Boolean(document.getElementById(TOOLBAR_BUTTON_ID)),
       },
       globals: {
@@ -424,66 +407,8 @@
     throw new Error("Direct Monaco access is unavailable in the userscript sandbox. Use the bridge instead.");
   }
 
-  function getSharedIdFromLocation() {
-    const pathParts = window.location.pathname.split("/").filter(Boolean);
-    return pathParts[0] || null;
-  }
-
-  function requestJson(url) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        method: "GET",
-        url,
-        onload: function (response) {
-          try {
-            resolve(JSON.parse(response.responseText));
-          } catch (error) {
-            reject(error);
-          }
-        },
-        onerror: function (error) {
-          reject(error);
-        },
-        ontimeout: function (error) {
-          reject(error);
-        },
-      });
-    });
-  }
-
-  async function getSharedDocumentFallback() {
-    const sharedId = getSharedIdFromLocation();
-
-    if (!sharedId) {
-      return null;
-    }
-
-    const payload = await requestJson(`${SHARED_ENDPOINT}${encodeURIComponent(sharedId)}`);
-
-    return {
-      input: typeof payload.json === "undefined" ? "" : JSON.stringify(payload.json, null, 2),
-      expression: payload.jsonata || "",
-      bindings: payload.bindings || "",
-      result: payload.result || "",
-      source: "shared-document-userscript",
-      panelStates: null,
-      externalLibsCount: Array.isArray(payload.externalLibs) ? payload.externalLibs.length : 0,
-      models: [],
-    };
-  }
-
   async function getEditorValues() {
-    let payload;
-
-    try {
-      payload = await requestBridge("get-editor-values");
-    } catch (bridgeError) {
-      const sharedFallback = await getSharedDocumentFallback().catch(() => null);
-      if (sharedFallback) {
-        return sharedFallback;
-      }
-      throw bridgeError;
-    }
+    const payload = await requestBridge("get-editor-values");
 
     return {
       input: (payload.input || "").replace(/&nbsp;/g, " ").trim(),
@@ -509,178 +434,160 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      #${PANEL_ID} {
-        position: fixed;
-        top: 84px;
-        right: 0;
-        width: min(440px, calc(100vw - 16px));
-        max-height: calc(100vh - 100px);
-        z-index: 10000;
-        display: flex;
-        flex-direction: column;
-        background: #fbfcfe;
-        color: #14212b;
-        border: 1px solid #cbd5df;
-        border-right: none;
-        border-radius: 18px 0 0 18px;
-        box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18);
-        overflow: hidden;
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-        font-family: "Segoe UI", Tahoma, sans-serif;
-      }
-
-      #${PANEL_ID}.is-collapsed {
-        transform: translateX(calc(100% - 190px));
-        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
-      }
-
-      #${PANEL_ID}.is-collapsed .jsonata-java-checker__body {
-        display: none;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding: 12px 14px;
-        background: linear-gradient(135deg, #12344d, #1b4d6b);
-        color: #f8fbff;
-        cursor: pointer;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__summary {
-        min-width: 0;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__title {
-        font-size: 11px;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        opacity: 0.8;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__headline {
-        margin-top: 3px;
-        font-size: 14px;
-        font-weight: 700;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__header-meta {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex-shrink: 0;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__badge {
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-size: 12px;
-        font-weight: 700;
-        line-height: 1;
-        background: rgba(255, 255, 255, 0.16);
-        color: #f8fbff;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__badge.is-success {
-        background: #d1fae5;
-        color: #065f46;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__badge.is-warning {
-        background: #fef3c7;
-        color: #92400e;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__badge.is-error {
-        background: #fee2e2;
-        color: #991b1b;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__badge.is-running {
-        background: #dbeafe;
-        color: #1d4ed8;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__toggle {
-        border: none;
-        background: rgba(255, 255, 255, 0.14);
-        color: inherit;
-        width: 30px;
-        height: 30px;
-        border-radius: 999px;
-        cursor: pointer;
-        font-size: 16px;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__body {
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
-        padding: 14px;
-        overflow: auto;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__toolbar {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__run,
       #${TOOLBAR_BUTTON_ID} {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         border: none;
         border-radius: 10px;
         background: #0f766e;
         color: #ffffff;
-        padding: 8px 12px;
         font-weight: 700;
         cursor: pointer;
+        line-height: 1;
+        white-space: nowrap;
+        box-sizing: border-box;
+        flex: 0 0 auto;
+        height: 28px;
+        padding: 0 12px;
+        margin: 0;
+        vertical-align: middle;
       }
 
-      #${PANEL_ID} .jsonata-java-checker__run:hover,
       #${TOOLBAR_BUTTON_ID}:hover {
         background: #0b5d57;
       }
 
-      #${PANEL_ID} .jsonata-java-checker__meta {
+      #${TOOLBAR_TOGGLE_BUTTON_ID} {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(15, 23, 42, 0.14);
+        border-radius: 10px;
+        background: rgba(248, 250, 252, 0.96);
+        color: #0f172a;
+        cursor: pointer;
+        box-sizing: border-box;
+        flex: 0 0 auto;
+        height: 28px;
+        padding: 0 10px;
+        margin: 0;
         font-size: 12px;
-        color: #51606d;
+        font-weight: 700;
+        white-space: nowrap;
       }
 
-      #${PANEL_ID} .jsonata-java-checker__card {
-        background: #f2f6fa;
+      #${TOOLBAR_TOGGLE_BUTTON_ID}:hover {
+        background: #ffffff;
+      }
+
+      #${TOOLBAR_TOGGLE_BUTTON_ID}[hidden] {
+        display: none;
+      }
+
+      #${TOOLBAR_BUTTON_ID}[data-status-tone="is-success"] {
+        background: #0f766e;
+      }
+
+      #${TOOLBAR_BUTTON_ID}[data-status-tone="is-warning"] {
+        background: #b45309;
+      }
+
+      #${TOOLBAR_BUTTON_ID}[data-status-tone="is-error"] {
+        background: #b91c1c;
+      }
+
+      #${TOOLBAR_BUTTON_ID}[data-status-tone="is-running"] {
+        background: #1d4ed8;
+      }
+
+      #banner4 {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        overflow: hidden;
+        min-height: 0;
+        max-height: 32px;
+      }
+
+      #banner4 > * {
+        flex: 0 0 auto;
+      }
+
+      #banner4 a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+      }
+
+      #banner4 img {
+        padding-top: 0;
+        display: block;
+      }
+
+      #${INLINE_RESULT_PANEL_ID} {
+        position: absolute;
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+        padding: 12px;
         border: 1px solid #d6e0e8;
         border-radius: 14px;
-        padding: 12px;
+        background: #f8fbfd;
+        background: rgba(248, 251, 253, 0.98);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        box-sizing: border-box;
+        width: auto;
+        max-width: none;
+        max-height: min(40%, 280px);
+        overflow: hidden;
+        z-index: 20;
       }
 
-      #${PANEL_ID} .jsonata-java-checker__card-title {
-        margin: 0 0 8px;
+      #${INLINE_RESULT_PANEL_ID}.is-hidden {
+        display: none;
+      }
+
+      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__inline-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__inline-title {
         font-size: 12px;
-        text-transform: uppercase;
+        font-weight: 700;
         letter-spacing: 0.08em;
+        text-transform: uppercase;
         color: #51606d;
       }
 
-      #${PANEL_ID} .jsonata-java-checker__message {
-        margin: 0;
-        font-size: 14px;
-        line-height: 1.5;
+      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__inline-status {
+        font-size: 12px;
+        font-weight: 700;
+        color: #334155;
       }
 
-      #${PANEL_ID} .jsonata-java-checker__pre {
+      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__message {
+        margin: 0 0 10px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #334155;
+      }
+
+      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__pre {
         margin: 0;
         padding: 12px;
         border-radius: 12px;
         background: #0f172a;
         color: #e2e8f0;
         overflow: auto;
+        max-height: 180px;
         font-size: 12px;
         line-height: 1.5;
         white-space: pre-wrap;
@@ -688,43 +595,12 @@
         font-family: Consolas, "Courier New", monospace;
       }
 
-      #${PANEL_ID} .jsonata-java-checker__comparison {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-        gap: 10px;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__comparison-item {
-        padding: 10px;
-        border-radius: 12px;
-        background: #ffffff;
-        border: 1px solid #d6e0e8;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__comparison-label {
-        display: block;
-        margin-bottom: 4px;
-        font-size: 11px;
-        color: #6b7280;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-      }
-
-      #${PANEL_ID} .jsonata-java-checker__comparison-value {
-        font-size: 13px;
-        font-weight: 700;
-      }
-
       @media (max-width: 700px) {
-        #${PANEL_ID} {
-          top: auto;
-          bottom: 12px;
-          width: calc(100vw - 12px);
-          max-height: 70vh;
-        }
-
-        #${PANEL_ID}.is-collapsed {
-          transform: translateX(calc(100% - 170px));
+        #${INLINE_RESULT_PANEL_ID} {
+          left: 8px;
+          right: 8px;
+          bottom: 8px;
+          max-height: min(44%, 240px);
         }
       }
     `;
@@ -759,165 +635,138 @@
     });
   }
 
-  function ensurePanel() {
-    let panel = document.getElementById(PANEL_ID);
+  function findResultPanelAnchor() {
+    const resultEditor = document.querySelector(".result-pane, [class*='result-pane'], [class*='resultPane'], [data-testid='result-pane']");
+    if (!resultEditor) {
+      const editors = Array.from(document.querySelectorAll(".monaco-editor"));
+      const lastEditor = editors[editors.length - 1];
+      if (lastEditor) {
+        const host = lastEditor.closest("[class*='pane'], [class*='panel'], [class*='split'], section, article") || lastEditor.parentElement;
+        return host ? { host, insertionPoint: lastEditor } : null;
+      }
+
+      return null;
+    }
+
+    const host = resultEditor.closest("[class*='pane'], [class*='panel'], [class*='split'], section, article") || resultEditor.parentElement;
+    return host ? { host, insertionPoint: resultEditor } : null;
+  }
+
+  function ensureInlineResultPanel() {
+    const anchor = findResultPanelAnchor();
+    if (!anchor?.host || !anchor?.insertionPoint) {
+      return null;
+    }
+
+    if (window.getComputedStyle(anchor.host).position === "static") {
+      anchor.host.style.position = "relative";
+    }
+
+    let panel = document.getElementById(INLINE_RESULT_PANEL_ID);
 
     if (!panel) {
       panel = document.createElement("section");
-      panel.id = PANEL_ID;
-      panel.classList.add("is-collapsed");
+      panel.id = INLINE_RESULT_PANEL_ID;
+      panel.className = "is-hidden";
       panel.innerHTML = `
-        <div class="jsonata-java-checker__header">
-          <div class="jsonata-java-checker__summary">
-            <div class="jsonata-java-checker__title">Java Checker</div>
-            <div class="jsonata-java-checker__headline">Zatím nezkontrolováno</div>
-          </div>
-          <div class="jsonata-java-checker__header-meta">
-            <span class="jsonata-java-checker__badge">Idle</span>
-            <button type="button" class="jsonata-java-checker__toggle" aria-label="Toggle panel">›</button>
-          </div>
+        <div class="jsonata-java-checker__inline-header">
+          <div class="jsonata-java-checker__inline-title">Java backend result</div>
+          <div class="jsonata-java-checker__inline-status" data-role="inline-status">Idle</div>
         </div>
-        <div class="jsonata-java-checker__body">
-          <div class="jsonata-java-checker__toolbar">
-            <button type="button" class="jsonata-java-checker__run">Run Java check</button>
-            <button type="button" class="jsonata-java-checker__diagnostics">Dump diagnostics</button>
-            <div class="jsonata-java-checker__meta">Porovnání používá normalizovaný JSON bez ohledu na pořadí klíčů.</div>
-          </div>
-          <div class="jsonata-java-checker__card">
-            <h3 class="jsonata-java-checker__card-title">Shrnutí</h3>
-            <p class="jsonata-java-checker__message">Spusť kontrolu a v hlavičce panelu uvidíš jen stav porovnání. Detail výsledku může zůstat schovaný.</p>
-          </div>
-          <div class="jsonata-java-checker__comparison">
-            <div class="jsonata-java-checker__comparison-item">
-              <span class="jsonata-java-checker__comparison-label">Lokální výsledek</span>
-              <span class="jsonata-java-checker__comparison-value" data-role="local-status">Čeká</span>
-            </div>
-            <div class="jsonata-java-checker__comparison-item">
-              <span class="jsonata-java-checker__comparison-label">Java backend</span>
-              <span class="jsonata-java-checker__comparison-value" data-role="remote-status">Čeká</span>
-            </div>
-            <div class="jsonata-java-checker__comparison-item">
-              <span class="jsonata-java-checker__comparison-label">Poslední běh</span>
-              <span class="jsonata-java-checker__comparison-value" data-role="timestamp">-</span>
-            </div>
-          </div>
-          <div class="jsonata-java-checker__card">
-            <h3 class="jsonata-java-checker__card-title">Java výstup</h3>
-            <pre class="jsonata-java-checker__pre" data-role="output">Klikni na "Run Java check".</pre>
-          </div>
-        </div>
+        <p class="jsonata-java-checker__message" data-role="inline-message">Java detail se ukáže při neshodě nebo chybě.</p>
+        <pre class="jsonata-java-checker__pre" data-role="inline-output"></pre>
       `;
-
-      const header = panel.querySelector(".jsonata-java-checker__header");
-      const toggle = panel.querySelector(".jsonata-java-checker__toggle");
-      const runButton = panel.querySelector(".jsonata-java-checker__run");
-      const diagnosticsButton = panel.querySelector(".jsonata-java-checker__diagnostics");
-
-      header.addEventListener("click", (event) => {
-        if (event.target === runButton) {
-          return;
-        }
-
-        state.collapsed = !state.collapsed;
-        renderCollapsedState();
-      });
-
-      toggle.addEventListener("click", (event) => {
-        event.stopPropagation();
-        state.collapsed = !state.collapsed;
-        renderCollapsedState();
-      });
-
-      runButton.addEventListener("click", () => {
-        runCheck();
-      });
-
-      diagnosticsButton.addEventListener("click", () => {
-        dumpDiagnostics();
-      });
-
-      document.body.append(panel);
     }
 
-    renderCollapsedState();
+    if (panel.parentElement !== anchor.host) {
+      panel.remove();
+      anchor.host.append(panel);
+    }
+
     return panel;
   }
 
-  function renderCollapsedState() {
-    const panel = document.getElementById(PANEL_ID);
+  function setInlineResultVisibility(visible, { scrollIntoView = false } = {}) {
+    state.inlineResultVisible = Boolean(visible) && state.inlineResultAvailable;
 
-    if (!panel) {
+    const toggleButton = document.getElementById(TOOLBAR_TOGGLE_BUTTON_ID);
+    if (toggleButton) {
+      toggleButton.hidden = !state.inlineResultAvailable;
+      toggleButton.textContent = formatToggleButtonLabel(state.inlineResultVisible);
+      toggleButton.title = state.inlineResultVisible ? "Skrýt detail Java výsledku" : "Zobrazit detail Java výsledku";
+    }
+
+    const inlinePanel = ensureInlineResultPanel();
+    if (!inlinePanel) {
       return;
     }
 
-    panel.classList.toggle("is-collapsed", state.collapsed);
-
-    const toggle = panel.querySelector(".jsonata-java-checker__toggle");
-    toggle.textContent = state.collapsed ? "‹" : "›";
-    toggle.setAttribute("aria-label", state.collapsed ? "Expand panel" : "Collapse panel");
+    inlinePanel.classList.toggle("is-hidden", !state.inlineResultVisible);
+    if (state.inlineResultVisible && scrollIntoView) {
+      inlinePanel.querySelector('[data-role="inline-output"]')?.scrollTo({ top: 0, behavior: "smooth" });
+    }
   }
 
   function updatePanel(status, headline, message, output, details = {}) {
-    const panel = ensurePanel();
-    const badge = panel.querySelector(".jsonata-java-checker__badge");
-    const headlineNode = panel.querySelector(".jsonata-java-checker__headline");
-    const messageNode = panel.querySelector(".jsonata-java-checker__message");
-    const outputNode = panel.querySelector('[data-role="output"]');
-    const localStatusNode = panel.querySelector('[data-role="local-status"]');
-    const remoteStatusNode = panel.querySelector('[data-role="remote-status"]');
-    const timestampNode = panel.querySelector('[data-role="timestamp"]');
+    state.status = status;
+    state.inlineResultAvailable = shouldShowInlineResult(status.label);
 
-    badge.className = "jsonata-java-checker__badge";
-    badge.textContent = status.label;
-
-    if (status.tone) {
-      badge.classList.add(status.tone);
+    const toolbarButton = document.getElementById(TOOLBAR_BUTTON_ID);
+    if (toolbarButton) {
+      toolbarButton.textContent = formatRunButtonLabel(status.label);
+      toolbarButton.dataset.statusTone = status.tone || "";
+      toolbarButton.title = headline;
     }
 
-    headlineNode.textContent = headline;
-    messageNode.textContent = message;
-    outputNode.textContent = output;
-    localStatusNode.textContent = details.localStatus || "-";
-    remoteStatusNode.textContent = details.remoteStatus || "-";
-    timestampNode.textContent = details.timestamp || "-";
+    const inlinePanel = ensureInlineResultPanel();
+    if (!inlinePanel) {
+      return;
+    }
+
+    const inlineStatus = inlinePanel.querySelector('[data-role="inline-status"]');
+    const inlineMessage = inlinePanel.querySelector('[data-role="inline-message"]');
+    const inlineOutput = inlinePanel.querySelector('[data-role="inline-output"]');
+
+    inlineStatus.textContent = status.label;
+    inlineMessage.textContent = `${headline}${details.timestamp ? ` • ${details.timestamp}` : ""}${message ? ` • ${message}` : ""}`;
+    inlineOutput.textContent = output;
+    setInlineResultVisibility(details.openInline === true, { scrollIntoView: details.openInline === true });
   }
 
   function ensureToolbarButton() {
     const rightMenu = document.getElementById("banner4");
 
-    if (!rightMenu || document.getElementById(TOOLBAR_BUTTON_ID)) {
+    if (!rightMenu) {
       return;
     }
 
-    const button = document.createElement("button");
-    button.id = TOOLBAR_BUTTON_ID;
-    button.type = "button";
-    button.textContent = "Run Java check";
-    button.addEventListener("click", () => {
-      runCheck();
-    });
-    rightMenu.prepend(button);
-  }
+    let toggleButton = document.getElementById(TOOLBAR_TOGGLE_BUTTON_ID);
+    if (!toggleButton) {
+      toggleButton = document.createElement("button");
+      toggleButton.id = TOOLBAR_TOGGLE_BUTTON_ID;
+      toggleButton.type = "button";
+      toggleButton.hidden = true;
+      toggleButton.textContent = formatToggleButtonLabel(false);
+      toggleButton.addEventListener("click", () => {
+        setInlineResultVisibility(!state.inlineResultVisible, { scrollIntoView: !state.inlineResultVisible });
+      });
+      rightMenu.prepend(toggleButton);
+    }
 
-  async function dumpDiagnostics() {
-    const diagnostics = await collectDiagnostics();
-    const prettyDiagnostics = JSON.stringify(diagnostics, null, 2);
+    let button = document.getElementById(TOOLBAR_BUTTON_ID);
+    if (!button) {
+      button = document.createElement("button");
+      button.id = TOOLBAR_BUTTON_ID;
+      button.type = "button";
+      button.addEventListener("click", () => {
+        runCheck();
+      });
+      rightMenu.prepend(button);
+    }
 
-    updatePanel(
-      { label: "Info" },
-      "Diagnostika připravena",
-      "Zkopíruj výstup níže a pošli mi ho. Je v něm stav Monaco API, modely a relevantní DOM prvky stránky.",
-      prettyDiagnostics,
-      {
-        localStatus: diagnostics.monaco.available ? `Monaco ${diagnostics.monaco.modelCount} modelů` : "Monaco nedostupné",
-        remoteStatus: "Diagnostika",
-        timestamp: new Date().toLocaleTimeString("cs-CZ"),
-      },
-    );
-
-    state.collapsed = false;
-    renderCollapsedState();
-    console.log("JSONATA JAVA Checker diagnostics", diagnostics);
+    button.textContent = formatRunButtonLabel(state.status.label);
+    button.dataset.statusTone = state.status.tone || "";
+    setInlineResultVisibility(state.inlineResultVisible);
   }
 
   async function runCheck() {
@@ -932,6 +781,7 @@
         localStatus: "Načítám",
         remoteStatus: "Volám backend",
         timestamp,
+        openInline: false,
       },
     );
 
@@ -960,10 +810,9 @@
             localStatus: "Nevalidní JSON",
             remoteStatus: "Nepuštěno",
             timestamp,
+            openInline: true,
           },
         );
-        state.collapsed = false;
-        renderCollapsedState();
         return;
       }
 
@@ -981,6 +830,7 @@
           localStatus: `Validní JSON (${editorValues.source})`,
           remoteStatus: isMatch ? "Shoda" : "Neshoda",
           timestamp,
+          openInline: !isMatch,
         },
       );
     } catch (error) {
@@ -993,25 +843,39 @@
           localStatus: "Neznámé",
           remoteStatus: "Chyba",
           timestamp,
+          openInline: true,
         },
       );
-      state.collapsed = false;
-      renderCollapsedState();
       console.error(error);
     }
   }
 
   function initialize() {
     ensureStyles();
-    ensurePanel();
     ensureToolbarButton();
+    ensureInlineResultPanel();
+  }
+
+  function startBootstrapRetries() {
+    let attempt = 0;
+
+    const timerId = window.setInterval(() => {
+      attempt += 1;
+
+      ensureToolbarButton();
+      ensureInlineResultPanel();
+
+      const toolbarReady = Boolean(document.getElementById(TOOLBAR_BUTTON_ID));
+      const toggleReady = Boolean(document.getElementById(TOOLBAR_TOGGLE_BUTTON_ID));
+      const bannerReady = Boolean(document.getElementById("banner4"));
+      const anchorReady = Boolean(findResultPanelAnchor());
+
+      if ((bannerReady && toolbarReady && toggleReady && anchorReady) || attempt >= BOOTSTRAP_RETRY_LIMIT) {
+        window.clearInterval(timerId);
+      }
+    }, BOOTSTRAP_RETRY_DELAY);
   }
 
   initialize();
-
-  const observer = new MutationObserver(() => {
-    ensureToolbarButton();
-  });
-
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  startBootstrapRetries();
 })();
