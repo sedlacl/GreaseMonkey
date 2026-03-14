@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JSONATA JAVA Checker
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.19
+// @version      0.25
 // @description  JSONata kontrola přes lokální Java backend
 // @author       Lukáš Sedláček
 // @match        https://try.jsonata.org/*
@@ -529,78 +529,56 @@
 
       #${INLINE_RESULT_PANEL_ID} {
         position: absolute;
-        left: 12px;
-        right: 12px;
-        bottom: 12px;
-        padding: 12px;
-        border: 1px solid #d6e0e8;
-        border-radius: 14px;
-        background: #f8fbfd;
-        background: rgba(248, 251, 253, 0.98);
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
-        box-shadow: 0 12px 28px rgba(15, 23, 42, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        left: 0;
+        right: 0;
+        top: 50%;
+        bottom: 0;
+        padding: 0;
+        border: 0;
+        border-top: 1px solid #d6e0e8;
+        border-radius: 0;
+        background: #f3f3f3;
+        box-shadow: none;
         box-sizing: border-box;
         width: auto;
         max-width: none;
-        max-height: min(40%, 280px);
         overflow: hidden;
-        z-index: 20;
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
       }
 
       #${INLINE_RESULT_PANEL_ID}.is-hidden {
         display: none;
       }
 
-      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__inline-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        margin-bottom: 10px;
-      }
-
-      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__inline-title {
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #51606d;
-      }
-
-      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__inline-status {
-        font-size: 12px;
-        font-weight: 700;
-        color: #334155;
-      }
-
-      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__message {
-        margin: 0 0 10px;
-        font-size: 13px;
-        line-height: 1.5;
-        color: #334155;
-      }
-
-      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__pre {
+      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__editor-fallback {
         margin: 0;
-        padding: 12px;
-        border-radius: 12px;
-        background: #0f172a;
-        color: #e2e8f0;
+        padding: 0 6px 6px 26px;
+        border-radius: 0;
+        background: #f3f3f3;
+        color: #7f1d1d;
         overflow: auto;
-        max-height: 180px;
-        font-size: 12px;
-        line-height: 1.5;
-        white-space: pre-wrap;
-        word-break: break-word;
+        flex: 1 1 auto;
+        min-height: 0;
+        font-size: 14px;
+        line-height: 19px;
+        white-space: pre;
+        word-break: normal;
         font-family: Consolas, "Courier New", monospace;
+        font-weight: normal;
+      }
+
+      #${INLINE_RESULT_PANEL_ID} .jsonata-java-checker__editor-fallback.is-hidden {
+        display: none;
       }
 
       @media (max-width: 700px) {
         #${INLINE_RESULT_PANEL_ID} {
-          left: 8px;
-          right: 8px;
-          bottom: 8px;
-          max-height: min(44%, 240px);
+          left: 0;
+          right: 0;
+          bottom: 0;
         }
       }
     `;
@@ -635,31 +613,69 @@
     });
   }
 
+  function findEditorHost(editor) {
+    if (!editor) {
+      return null;
+    }
+
+    return editor.closest("[class*='pane'], [class*='panel'], [class*='split'], section, article") || editor.parentElement;
+  }
+
   function findResultPanelAnchor() {
     const resultEditor = document.querySelector(".result-pane, [class*='result-pane'], [class*='resultPane'], [data-testid='result-pane']");
     if (!resultEditor) {
       const editors = Array.from(document.querySelectorAll(".monaco-editor"));
       const lastEditor = editors[editors.length - 1];
       if (lastEditor) {
-        const host = lastEditor.closest("[class*='pane'], [class*='panel'], [class*='split'], section, article") || lastEditor.parentElement;
+        const host = findEditorHost(lastEditor);
         return host ? { host, insertionPoint: lastEditor } : null;
       }
 
       return null;
     }
 
-    const host = resultEditor.closest("[class*='pane'], [class*='panel'], [class*='split'], section, article") || resultEditor.parentElement;
+    const host = findEditorHost(resultEditor);
     return host ? { host, insertionPoint: resultEditor } : null;
   }
 
-  function ensureInlineResultPanel() {
-    const anchor = findResultPanelAnchor();
-    if (!anchor?.host || !anchor?.insertionPoint) {
+  function findJavaPanelAnchor() {
+    const editors = Array.from(document.querySelectorAll(".monaco-editor"));
+    const firstEditor = editors[0];
+    if (!firstEditor) {
       return null;
     }
 
-    if (window.getComputedStyle(anchor.host).position === "static") {
-      anchor.host.style.position = "relative";
+    const host = findEditorHost(firstEditor);
+    return host ? { host, insertionPoint: firstEditor } : null;
+  }
+
+  function syncInlineResultPanelLayout(panel, javaAnchor, resultAnchor) {
+    if (!panel || !javaAnchor?.host) {
+      return;
+    }
+
+    const hostRect = javaAnchor.host.getBoundingClientRect();
+    const resultRect = resultAnchor?.insertionPoint?.getBoundingClientRect?.();
+    let topOffset = 0;
+
+    if (resultRect && hostRect.height > 0) {
+      topOffset = Math.round(resultRect.top - hostRect.top);
+    }
+
+    const minTop = 0;
+    const maxTop = Math.max(minTop, Math.round(hostRect.height - 80));
+    const clampedTop = Math.max(minTop, Math.min(topOffset, maxTop));
+    panel.style.top = `${clampedTop}px`;
+  }
+
+  function ensureInlineResultPanel() {
+    const javaAnchor = findJavaPanelAnchor();
+    if (!javaAnchor?.host || !javaAnchor?.insertionPoint) {
+      return null;
+    }
+
+    if (window.getComputedStyle(javaAnchor.host).position === "static") {
+      javaAnchor.host.style.position = "relative";
     }
 
     let panel = document.getElementById(INLINE_RESULT_PANEL_ID);
@@ -669,19 +685,16 @@
       panel.id = INLINE_RESULT_PANEL_ID;
       panel.className = "is-hidden";
       panel.innerHTML = `
-        <div class="jsonata-java-checker__inline-header">
-          <div class="jsonata-java-checker__inline-title">Java backend result</div>
-          <div class="jsonata-java-checker__inline-status" data-role="inline-status">Idle</div>
-        </div>
-        <p class="jsonata-java-checker__message" data-role="inline-message">Java detail se ukáže při neshodě nebo chybě.</p>
-        <pre class="jsonata-java-checker__pre" data-role="inline-output"></pre>
+        <pre class="jsonata-java-checker__editor-fallback is-hidden" data-role="inline-output-fallback"></pre>
       `;
     }
 
-    if (panel.parentElement !== anchor.host) {
+    if (panel.parentElement !== javaAnchor.host) {
       panel.remove();
-      anchor.host.append(panel);
+      javaAnchor.host.append(panel);
     }
+
+    syncInlineResultPanelLayout(panel, javaAnchor, findResultPanelAnchor());
 
     return panel;
   }
@@ -702,9 +715,6 @@
     }
 
     inlinePanel.classList.toggle("is-hidden", !state.inlineResultVisible);
-    if (state.inlineResultVisible && scrollIntoView) {
-      inlinePanel.querySelector('[data-role="inline-output"]')?.scrollTo({ top: 0, behavior: "smooth" });
-    }
   }
 
   function updatePanel(status, headline, message, output, details = {}) {
@@ -723,14 +733,14 @@
       return;
     }
 
-    const inlineStatus = inlinePanel.querySelector('[data-role="inline-status"]');
-    const inlineMessage = inlinePanel.querySelector('[data-role="inline-message"]');
-    const inlineOutput = inlinePanel.querySelector('[data-role="inline-output"]');
+    const inlineOutputFallback = inlinePanel.querySelector('[data-role="inline-output-fallback"]');
 
-    inlineStatus.textContent = status.label;
-    inlineMessage.textContent = `${headline}${details.timestamp ? ` • ${details.timestamp}` : ""}${message ? ` • ${message}` : ""}`;
-    inlineOutput.textContent = output;
     setInlineResultVisibility(details.openInline === true, { scrollIntoView: details.openInline === true });
+
+    inlineOutputFallback.textContent = output;
+    inlineOutputFallback.classList.remove("is-hidden");
+    inlineOutputFallback.scrollTop = 0;
+    inlineOutputFallback.scrollLeft = 0;
   }
 
   function ensureToolbarButton() {
@@ -868,7 +878,7 @@
       const toolbarReady = Boolean(document.getElementById(TOOLBAR_BUTTON_ID));
       const toggleReady = Boolean(document.getElementById(TOOLBAR_TOGGLE_BUTTON_ID));
       const bannerReady = Boolean(document.getElementById("banner4"));
-      const anchorReady = Boolean(findResultPanelAnchor());
+      const anchorReady = Boolean(findResultPanelAnchor()) && Boolean(findJavaPanelAnchor());
 
       if ((bannerReady && toolbarReady && toggleReady && anchorReady) || attempt >= BOOTSTRAP_RETRY_LIMIT) {
         window.clearInterval(timerId);
