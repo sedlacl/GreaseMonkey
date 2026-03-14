@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JSONATA JAVA Checker
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.25
+// @version      0.28
 // @description  JSONata kontrola přes lokální Java backend
 // @author       Lukáš Sedláček
 // @match        https://try.jsonata.org/*
@@ -31,6 +31,7 @@
     status: { label: "Idle", tone: "" },
     inlineResultAvailable: false,
     inlineResultVisible: false,
+    inlineResultPreference: false,
   };
 
   function formatRunButtonLabel(statusLabel) {
@@ -42,7 +43,7 @@
   }
 
   function shouldShowInlineResult(statusLabel) {
-    return statusLabel === "Mismatch" || statusLabel === "Error" || statusLabel === "Local error";
+    return statusLabel === "OK" || statusLabel === "Mismatch" || statusLabel === "Error" || statusLabel === "Local error";
   }
 
   function safeGetText(element) {
@@ -75,11 +76,8 @@
   }
 
   function stringifyForDisplay(value) {
-    if (typeof value === "string") {
-      return value;
-    }
-
-    return JSON.stringify(value, null, 2);
+    const serialized = JSON.stringify(value, null, 2);
+    return typeof serialized === "string" ? serialized : String(value);
   }
 
   function parseJson(text) {
@@ -700,7 +698,8 @@
   }
 
   function setInlineResultVisibility(visible, { scrollIntoView = false } = {}) {
-    state.inlineResultVisible = Boolean(visible) && state.inlineResultAvailable;
+    state.inlineResultPreference = Boolean(visible);
+    state.inlineResultVisible = state.inlineResultPreference && state.inlineResultAvailable;
 
     const toggleButton = document.getElementById(TOOLBAR_TOGGLE_BUTTON_ID);
     if (toggleButton) {
@@ -735,7 +734,19 @@
 
     const inlineOutputFallback = inlinePanel.querySelector('[data-role="inline-output-fallback"]');
 
-    setInlineResultVisibility(details.openInline === true, { scrollIntoView: details.openInline === true });
+    if (typeof details.openInline === "boolean") {
+      setInlineResultVisibility(details.openInline, { scrollIntoView: details.openInline === true });
+    } else {
+      state.inlineResultVisible = state.inlineResultPreference && state.inlineResultAvailable;
+      inlinePanel.classList.toggle("is-hidden", !state.inlineResultVisible);
+
+      const toggleButton = document.getElementById(TOOLBAR_TOGGLE_BUTTON_ID);
+      if (toggleButton) {
+        toggleButton.hidden = !state.inlineResultAvailable;
+        toggleButton.textContent = formatToggleButtonLabel(state.inlineResultVisible);
+        toggleButton.title = state.inlineResultVisible ? "Skrýt detail Java výsledku" : "Zobrazit detail Java výsledku";
+      }
+    }
 
     inlineOutputFallback.textContent = output;
     inlineOutputFallback.classList.remove("is-hidden");
@@ -791,7 +802,6 @@
         localStatus: "Načítám",
         remoteStatus: "Volám backend",
         timestamp,
-        openInline: false,
       },
     );
 
@@ -840,7 +850,6 @@
           localStatus: `Validní JSON (${editorValues.source})`,
           remoteStatus: isMatch ? "Shoda" : "Neshoda",
           timestamp,
-          openInline: !isMatch,
         },
       );
     } catch (error) {
