@@ -17,6 +17,7 @@ Go to TamperMonkey addon
 | --- | --- |
 | Copy uuBml as PNG to clipboard | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/uubml-copy-as-png.js] |
 | Autoclose authentication page | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/close-auth-page.js] |
+| JSONATA JAVA Checker | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.js] |
 
 ## Changelog
 
