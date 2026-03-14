@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JSONATA JAVA Checker
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.28
+// @version      0.31
 // @description  JSONata kontrola přes lokální Java backend
 // @author       Lukáš Sedláček
 // @match        https://try.jsonata.org/*
@@ -17,10 +17,13 @@
 (function () {
   "use strict";
 
-  const ENDPOINT = "http://localhost:8097/usy-idsmari-mddpg01/00361100020000000000000000000104/mddp/debug/jsonata";
+  const DEFAULT_ENDPOINT = "http://localhost:8097/usy-idsmari-mddpg01/00361100020000000000000000000104/mddp/debug/jsonata";
+  const ENDPOINT_STORAGE_KEY = "jsonata-java-checker:endpoint";
   const TOOLBAR_BUTTON_ID = "jsonata-java-checker-run";
   const TOOLBAR_TOGGLE_BUTTON_ID = "jsonata-java-checker-toggle-inline";
+  const TOOLBAR_SETTINGS_BUTTON_ID = "jsonata-java-checker-settings";
   const INLINE_RESULT_PANEL_ID = "jsonata-java-checker-inline-result";
+  const SETTINGS_DIALOG_ID = "jsonata-java-checker-settings-dialog";
   const STYLE_ID = "jsonata-java-checker-style";
   const BRIDGE_SCRIPT_ID = "jsonata-java-checker-bridge";
   const BRIDGE_REQUEST_EVENT = "jsonata-java-checker:bridge-request";
@@ -82,6 +85,33 @@
 
   function parseJson(text) {
     return JSON.parse(text);
+  }
+
+  function getEndpoint() {
+    try {
+      const storedValue = localStorage.getItem(ENDPOINT_STORAGE_KEY);
+      return storedValue && storedValue.trim() ? storedValue.trim() : DEFAULT_ENDPOINT;
+    } catch (error) {
+      return DEFAULT_ENDPOINT;
+    }
+  }
+
+  function saveEndpoint(value) {
+    const trimmedValue = String(value || "").trim();
+
+    try {
+      if (!trimmedValue || trimmedValue === DEFAULT_ENDPOINT) {
+        localStorage.removeItem(ENDPOINT_STORAGE_KEY);
+      } else {
+        localStorage.setItem(ENDPOINT_STORAGE_KEY, trimmedValue);
+      }
+    } catch (error) {
+      console.error("Unable to persist endpoint setting.", error);
+    }
+  }
+
+  function getSettingsButtonTitle() {
+    return `Nastavit URL Java backendu. Aktuální URL: ${getEndpoint()}`;
   }
 
   function ensureBridge() {
@@ -456,7 +486,8 @@
         background: #0b5d57;
       }
 
-      #${TOOLBAR_TOGGLE_BUTTON_ID} {
+      #${TOOLBAR_TOGGLE_BUTTON_ID},
+      #${TOOLBAR_SETTINGS_BUTTON_ID} {
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -475,12 +506,21 @@
         white-space: nowrap;
       }
 
-      #${TOOLBAR_TOGGLE_BUTTON_ID}:hover {
+      #${TOOLBAR_TOGGLE_BUTTON_ID}:hover,
+      #${TOOLBAR_SETTINGS_BUTTON_ID}:hover {
         background: #ffffff;
       }
 
       #${TOOLBAR_TOGGLE_BUTTON_ID}[hidden] {
         display: none;
+      }
+
+      #${TOOLBAR_SETTINGS_BUTTON_ID} {
+        width: 28px;
+        padding: 0;
+        border-radius: 999px;
+        font-size: 15px;
+        line-height: 1;
       }
 
       #${TOOLBAR_BUTTON_ID}[data-status-tone="is-success"] {
@@ -572,11 +612,101 @@
         display: none;
       }
 
+      #${SETTINGS_DIALOG_ID} {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.35);
+        box-sizing: border-box;
+      }
+
+      #${SETTINGS_DIALOG_ID}.is-open {
+        display: flex;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-panel {
+        width: min(680px, 100%);
+        padding: 20px;
+        border-radius: 14px;
+        background: #ffffff;
+        box-shadow: 0 20px 50px rgba(15, 23, 42, 0.24);
+        box-sizing: border-box;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-heading {
+        margin: 0 0 8px;
+        color: #0f172a;
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-copy {
+        margin: 0 0 14px;
+        color: #334155;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        box-sizing: border-box;
+        font: inherit;
+        color: #0f172a;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-button {
+        border: 1px solid rgba(15, 23, 42, 0.14);
+        border-radius: 10px;
+        background: rgba(248, 250, 252, 0.96);
+        color: #0f172a;
+        cursor: pointer;
+        height: 34px;
+        padding: 0 12px;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-button:hover {
+        background: #ffffff;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-button.is-primary {
+        border-color: #0f766e;
+        background: #0f766e;
+        color: #ffffff;
+      }
+
+      #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-button.is-primary:hover {
+        background: #0b5d57;
+      }
+
       @media (max-width: 700px) {
         #${INLINE_RESULT_PANEL_ID} {
           left: 0;
           right: 0;
           bottom: 0;
+        }
+
+        #${SETTINGS_DIALOG_ID} {
+          padding: 12px;
+        }
+
+        #${SETTINGS_DIALOG_ID} .jsonata-java-checker__settings-panel {
+          padding: 16px;
         }
       }
     `;
@@ -697,6 +827,91 @@
     return panel;
   }
 
+  function closeSettingsDialog() {
+    const dialog = document.getElementById(SETTINGS_DIALOG_ID);
+    if (!dialog) {
+      return;
+    }
+
+    dialog.classList.remove("is-open");
+  }
+
+  function ensureSettingsDialog() {
+    let dialog = document.getElementById(SETTINGS_DIALOG_ID);
+    if (dialog) {
+      return dialog;
+    }
+
+    dialog = document.createElement("div");
+    dialog.id = SETTINGS_DIALOG_ID;
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.innerHTML = `
+      <div class="jsonata-java-checker__settings-panel" data-role="settings-panel">
+        <h2 class="jsonata-java-checker__settings-heading">Java Checker Settings</h2>
+        <p class="jsonata-java-checker__settings-copy">Změněná URL se uloží do localStorage a použije se při dalším Java checku. Prázdná hodnota obnoví defaultní URL.</p>
+        <input class="jsonata-java-checker__settings-input" data-role="settings-endpoint" type="url" spellcheck="false" />
+        <div class="jsonata-java-checker__settings-actions">
+          <button type="button" class="jsonata-java-checker__settings-button" data-role="settings-reset">Default</button>
+          <button type="button" class="jsonata-java-checker__settings-button" data-role="settings-cancel">Cancel</button>
+          <button type="button" class="jsonata-java-checker__settings-button is-primary" data-role="settings-save">Save</button>
+        </div>
+      </div>
+    `;
+
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog) {
+        closeSettingsDialog();
+      }
+    });
+
+    dialog.querySelector('[data-role="settings-cancel"]').addEventListener("click", () => {
+      closeSettingsDialog();
+    });
+
+    dialog.querySelector('[data-role="settings-reset"]').addEventListener("click", () => {
+      const input = dialog.querySelector('[data-role="settings-endpoint"]');
+      input.value = DEFAULT_ENDPOINT;
+      input.focus();
+      input.select();
+    });
+
+    dialog.querySelector('[data-role="settings-save"]').addEventListener("click", () => {
+      const input = dialog.querySelector('[data-role="settings-endpoint"]');
+      saveEndpoint(input.value);
+      closeSettingsDialog();
+
+      const settingsButton = document.getElementById(TOOLBAR_SETTINGS_BUTTON_ID);
+      if (settingsButton) {
+        settingsButton.title = getSettingsButtonTitle();
+      }
+    });
+
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSettingsDialog();
+      }
+
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        dialog.querySelector('[data-role="settings-save"]').click();
+      }
+    });
+
+    document.body.append(dialog);
+    return dialog;
+  }
+
+  function openSettingsDialog() {
+    const dialog = ensureSettingsDialog();
+    const input = dialog.querySelector('[data-role="settings-endpoint"]');
+    input.value = getEndpoint();
+    dialog.classList.add("is-open");
+    input.focus();
+    input.select();
+  }
+
   function setInlineResultVisibility(visible, { scrollIntoView = false } = {}) {
     state.inlineResultPreference = Boolean(visible);
     state.inlineResultVisible = state.inlineResultPreference && state.inlineResultAvailable;
@@ -774,6 +989,19 @@
       rightMenu.prepend(toggleButton);
     }
 
+    let settingsButton = document.getElementById(TOOLBAR_SETTINGS_BUTTON_ID);
+    if (!settingsButton) {
+      settingsButton = document.createElement("button");
+      settingsButton.id = TOOLBAR_SETTINGS_BUTTON_ID;
+      settingsButton.type = "button";
+      settingsButton.textContent = "⚙";
+      settingsButton.setAttribute("aria-label", "Settings");
+      settingsButton.addEventListener("click", () => {
+        openSettingsDialog();
+      });
+      rightMenu.append(settingsButton);
+    }
+
     let button = document.getElementById(TOOLBAR_BUTTON_ID);
     if (!button) {
       button = document.createElement("button");
@@ -787,6 +1015,7 @@
 
     button.textContent = formatRunButtonLabel(state.status.label);
     button.dataset.statusTone = state.status.tone || "";
+    settingsButton.title = getSettingsButtonTitle();
     setInlineResultVisibility(state.inlineResultVisible);
   }
 
@@ -836,7 +1065,7 @@
         return;
       }
 
-      const remoteResult = await postData(ENDPOINT, dtoIn);
+      const remoteResult = await postData(getEndpoint(), dtoIn);
       const isMatch = compareValues(localResult, remoteResult);
 
       updatePanel(
@@ -872,6 +1101,7 @@
   function initialize() {
     ensureStyles();
     ensureToolbarButton();
+    ensureSettingsDialog();
     ensureInlineResultPanel();
   }
 
