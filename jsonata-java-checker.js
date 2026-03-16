@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JSONATA JAVA Checker
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.31
+// @version      0.32
 // @description  JSONata kontrola přes lokální Java backend
 // @author       Lukáš Sedláček
 // @match        https://try.jsonata.org/*
@@ -1046,18 +1046,25 @@
       };
 
       let localResult;
+      let localParseError = null;
 
       try {
         localResult = parseJson(localResultText);
       } catch (error) {
+        localParseError = error;
+      }
+
+      const remoteResult = await postData(getEndpoint(), dtoIn);
+
+      if (localParseError) {
         updatePanel(
           { label: "Local error", tone: "is-error" },
           "Lokální výsledek nejde přečíst",
-          `JSONata Exerciser nevrátil validní JSON: ${error.message}`,
-          localResultText || "Prázdný lokální výstup",
+          `JSONata Exerciser nevrátil validní JSON: ${localParseError.message}. Java backend byl přesto zavolán a jeho odpověď je níže.`,
+          stringifyForDisplay(remoteResult),
           {
             localStatus: "Nevalidní JSON",
-            remoteStatus: "Nepuštěno",
+            remoteStatus: "Odpověď načtena",
             timestamp,
             openInline: true,
           },
@@ -1065,7 +1072,6 @@
         return;
       }
 
-      const remoteResult = await postData(getEndpoint(), dtoIn);
       const isMatch = compareValues(localResult, remoteResult);
 
       updatePanel(
