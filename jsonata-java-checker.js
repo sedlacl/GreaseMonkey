@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JSONATA JAVA Checker
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.32
+// @version      0.33
 // @description  JSONata kontrola přes lokální Java backend
 // @author       Lukáš Sedláček
 // @match        https://try.jsonata.org/*
@@ -35,6 +35,8 @@
     inlineResultAvailable: false,
     inlineResultVisible: false,
     inlineResultPreference: false,
+    layoutListenersRegistered: false,
+    editorContainerBaseStyle: null,
   };
 
   function formatRunButtonLabel(statusLabel) {
@@ -746,7 +748,26 @@
       return null;
     }
 
-    return editor.closest("[class*='pane'], [class*='panel'], [class*='split'], section, article") || editor.parentElement;
+    return editor.closest(".pane, [class*='Pane'], [class*='pane'], [class*='panel'], [class*='split'], section, article") || editor.parentElement;
+  }
+
+  function findEditorContainer(editor) {
+    if (!editor) {
+      return null;
+    }
+
+    return editor.closest(".react-monaco-editor-container") || editor.parentElement;
+  }
+
+  function rememberEditorContainerBaseStyle(editorContainer) {
+    if (!editorContainer || state.editorContainerBaseStyle) {
+      return;
+    }
+
+    state.editorContainerBaseStyle = {
+      height: editorContainer.style.height,
+      bottom: editorContainer.style.bottom,
+    };
   }
 
   function findResultPanelAnchor() {
@@ -767,14 +788,14 @@
   }
 
   function findJavaPanelAnchor() {
-    const editors = Array.from(document.querySelectorAll(".monaco-editor"));
-    const firstEditor = editors[0];
-    if (!firstEditor) {
+    const jsonLabel = document.getElementById("json-label");
+    const host = jsonLabel?.closest?.(".pane") || null;
+    const insertionPoint = host?.querySelector?.(".monaco-editor") || document.querySelector(".monaco-editor");
+    if (!host || !insertionPoint) {
       return null;
     }
 
-    const host = findEditorHost(firstEditor);
-    return host ? { host, insertionPoint: firstEditor } : null;
+    return { host, insertionPoint };
   }
 
   function syncInlineResultPanelLayout(panel, javaAnchor, resultAnchor) {
@@ -794,6 +815,61 @@
     const maxTop = Math.max(minTop, Math.round(hostRect.height - 80));
     const clampedTop = Math.max(minTop, Math.min(topOffset, maxTop));
     panel.style.top = `${clampedTop}px`;
+  }
+
+  function resetInlineResultReservation(javaAnchor) {
+    const editorContainer = findEditorContainer(javaAnchor?.insertionPoint);
+    if (!editorContainer) {
+      return;
+    }
+
+    rememberEditorContainerBaseStyle(editorContainer);
+    editorContainer.style.height = state.editorContainerBaseStyle?.height || "";
+    editorContainer.style.bottom = state.editorContainerBaseStyle?.bottom || "";
+  }
+
+  function syncInlineResultReservation(panel, javaAnchor) {
+    const editorContainer = findEditorContainer(javaAnchor?.insertionPoint);
+    if (!editorContainer || !javaAnchor?.host) {
+      return;
+    }
+
+    rememberEditorContainerBaseStyle(editorContainer);
+
+    javaAnchor.host.style.overflow = "hidden";
+    javaAnchor.host.style.overflowY = "hidden";
+
+    if (!state.inlineResultVisible || panel.classList.contains("is-hidden")) {
+      resetInlineResultReservation(javaAnchor);
+      return;
+    }
+
+    const hostRect = javaAnchor.host.getBoundingClientRect();
+    const panelTop = Number.parseFloat(panel.style.top || "0");
+    const editorHeight = Math.max(80, Math.min(Math.round(panelTop), Math.round(hostRect.height)));
+
+    editorContainer.style.bottom = "auto";
+    editorContainer.style.height = `${editorHeight}px`;
+  }
+
+  function syncInlineResultLayout() {
+    const panel = document.getElementById(INLINE_RESULT_PANEL_ID);
+    const javaAnchor = findJavaPanelAnchor();
+
+    if (!panel || !javaAnchor?.host || !javaAnchor?.insertionPoint) {
+      resetInlineResultReservation(javaAnchor);
+      return;
+    }
+
+    syncInlineResultPanelLayout(panel, javaAnchor, findResultPanelAnchor());
+    syncInlineResultReservation(panel, javaAnchor);
+  }
+
+  function deferInlineResultLayoutSync() {
+    window.setTimeout(() => {
+      syncInlineResultLayout();
+      window.dispatchEvent(new Event("resize"));
+    }, 0);
   }
 
   function ensureInlineResultPanel() {
@@ -822,9 +898,31 @@
       javaAnchor.host.append(panel);
     }
 
-    syncInlineResultPanelLayout(panel, javaAnchor, findResultPanelAnchor());
+    syncInlineResultLayout();
 
     return panel;
+  }
+
+  function registerLayoutSyncListeners() {
+    if (state.layoutListenersRegistered) {
+      return;
+    }
+
+    state.layoutListenersRegistered = true;
+
+    window.addEventListener("resize", () => {
+      syncInlineResultLayout();
+    });
+
+    document.addEventListener(
+      "pointerup",
+      () => {
+        window.setTimeout(() => {
+          syncInlineResultLayout();
+        }, 0);
+      },
+      true,
+    );
   }
 
   function closeSettingsDialog() {
@@ -929,6 +1027,8 @@
     }
 
     inlinePanel.classList.toggle("is-hidden", !state.inlineResultVisible);
+    syncInlineResultLayout();
+    deferInlineResultLayoutSync();
   }
 
   function updatePanel(status, headline, message, output, details = {}) {
@@ -967,6 +1067,8 @@
     inlineOutputFallback.classList.remove("is-hidden");
     inlineOutputFallback.scrollTop = 0;
     inlineOutputFallback.scrollLeft = 0;
+    syncInlineResultLayout();
+    deferInlineResultLayoutSync();
   }
 
   function ensureToolbarButton() {
@@ -1106,6 +1208,7 @@
 
   function initialize() {
     ensureStyles();
+    registerLayoutSyncListeners();
     ensureToolbarButton();
     ensureSettingsDialog();
     ensureInlineResultPanel();
