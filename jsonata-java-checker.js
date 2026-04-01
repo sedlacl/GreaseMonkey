@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JSONATA JAVA Checker
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.33
+// @version      0.37
 // @description  JSONata kontrola přes lokální Java backend
 // @author       Lukáš Sedláček
 // @match        https://try.jsonata.org/*
@@ -158,6 +158,211 @@
           return fiberKey ? element[fiberKey] : null;
         }
 
+        function getStateSnapshot(componentState) {
+          if (!componentState || typeof componentState !== "object") {
+            return null;
+          }
+
+          const input = typeof componentState.json === "string"
+            ? componentState.json
+            : typeof componentState.input === "string"
+              ? componentState.input
+              : null;
+          const expression = typeof componentState.jsonata === "string"
+            ? componentState.jsonata
+            : typeof componentState.transform === "string"
+              ? componentState.transform
+              : typeof componentState.expression === "string"
+                ? componentState.expression
+                : null;
+
+          if (input === null || expression === null) {
+            return null;
+          }
+
+          return {
+            input,
+            expression,
+            bindings: typeof componentState.bindings === "string"
+              ? componentState.bindings
+              : typeof componentState.binding === "string"
+                ? componentState.binding
+                : "",
+            result: typeof componentState.result === "string"
+              ? componentState.result
+              : typeof componentState.output === "string"
+                ? componentState.output
+                : "",
+            panelStates: componentState.panelStates || null,
+            externalLibsCount: Array.isArray(componentState.externalLibs) ? componentState.externalLibs.length : 0,
+          };
+        }
+
+        function scoreModel(meta, patterns) {
+          let score = 0;
+          const uri = meta.uri.toLowerCase();
+          const languageId = String(meta.languageId || "").toLowerCase();
+
+          for (const pattern of patterns.uri || []) {
+            if (uri.includes(pattern)) {
+              score += 10;
+            }
+          }
+
+          for (const pattern of patterns.languageId || []) {
+            if (languageId === pattern) {
+              score += 8;
+            }
+          }
+
+          if (patterns.preferFirst && meta.index === 0) {
+            score += 2;
+          }
+
+          if (patterns.preferLast && meta.index === meta.total - 1) {
+            score += 2;
+          }
+
+          return score;
+        }
+
+        function pickBestModel(metas, patterns) {
+          let bestMeta = null;
+          let bestScore = Number.NEGATIVE_INFINITY;
+
+          for (const meta of metas) {
+            const score = scoreModel(meta, patterns);
+            if (score > bestScore) {
+              bestMeta = meta;
+              bestScore = score;
+            }
+          }
+
+          return bestMeta;
+        }
+
+        function looksLikeJsonDocument(value) {
+          if (typeof value !== "string") {
+            return false;
+          }
+
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return false;
+          }
+
+          if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+            return false;
+          }
+
+          try {
+            JSON.parse(trimmed);
+            return true;
+          } catch (error) {
+            return false;
+          }
+        }
+
+        function looksLikeJsonataExpression(value) {
+          if (typeof value !== "string") {
+            return false;
+          }
+
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return false;
+          }
+
+          return trimmed.startsWith("$") || trimmed.includes("Account") || trimmed.includes(".") || trimmed.includes("[") || trimmed.includes("(");
+        }
+
+        function getValuesFromMonacoModels() {
+          const models = getModels();
+          if (!models.length) {
+            return null;
+          }
+
+          const inmemoryModelUriPattern = new RegExp("^inmemory://model/\\\\d+$", "i");
+
+          const metas = models.map((model, index) => ({
+            model,
+            index,
+            total: models.length,
+            uri: model.uri?.toString?.() || "",
+            languageId: typeof model.getLanguageId === "function" ? model.getLanguageId() : "",
+            value: typeof model.getValue === "function" ? model.getValue() : "",
+          }));
+
+          if (metas.length >= 4 && metas.every((meta) => inmemoryModelUriPattern.test(meta.uri || ""))) {
+            return {
+              source: "monaco-models-ordered",
+              input: metas[0].value,
+              bindings: metas[1].value,
+              expression: metas[2].value,
+              result: metas[3].value,
+              panelStates: null,
+              externalLibsCount: 0,
+            };
+          }
+
+          const expressionMeta = pickBestModel(metas, {
+            uri: ["jsonata", "transform", "expression"],
+            languageId: ["jsonata"],
+          });
+          const remaining = expressionMeta ? metas.filter((meta) => meta !== expressionMeta) : metas.slice();
+
+          const inputMeta = pickBestModel(remaining, {
+            uri: ["input", "in.json", "source", "data", "json"],
+            languageId: ["json"],
+            preferFirst: true,
+          });
+          const afterInput = inputMeta ? remaining.filter((meta) => meta !== inputMeta) : remaining;
+
+          const bindingsMeta = pickBestModel(afterInput, {
+            uri: ["binding", "bindings", "context", "env"],
+            languageId: ["json"],
+          });
+          const afterBindings = bindingsMeta ? afterInput.filter((meta) => meta !== bindingsMeta) : afterInput;
+
+          const resultMeta = pickBestModel(afterBindings.length ? afterBindings : afterInput, {
+            uri: ["result", "output"],
+            languageId: ["json"],
+            preferLast: true,
+          });
+
+          if (!expressionMeta || !inputMeta) {
+            const jsonLikeMetas = metas.filter((meta) => looksLikeJsonDocument(meta.value));
+            const expressionLikeMeta = metas.find((meta) => looksLikeJsonataExpression(meta.value) && !looksLikeJsonDocument(meta.value));
+            const inputByContent = jsonLikeMetas[0] || metas[0] || null;
+            const resultByContent = jsonLikeMetas.length > 1 ? jsonLikeMetas[jsonLikeMetas.length - 1] : metas[metas.length - 1] || null;
+            const bindingsByOrder = metas[1] || null;
+
+            if (!inputByContent || !expressionLikeMeta) {
+              return null;
+            }
+
+            return {
+              source: "monaco-models-content",
+              input: inputByContent.value,
+              expression: expressionLikeMeta.value,
+              bindings: bindingsByOrder && bindingsByOrder !== inputByContent && bindingsByOrder !== expressionLikeMeta ? bindingsByOrder.value : "",
+              result: resultByContent && resultByContent !== inputByContent && resultByContent !== expressionLikeMeta ? resultByContent.value : "",
+              panelStates: null,
+              externalLibsCount: 0,
+            };
+          }
+
+          return {
+            source: "monaco-models",
+            input: inputMeta.value,
+            expression: expressionMeta.value,
+            bindings: bindingsMeta ? bindingsMeta.value : "",
+            result: resultMeta ? resultMeta.value : "",
+            panelStates: null,
+            externalLibsCount: 0,
+          };
+        }
+
         function findFiberStateNodeWithState(rootFiber) {
           const queue = [rootFiber];
           const visited = new Set();
@@ -172,8 +377,7 @@
 
             const stateNode = fiber.stateNode;
             if (stateNode?.state && typeof stateNode.state === "object") {
-              const state = stateNode.state;
-              if (Object.prototype.hasOwnProperty.call(state, "json") && Object.prototype.hasOwnProperty.call(state, "jsonata")) {
+              if (getStateSnapshot(stateNode.state)) {
                 return stateNode;
               }
             }
@@ -198,8 +402,7 @@
             while (fiber) {
               const stateNode = fiber.stateNode;
               if (stateNode?.state && typeof stateNode.state === "object") {
-                const componentState = stateNode.state;
-                if (Object.prototype.hasOwnProperty.call(componentState, "json") && Object.prototype.hasOwnProperty.call(componentState, "jsonata")) {
+                if (getStateSnapshot(stateNode.state)) {
                   return stateNode;
                 }
               }
@@ -232,20 +435,27 @@
         }
 
         async function getExerciserValues() {
+          const modelSnapshot = getValuesFromMonacoModels();
+          if (modelSnapshot) {
+            return modelSnapshot;
+          }
+
           const stateNode = getExerciserStateNode();
-          if (stateNode?.state) {
+          const stateSnapshot = getStateSnapshot(stateNode?.state);
+
+          if (stateSnapshot) {
             return {
               source: "react-state",
-              json: stateNode.state.json,
-              jsonata: stateNode.state.jsonata,
-              bindings: stateNode.state.bindings,
-              result: stateNode.state.result,
-              panelStates: stateNode.state.panelStates,
-              externalLibsCount: Array.isArray(stateNode.state.externalLibs) ? stateNode.state.externalLibs.length : 0,
+              input: stateSnapshot.input,
+              expression: stateSnapshot.expression,
+              bindings: stateSnapshot.bindings,
+              result: stateSnapshot.result,
+              panelStates: stateSnapshot.panelStates,
+              externalLibsCount: stateSnapshot.externalLibsCount,
             };
           }
 
-          throw new Error("Exerciser state not found in React tree.");
+          throw new Error("Exerciser values not found in React state or Monaco models.");
         }
 
         function serializeModels() {
@@ -275,18 +485,21 @@
                 models: serializeModels(),
                 reactStateAvailable: Boolean(exerciserState),
                 reactStateKeys: exerciserState ? Object.keys(exerciserState) : [],
+                reactStateSnapshot: getStateSnapshot(exerciserState),
                 reactStatePreview: exerciserState ? {
                   jsonPreview: typeof exerciserState.json === "string" ? exerciserState.json.slice(0, 120) : exerciserState.json,
                   jsonataPreview: typeof exerciserState.jsonata === "string" ? exerciserState.jsonata.slice(0, 120) : exerciserState.jsonata,
+                  transformPreview: typeof exerciserState.transform === "string" ? exerciserState.transform.slice(0, 120) : exerciserState.transform,
                   bindingsPreview: typeof exerciserState.bindings === "string" ? exerciserState.bindings.slice(0, 120) : exerciserState.bindings,
+                  bindingPreview: typeof exerciserState.binding === "string" ? exerciserState.binding.slice(0, 120) : exerciserState.binding,
                   resultPreview: typeof exerciserState.result === "string" ? exerciserState.result.slice(0, 120) : exerciserState.result,
                 } : null,
               };
             } else if (detail.action === "get-editor-values") {
               const values = await getExerciserValues();
               response.payload = {
-                input: values.json,
-                expression: values.jsonata,
+                input: values.input,
+                expression: values.expression,
                 bindings: values.bindings,
                 result: values.result,
                 source: values.source,

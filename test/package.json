@@ -1,0 +1,11 @@
+{
+  "name": "greasemonkey-tests",
+  "private": true,
+  "scripts": {
+    "inspect-jsonata-models": "node inspect-jsonata-models.js",
+    "test-jsonata-java-checker": "node test-jsonata-java-checker.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^24.40.0"
+  }
+}
