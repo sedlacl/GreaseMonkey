@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.1
+// @version      1.4
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -16,8 +16,9 @@
   const SCRIPT_FLAG = "__gmMessageRegistryPreviewDownloads";
   const PREVIEW_TIMEOUT_MS = 15000;
   const DOWNLOAD_SUPPRESSION_MS = 5000;
-  const BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
+  const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
+  const PAYLOAD_PREVIEW_GROUP_CLASS = "gm-message-preview-group";
 
   if (window[SCRIPT_FLAG]) return;
   window[SCRIPT_FLAG] = true;
@@ -59,39 +60,24 @@
     return Date.now() < suppressDownloadsUntil;
   }
 
-  function isAttachmentTrigger(target) {
+  function getAttachmentLink(target) {
     const link = target.closest("tr a[role='link']");
     if (!link) return false;
 
     const button = link.querySelector("button");
-    if (!button) return false;
-    if (button.disabled || button.getAttribute("aria-disabled") === "true") return false;
+    if (!button) return null;
 
-    return Boolean(link.querySelector(".uugds-download") || button.querySelector(".uugds-download"));
+    return link.querySelector(".uugds-download") || button.querySelector(".uugds-download") ? link : null;
   }
 
-  function getPreviewInfo(target) {
-    const payloadButton = target.closest(BUTTON_SELECTOR);
-    if (payloadButton) {
-      const payloadType = payloadButton.dataset.testid === "external-payload-button" ? "external" : "internal";
-      return {
-        kind: "payload",
-        payloadType,
-        title: payloadType === "external" ? "Download External" : "Download Internal",
-      };
-    }
-
-    if (isAttachmentTrigger(target)) {
-      const row = target.closest("tr");
-      const rowText = row?.innerText?.trim() || "Attachment";
-      return {
-        kind: "attachment",
-        title: "Download Attachment",
-        subtitle: rowText,
-      };
-    }
-
-    return null;
+  function getAttachmentPreviewInfo(link) {
+    const row = link.closest("tr");
+    const rowText = row?.innerText?.trim() || "Attachment";
+    return {
+      kind: "attachment",
+      title: "Download Attachment",
+      subtitle: rowText,
+    };
   }
 
   function shouldInspectUrl(rawUrl) {
@@ -355,13 +341,17 @@
 
     const actions = document.createElement("div");
     actions.style.display = "flex";
+    actions.style.flexDirection = "row";
     actions.style.gap = "10px";
     actions.style.alignItems = "center";
-    actions.style.flexWrap = "wrap";
+    actions.style.flexWrap = "nowrap";
+    actions.style.flexShrink = "0";
 
     const downloadLink = document.createElement("a");
     downloadLink.textContent = "Download";
     downloadLink.style.display = "none";
+    downloadLink.style.alignItems = "center";
+    downloadLink.style.justifyContent = "center";
     downloadLink.style.borderRadius = "999px";
     downloadLink.style.padding = "10px 16px";
     downloadLink.style.background = "#e2e8f0";
@@ -369,11 +359,15 @@
     downloadLink.style.textDecoration = "none";
     downloadLink.style.fontSize = "13px";
     downloadLink.style.lineHeight = "1";
+    downloadLink.style.whiteSpace = "nowrap";
 
     const formatButton = document.createElement("button");
     formatButton.type = "button";
     formatButton.textContent = "Format";
     formatButton.style.display = "none";
+    formatButton.style.alignItems = "center";
+    formatButton.style.justifyContent = "center";
+    formatButton.style.flex = "0 0 auto";
     formatButton.style.border = "none";
     formatButton.style.borderRadius = "999px";
     formatButton.style.padding = "10px 16px";
@@ -387,6 +381,10 @@
     const closeButton = document.createElement("button");
     closeButton.type = "button";
     closeButton.textContent = "Close";
+    closeButton.style.display = "inline-flex";
+    closeButton.style.alignItems = "center";
+    closeButton.style.justifyContent = "center";
+    closeButton.style.flex = "0 0 auto";
     closeButton.style.border = "none";
     closeButton.style.borderRadius = "999px";
     closeButton.style.padding = "10px 16px";
@@ -568,63 +566,156 @@
     }
   }
 
-  function createPreviewButton(payloadType) {
+  function createButtonIcon(symbol) {
+    const icon = document.createElement("span");
+    icon.textContent = symbol;
+    icon.style.fontSize = "16px";
+    icon.style.lineHeight = "1";
+    return icon;
+  }
+
+  function createPreviewButton(referenceButton, options) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = PREVIEW_BUTTON_CLASS;
-    button.textContent = "🔍";
-    button.title = payloadType === "external" ? "Preview external payload" : "Preview internal payload";
-    button.setAttribute("aria-label", button.title);
-    button.style.border = "none";
-    button.style.borderRadius = "999px";
+    button.title = options.title;
+    button.setAttribute("aria-label", options.title);
+    button.classList.add(...referenceButton.className.split(/\s+/u).filter(Boolean));
+    button.dataset.previewKind = options.kind;
+    if (options.payloadType) {
+      button.dataset.payloadType = options.payloadType;
+    }
+
+    button.style.display = "inline-flex";
+    button.style.alignItems = "center";
+    button.style.justifyContent = "center";
     button.style.width = "36px";
     button.style.minWidth = "36px";
     button.style.height = "36px";
     button.style.padding = "0";
-    button.style.cursor = "pointer";
-    button.style.background = "#e2e8f0";
-    button.style.color = "#0f172a";
-    button.style.fontSize = "16px";
-    button.style.lineHeight = "1";
-    button.style.display = "inline-flex";
-    button.style.alignItems = "center";
-    button.style.justifyContent = "center";
-    button.style.marginLeft = "6px";
-    button.dataset.payloadType = payloadType;
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      void previewPayloadDirectly(payloadType);
-    });
+    button.style.marginLeft = options.marginLeft || "6px";
+    button.style.flex = "0 0 auto";
+    button.appendChild(createButtonIcon("🔍"));
+
+    if (options.disabled) {
+      button.disabled = true;
+      button.setAttribute("aria-disabled", "true");
+    } else {
+      button.style.cursor = "pointer";
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        options.onClick();
+      });
+    }
+
     return button;
   }
 
+  function triggerAttachmentPreview(link) {
+    const button = link.querySelector("button");
+    if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") {
+      return;
+    }
+
+    armPreview(getAttachmentPreviewInfo(link));
+    link.click();
+  }
+
   function ensurePayloadPreviewButtons() {
-    document.querySelectorAll(BUTTON_SELECTOR).forEach((button) => {
-      if (!(button instanceof HTMLElement) || button.type !== "button") {
-        return;
-      }
+    const payloadButtons = [...document.querySelectorAll(PAYLOAD_BUTTON_SELECTOR)].filter((button) => button instanceof HTMLButtonElement);
+    if (!payloadButtons.length) {
+      return;
+    }
 
+    const toolbar = payloadButtons[0].parentElement;
+    if (!toolbar) {
+      return;
+    }
+
+    let previewGroup = toolbar.querySelector(`.${PAYLOAD_PREVIEW_GROUP_CLASS}`);
+    if (!previewGroup) {
+      previewGroup = document.createElement("div");
+      previewGroup.className = PAYLOAD_PREVIEW_GROUP_CLASS;
+      previewGroup.style.display = "inline-flex";
+      previewGroup.style.alignItems = "center";
+      previewGroup.style.gap = "6px";
+
+      const menuButton = [...toolbar.children].find((child) => child instanceof HTMLButtonElement && child.getAttribute("aria-haspopup") === "menu");
+      toolbar.insertBefore(previewGroup, menuButton || null);
+    }
+
+    payloadButtons.forEach((button) => {
       const payloadType = button.dataset.testid === "external-payload-button" ? "external" : "internal";
-      const nextSibling = button.nextElementSibling;
-      if (nextSibling?.classList?.contains(PREVIEW_BUTTON_CLASS) && nextSibling.dataset.payloadType === payloadType) {
+      const existingButton = previewGroup.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-payload-type="${payloadType}"]`);
+      if (existingButton) {
         return;
       }
 
-      button.insertAdjacentElement("afterend", createPreviewButton(payloadType));
+      previewGroup.appendChild(
+        createPreviewButton(button, {
+          kind: "payload",
+          payloadType,
+          title: payloadType === "external" ? "Preview external payload" : "Preview internal payload",
+          marginLeft: "0",
+          onClick: () => {
+            void previewPayloadDirectly(payloadType);
+          },
+        }),
+      );
+    });
+  }
+
+  function ensureAttachmentPreviewButtons() {
+    document.querySelectorAll("tr a[role='link']").forEach((link) => {
+      if (!(link instanceof HTMLAnchorElement)) {
+        return;
+      }
+
+      const attachmentLink = getAttachmentLink(link);
+      if (!attachmentLink) {
+        return;
+      }
+
+      const existingButton = attachmentLink.nextElementSibling;
+      if (existingButton?.classList?.contains(PREVIEW_BUTTON_CLASS) && existingButton.dataset.previewKind === "attachment") {
+        return;
+      }
+
+      const referenceButton = attachmentLink.querySelector("button");
+      if (!(referenceButton instanceof HTMLButtonElement)) {
+        return;
+      }
+
+      attachmentLink.insertAdjacentElement(
+        "afterend",
+        createPreviewButton(referenceButton, {
+          kind: "attachment",
+          title: "Preview attachment",
+          disabled: referenceButton.disabled || referenceButton.getAttribute("aria-disabled") === "true",
+          onClick: () => {
+            triggerAttachmentPreview(attachmentLink);
+          },
+        }),
+      );
     });
   }
 
   function observePayloadButtons() {
     ensurePayloadPreviewButtons();
+    ensureAttachmentPreviewButtons();
 
     const observer = new MutationObserver(() => {
       ensurePayloadPreviewButtons();
+      ensureAttachmentPreviewButtons();
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
-    window.setInterval(ensurePayloadPreviewButtons, 1000);
+    window.setInterval(() => {
+      ensurePayloadPreviewButtons();
+      ensureAttachmentPreviewButtons();
+    }, 1000);
   }
 
   function patchFetch() {
@@ -701,24 +792,7 @@
     };
   }
 
-  function installClickHandler() {
-    document.addEventListener(
-      "click",
-      (event) => {
-        const target = event.target instanceof Element ? event.target : null;
-        if (!target) return;
-
-        const previewInfo = getPreviewInfo(target);
-        if (!previewInfo) return;
-
-        armPreview(previewInfo);
-      },
-      true,
-    );
-  }
-
   patchFetch();
   patchBlobDownloads();
-  installClickHandler();
   observePayloadButtons();
 })();
