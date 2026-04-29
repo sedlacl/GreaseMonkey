@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.11
+// @version      1.12
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -610,7 +610,7 @@
     return `${highlightedPrefix}\n\n${highlightedBody}`;
   }
 
-  function highlightWrappedResponse(text) {
+  function highlightWrappedResponse(text, isFormatted = false) {
     const wrappedResponse = parseWrappedResponse(text);
     if (!wrappedResponse) {
       return escapeHtml(text);
@@ -618,16 +618,16 @@
 
     const parts = [`&lt;${escapeHtml(wrappedResponse.prefix)},`, highlightJson(wrappedResponse.jsonText)];
     if (wrappedResponse.suffix) {
-      parts.push(escapeHtml(formatWrappedSuffix(wrappedResponse.suffix) || wrappedResponse.suffix));
+      parts.push(escapeHtml(isFormatted ? formatWrappedSuffix(wrappedResponse.suffix) || wrappedResponse.suffix : wrappedResponse.suffix));
     }
     parts.push("&gt;");
-    return parts.join("\n");
+    return parts.join(isFormatted ? "\n" : "");
   }
 
-  function getHighlightedPreviewHtml(text, contentType) {
+  function getHighlightedPreviewHtml(text, contentType, isFormatted = false) {
     const highlightMode = detectHighlightMode(text, contentType);
     if (highlightMode === "wrapped-response") {
-      return highlightWrappedResponse(text);
+      return highlightWrappedResponse(text, isFormatted);
     }
 
     if (highlightMode === "json") {
@@ -651,13 +651,15 @@
 
   function renderPreviewContent(dialog, text, contentType) {
     dialog.pre.style.whiteSpace = dialog.isFormatted ? "pre-wrap" : "pre";
+    dialog.pre.style.wordBreak = dialog.isFormatted ? "break-word" : "normal";
+    dialog.pre.style.overflowWrap = dialog.isFormatted ? "anywhere" : "normal";
 
     if (!shouldUseSyntaxHighlight(text)) {
       dialog.pre.textContent = text;
       return;
     }
 
-    dialog.pre.innerHTML = getHighlightedPreviewHtml(text, contentType);
+    dialog.pre.innerHTML = getHighlightedPreviewHtml(text, contentType, dialog.isFormatted);
   }
 
   function createDialogActionIcon(kind) {
