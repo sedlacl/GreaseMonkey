@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.10
+// @version      1.11
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -297,6 +297,156 @@
     }
   }
 
+  function findBalancedSegment(text, startIndex, openChar, closeChar) {
+    let depth = 0;
+    let inString = false;
+    let isEscaped = false;
+
+    for (let index = startIndex; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        if (isEscaped) {
+          isEscaped = false;
+        } else if (char === "\\") {
+          isEscaped = true;
+        } else if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (char === openChar) {
+        depth += 1;
+      } else if (char === closeChar) {
+        depth -= 1;
+        if (depth === 0) {
+          return index;
+        }
+      }
+    }
+
+    return -1;
+  }
+
+  function splitTopLevel(text, separatorChar) {
+    const items = [];
+    let startIndex = 0;
+    let curlyDepth = 0;
+    let squareDepth = 0;
+    let roundDepth = 0;
+    let inString = false;
+    let isEscaped = false;
+
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        if (isEscaped) {
+          isEscaped = false;
+        } else if (char === "\\") {
+          isEscaped = true;
+        } else if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{") curlyDepth += 1;
+      else if (char === "}") curlyDepth -= 1;
+      else if (char === "[") squareDepth += 1;
+      else if (char === "]") squareDepth -= 1;
+      else if (char === "(") roundDepth += 1;
+      else if (char === ")") roundDepth -= 1;
+
+      if (char === separatorChar && curlyDepth === 0 && squareDepth === 0 && roundDepth === 0) {
+        items.push(text.slice(startIndex, index).trim());
+        startIndex = index + 1;
+      }
+    }
+
+    items.push(text.slice(startIndex).trim());
+    return items.filter(Boolean);
+  }
+
+  function parseWrappedResponse(text) {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith("<") || !trimmed.endsWith(">")) {
+      return null;
+    }
+
+    const innerText = trimmed.slice(1, -1).trim();
+    const jsonStartIndex = innerText.indexOf("{");
+    if (jsonStartIndex < 0) {
+      return null;
+    }
+
+    const jsonEndIndex = findBalancedSegment(innerText, jsonStartIndex, "{", "}");
+    if (jsonEndIndex < 0) {
+      return null;
+    }
+
+    const prefix = innerText.slice(0, jsonStartIndex).replace(/,\s*$/u, "").trim();
+    const jsonText = innerText.slice(jsonStartIndex, jsonEndIndex + 1).trim();
+    const suffix = innerText
+      .slice(jsonEndIndex + 1)
+      .replace(/^\s*,/u, "")
+      .trim();
+
+    if (!prefix) {
+      return null;
+    }
+
+    return { prefix, jsonText, suffix };
+  }
+
+  function formatWrappedSuffix(text) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+      return trimmed;
+    }
+
+    const items = splitTopLevel(trimmed.slice(1, -1), ",");
+    if (!items.length) {
+      return "[]";
+    }
+
+    return `[\n  ${items.join(",\n  ")}\n]`;
+  }
+
+  function tryFormatWrappedResponse(text) {
+    const wrappedResponse = parseWrappedResponse(text);
+    if (!wrappedResponse) {
+      return null;
+    }
+
+    const formattedJson = tryFormatJson(wrappedResponse.jsonText);
+    if (!formattedJson) {
+      return null;
+    }
+
+    const lines = [`<${wrappedResponse.prefix},`, formattedJson];
+    if (wrappedResponse.suffix) {
+      lines.push(formatWrappedSuffix(wrappedResponse.suffix) || wrappedResponse.suffix);
+    }
+    lines.push(">");
+    return lines.join("\n");
+  }
+
   function splitStructuredPrefix(text) {
     const normalizedText = text.replace(/\r\n/gu, "\n");
     const headerSeparatorMatch = normalizedText.match(/\n\s*\n/gu);
@@ -334,6 +484,11 @@
       return null;
     }
 
+    const formattedWrappedResponse = tryFormatWrappedResponse(trimmed);
+    if (formattedWrappedResponse && formattedWrappedResponse !== text) {
+      return formattedWrappedResponse;
+    }
+
     const structuredText = splitStructuredPrefix(text);
     if (structuredText) {
       const formattedBody = getFormattedPreviewText(structuredText.body, contentType);
@@ -363,6 +518,10 @@
     const trimmed = text.trim();
     if (!trimmed) {
       return "plain";
+    }
+
+    if (parseWrappedResponse(text)) {
+      return "wrapped-response";
     }
 
     const structuredText = splitStructuredPrefix(text);
@@ -451,8 +610,26 @@
     return `${highlightedPrefix}\n\n${highlightedBody}`;
   }
 
+  function highlightWrappedResponse(text) {
+    const wrappedResponse = parseWrappedResponse(text);
+    if (!wrappedResponse) {
+      return escapeHtml(text);
+    }
+
+    const parts = [`&lt;${escapeHtml(wrappedResponse.prefix)},`, highlightJson(wrappedResponse.jsonText)];
+    if (wrappedResponse.suffix) {
+      parts.push(escapeHtml(formatWrappedSuffix(wrappedResponse.suffix) || wrappedResponse.suffix));
+    }
+    parts.push("&gt;");
+    return parts.join("\n");
+  }
+
   function getHighlightedPreviewHtml(text, contentType) {
     const highlightMode = detectHighlightMode(text, contentType);
+    if (highlightMode === "wrapped-response") {
+      return highlightWrappedResponse(text);
+    }
+
     if (highlightMode === "json") {
       return highlightJson(text);
     }
@@ -473,6 +650,8 @@
   }
 
   function renderPreviewContent(dialog, text, contentType) {
+    dialog.pre.style.whiteSpace = dialog.isFormatted ? "pre-wrap" : "pre";
+
     if (!shouldUseSyntaxHighlight(text)) {
       dialog.pre.textContent = text;
       return;
@@ -545,6 +724,13 @@
   function setDialogActionLabel(control, label) {
     control.title = label;
     control.setAttribute("aria-label", label);
+  }
+
+  function updateFormatButtonState(button, isFormatted) {
+    button.style.background = isFormatted ? "#0f172a" : "#e2e8f0";
+    button.style.color = isFormatted ? "#ffffff" : "#0f172a";
+    button.style.boxShadow = isFormatted ? "inset 0 0 0 1px rgba(15, 23, 42, 0.08)" : "none";
+    setDialogActionLabel(button, isFormatted ? "Show raw content" : "Format content");
   }
 
   async function blobToPreview(blob, contentType) {
@@ -703,12 +889,6 @@
     backdrop.appendChild(style);
     document.body.appendChild(backdrop);
 
-    backdrop.addEventListener("click", (event) => {
-      if (event.target === backdrop) {
-        hideDialog();
-      }
-    });
-
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && backdrop.style.display !== "none") {
         hideDialog();
@@ -736,7 +916,7 @@
 
       dialogState.isFormatted = !dialogState.isFormatted;
       renderPreviewContent(dialogState, dialogState.isFormatted ? dialogState.formattedText : dialogState.rawText, dialogState.meta.textContent);
-      setDialogActionLabel(dialogState.formatButton, dialogState.isFormatted ? "Show raw content" : "Format content");
+      updateFormatButtonState(dialogState.formatButton, dialogState.isFormatted);
     });
 
     copyButton.addEventListener("click", async () => {
@@ -800,7 +980,7 @@
     dialog.notice.textContent = notice || "";
     dialog.notice.style.display = notice ? "block" : "none";
     setDialogActionLabel(dialog.copyButton, "Copy content");
-    setDialogActionLabel(dialog.formatButton, "Format content");
+    updateFormatButtonState(dialog.formatButton, false);
     dialog.formatButton.style.display = dialog.formattedText ? "inline-flex" : "none";
 
     if (blob) {
