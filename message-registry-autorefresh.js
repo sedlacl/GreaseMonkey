@@ -15,6 +15,7 @@
 
   const SCRIPT_FLAG = "__gmMessageRegistryAutoRefresh";
   const AUTO_REFRESH_INTERVAL_MS = 10000;
+  const PROGRESS_UPDATE_INTERVAL_MS = 1000;
   const CONTROL_ID = "gm-message-registry-autorefresh";
   const STORAGE_KEY = "gm-message-registry-autorefresh-enabled";
   const LAST_RELOAD_STORAGE_KEY = "gm-message-registry-autorefresh-last-reload";
@@ -23,6 +24,8 @@
   window[SCRIPT_FLAG] = true;
 
   let isEnabled = getStoredValue(STORAGE_KEY) === "true";
+  let countdownStartedAt = getLastReloadTimestamp() || Date.now();
+  let lastProgressRatio = 0;
 
   function getStoredValue(key) {
     try {
@@ -70,6 +73,20 @@
     });
   }
 
+  function updateProgressBar() {
+    const fill = document.querySelector(`#${CONTROL_ID} [data-role="autorefresh-progress-fill"]`);
+    if (!(fill instanceof HTMLSpanElement)) {
+      return;
+    }
+
+    const elapsed = isEnabled ? Math.max(0, Date.now() - countdownStartedAt) : 0;
+    const progressRatio = Math.min(1, elapsed / AUTO_REFRESH_INTERVAL_MS);
+    fill.style.transition = progressRatio < lastProgressRatio ? "opacity 160ms ease" : `transform ${PROGRESS_UPDATE_INTERVAL_MS}ms linear, opacity 160ms ease`;
+    fill.style.transform = `scaleX(${progressRatio})`;
+    fill.style.opacity = isEnabled ? "1" : "0.35";
+    lastProgressRatio = progressRatio;
+  }
+
   function getBookmarkButton() {
     return document.querySelector(".uugds-bookmark")?.closest("button") || null;
   }
@@ -83,12 +100,17 @@
     isEnabled = Boolean(nextValue);
     setStoredValue(STORAGE_KEY, String(isEnabled));
 
+    if (isEnabled) {
+      countdownStartedAt = getLastReloadTimestamp() || Date.now();
+    }
+
     const checkbox = document.querySelector(`#${CONTROL_ID} input`);
     if (checkbox instanceof HTMLInputElement) {
       checkbox.checked = isEnabled;
     }
 
     updateControlTooltip();
+    updateProgressBar();
   }
 
   function ensureControl() {
@@ -109,12 +131,18 @@
 
     existingControl?.remove();
 
+    const wrapper = document.createElement("div");
+    wrapper.id = CONTROL_ID;
+    wrapper.style.display = "inline-flex";
+    wrapper.style.flexDirection = "column";
+    wrapper.style.alignSelf = "center";
+    wrapper.style.gap = "4px";
+    wrapper.style.marginRight = "12px";
+
     const label = document.createElement("label");
-    label.id = CONTROL_ID;
     label.style.display = "inline-flex";
     label.style.alignItems = "center";
     label.style.gap = "8px";
-    label.style.marginRight = "12px";
     label.style.fontSize = "14px";
     label.style.color = "#475569";
     label.style.whiteSpace = "nowrap";
@@ -133,14 +161,38 @@
     const text = document.createElement("span");
     text.textContent = `autorefresh every ${Math.round(AUTO_REFRESH_INTERVAL_MS / 1000)}s`;
 
+    const progressTrack = document.createElement("span");
+    progressTrack.setAttribute("aria-hidden", "true");
+    progressTrack.style.display = "block";
+    progressTrack.style.position = "relative";
+    progressTrack.style.width = "100%";
+    progressTrack.style.height = "1px";
+    progressTrack.style.background = "rgba(100, 116, 139, 0.22)";
+    progressTrack.style.overflow = "hidden";
+
+    const progressFill = document.createElement("span");
+    progressFill.dataset.role = "autorefresh-progress-fill";
+    progressFill.style.display = "block";
+    progressFill.style.width = "100%";
+    progressFill.style.height = "100%";
+    progressFill.style.background = "#475569";
+    progressFill.style.transformOrigin = "left center";
+    progressFill.style.transform = "scaleX(0)";
+    progressFill.style.transition = `transform ${PROGRESS_UPDATE_INTERVAL_MS}ms linear, opacity 160ms ease`;
+
+    progressTrack.appendChild(progressFill);
     label.append(checkbox, text);
-    bookmarkButton.insertAdjacentElement("beforebegin", label);
+    wrapper.append(label, progressTrack);
+    bookmarkButton.insertAdjacentElement("beforebegin", wrapper);
     updateControlTooltip();
+    updateProgressBar();
   }
 
   function markReloadedNow() {
-    setStoredValue(LAST_RELOAD_STORAGE_KEY, String(Date.now()));
+    countdownStartedAt = Date.now();
+    setStoredValue(LAST_RELOAD_STORAGE_KEY, String(countdownStartedAt));
     updateControlTooltip();
+    updateProgressBar();
   }
 
   function triggerRefresh() {
@@ -150,6 +202,11 @@
 
     const reloadButton = getReloadButton();
     if (!reloadButton || reloadButton.disabled || reloadButton.getAttribute("aria-disabled") === "true") {
+      return;
+    }
+
+    if (Date.now() - countdownStartedAt < AUTO_REFRESH_INTERVAL_MS) {
+      updateProgressBar();
       return;
     }
 
@@ -165,5 +222,8 @@
 
   observer.observe(document.documentElement, { childList: true, subtree: true });
   window.setInterval(ensureControl, 1000);
-  window.setInterval(triggerRefresh, AUTO_REFRESH_INTERVAL_MS);
+  window.setInterval(() => {
+    updateProgressBar();
+    triggerRefresh();
+  }, PROGRESS_UPDATE_INTERVAL_MS);
 })();
