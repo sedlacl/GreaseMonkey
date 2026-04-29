@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.4
+// @version      1.6
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -18,7 +18,6 @@
   const DOWNLOAD_SUPPRESSION_MS = 5000;
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
-  const PAYLOAD_PREVIEW_GROUP_CLASS = "gm-message-preview-group";
 
   if (window[SCRIPT_FLAG]) return;
   window[SCRIPT_FLAG] = true;
@@ -72,7 +71,12 @@
 
   function getAttachmentPreviewInfo(link) {
     const row = link.closest("tr");
-    const rowText = row?.innerText?.trim() || "Attachment";
+    const rowText =
+      [...(row?.childNodes || [])]
+        .map((node) => node.textContent || "")
+        .join(" ")
+        .replace(/\s+/gu, " ")
+        .trim() || "Attachment";
     return {
       kind: "attachment",
       title: "Download Attachment",
@@ -252,10 +256,49 @@
     }
   }
 
+  function splitStructuredPrefix(text) {
+    const normalizedText = text.replace(/\r\n/gu, "\n");
+    const headerSeparatorMatch = normalizedText.match(/\n\s*\n/gu);
+    if (!headerSeparatorMatch) {
+      return null;
+    }
+
+    const separator = headerSeparatorMatch[0];
+    const separatorIndex = normalizedText.indexOf(separator);
+    if (separatorIndex < 0) {
+      return null;
+    }
+
+    const prefix = normalizedText.slice(0, separatorIndex).trimEnd();
+    const body = normalizedText.slice(separatorIndex + separator.length).trim();
+    if (!prefix || !body) {
+      return null;
+    }
+
+    const prefixLines = prefix
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const looksLikeStructuredPrefix = prefixLines.some((line) => /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+|^[A-Za-z0-9-]+\s*:/u.test(line));
+    if (!looksLikeStructuredPrefix) {
+      return null;
+    }
+
+    return { prefix, body };
+  }
+
   function getFormattedPreviewText(text, contentType) {
     const trimmed = text.trim();
     if (!trimmed) {
       return null;
+    }
+
+    const structuredText = splitStructuredPrefix(text);
+    if (structuredText) {
+      const formattedBody = getFormattedPreviewText(structuredText.body, contentType);
+      if (formattedBody) {
+        return `${structuredText.prefix}\n\n${formattedBody}`;
+      }
     }
 
     if (/json/i.test(contentType || "") || /^[\[{]/.test(trimmed)) {
@@ -614,8 +657,7 @@
   }
 
   function triggerAttachmentPreview(link) {
-    const button = link.querySelector("button");
-    if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") {
+    if (!(link instanceof HTMLAnchorElement)) {
       return;
     }
 
@@ -624,47 +666,27 @@
   }
 
   function ensurePayloadPreviewButtons() {
-    const payloadButtons = [...document.querySelectorAll(PAYLOAD_BUTTON_SELECTOR)].filter((button) => button instanceof HTMLButtonElement);
-    if (!payloadButtons.length) {
-      return;
-    }
+    [...document.querySelectorAll(PAYLOAD_BUTTON_SELECTOR)]
+      .filter((button) => button instanceof HTMLButtonElement)
+      .forEach((button) => {
+        const payloadType = button.dataset.testid === "external-payload-button" ? "external" : "internal";
+        const existingButton = button.nextElementSibling;
+        if (existingButton?.classList?.contains(PREVIEW_BUTTON_CLASS) && existingButton.getAttribute("data-payload-type") === payloadType) {
+          return;
+        }
 
-    const toolbar = payloadButtons[0].parentElement;
-    if (!toolbar) {
-      return;
-    }
-
-    let previewGroup = toolbar.querySelector(`.${PAYLOAD_PREVIEW_GROUP_CLASS}`);
-    if (!previewGroup) {
-      previewGroup = document.createElement("div");
-      previewGroup.className = PAYLOAD_PREVIEW_GROUP_CLASS;
-      previewGroup.style.display = "inline-flex";
-      previewGroup.style.alignItems = "center";
-      previewGroup.style.gap = "6px";
-
-      const menuButton = [...toolbar.children].find((child) => child instanceof HTMLButtonElement && child.getAttribute("aria-haspopup") === "menu");
-      toolbar.insertBefore(previewGroup, menuButton || null);
-    }
-
-    payloadButtons.forEach((button) => {
-      const payloadType = button.dataset.testid === "external-payload-button" ? "external" : "internal";
-      const existingButton = previewGroup.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-payload-type="${payloadType}"]`);
-      if (existingButton) {
-        return;
-      }
-
-      previewGroup.appendChild(
-        createPreviewButton(button, {
-          kind: "payload",
-          payloadType,
-          title: payloadType === "external" ? "Preview external payload" : "Preview internal payload",
-          marginLeft: "0",
-          onClick: () => {
-            void previewPayloadDirectly(payloadType);
-          },
-        }),
-      );
-    });
+        button.insertAdjacentElement(
+          "afterend",
+          createPreviewButton(button, {
+            kind: "payload",
+            payloadType,
+            title: payloadType === "external" ? "Preview external payload" : "Preview internal payload",
+            onClick: () => {
+              void previewPayloadDirectly(payloadType);
+            },
+          }),
+        );
+      });
   }
 
   function ensureAttachmentPreviewButtons() {
@@ -693,7 +715,6 @@
         createPreviewButton(referenceButton, {
           kind: "attachment",
           title: "Preview attachment",
-          disabled: referenceButton.disabled || referenceButton.getAttribute("aria-disabled") === "true",
           onClick: () => {
             triggerAttachmentPreview(attachmentLink);
           },
@@ -729,7 +750,7 @@
         return originalFetch(input, init);
       }
 
-      const adjustedUrl = adjustDownloadUrl(requestUrl);
+      const adjustedUrl = previewInfo.kind === "payload" ? adjustDownloadUrl(requestUrl) : requestUrl;
       const actualInput = typeof input === "string" ? adjustedUrl : input instanceof Request ? new Request(adjustedUrl, input) : input;
 
       try {
