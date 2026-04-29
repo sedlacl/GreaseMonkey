@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.6
+// @version      1.8
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -200,6 +200,10 @@
     return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
   }
 
+  function escapeHtml(value) {
+    return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  }
+
   function formatXmlNode(node, indent = "") {
     const childNodes = [...node.childNodes].filter((child) => {
       return child.nodeType !== Node.TEXT_NODE || child.textContent.trim();
@@ -316,6 +320,119 @@
     }
 
     return null;
+  }
+
+  function detectHighlightMode(text, contentType) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return "plain";
+    }
+
+    const structuredText = splitStructuredPrefix(text);
+    if (structuredText) {
+      const bodyMode = detectHighlightMode(structuredText.body, contentType);
+      return bodyMode === "plain" ? "structured" : `structured-${bodyMode}`;
+    }
+
+    if (/json/i.test(contentType || "") || /^[\[{]/.test(trimmed)) {
+      return "json";
+    }
+
+    if (/xml|soap|html/i.test(contentType || "") || trimmed.startsWith("<")) {
+      return "xml";
+    }
+
+    return "plain";
+  }
+
+  function highlightJson(text) {
+    const escapedText = escapeHtml(text);
+    return escapedText.replace(
+      /("(?:\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"\s*:?)|(\btrue\b|\bfalse\b|\bnull\b)|(-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)/gu,
+      (match, stringToken, keywordToken, numberToken) => {
+        if (stringToken) {
+          const className = stringToken.endsWith(":") ? "gm-syntax-key" : "gm-syntax-string";
+          return `<span class="${className}">${stringToken}</span>`;
+        }
+
+        if (keywordToken) {
+          return `<span class="gm-syntax-keyword">${keywordToken}</span>`;
+        }
+
+        if (numberToken) {
+          return `<span class="gm-syntax-number">${numberToken}</span>`;
+        }
+
+        return match;
+      },
+    );
+  }
+
+  function highlightXml(text) {
+    const escapedText = escapeHtml(text);
+    return escapedText
+      .replace(/(&lt;!--[\s\S]*?--&gt;)/gu, '<span class="gm-syntax-comment">$1</span>')
+      .replace(/(&lt;!\[CDATA\[[\s\S]*?\]\]&gt;)/gu, '<span class="gm-syntax-cdata">$1</span>')
+      .replace(/(&lt;\/?)([A-Za-z_][\w.:-]*)(.*?)(\/??&gt;)/gu, (_match, open, tagName, attributes, close) => {
+        const highlightedAttributes = attributes.replace(
+          /([A-Za-z_][\w.:-]*)(=)(".*?")/gu,
+          '<span class="gm-syntax-attr">$1</span><span class="gm-syntax-punctuation">$2</span><span class="gm-syntax-string">$3</span>',
+        );
+
+        return `<span class="gm-syntax-tag">${open}</span><span class="gm-syntax-tag-name">${tagName}</span>${highlightedAttributes}<span class="gm-syntax-tag">${close}</span>`;
+      });
+  }
+
+  function highlightStructuredText(text, contentType) {
+    const structuredText = splitStructuredPrefix(text);
+    if (!structuredText) {
+      return escapeHtml(text);
+    }
+
+    const highlightedPrefix = structuredText.prefix
+      .split("\n")
+      .map((line) => {
+        const trimmedLine = line.trim();
+        const requestLineMatch = trimmedLine.match(/^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)(\s+)(.+)$/u);
+        if (requestLineMatch) {
+          return `<span class="gm-syntax-keyword">${requestLineMatch[1]}</span>${requestLineMatch[2]}<span class="gm-syntax-string">${escapeHtml(requestLineMatch[3])}</span>`;
+        }
+
+        const headerLineMatch = trimmedLine.match(/^([A-Za-z0-9-]+)(\s*:\s*)(.*)$/u);
+        if (headerLineMatch) {
+          return `<span class="gm-syntax-attr">${headerLineMatch[1]}</span><span class="gm-syntax-punctuation">${escapeHtml(headerLineMatch[2])}</span><span class="gm-syntax-string">${escapeHtml(headerLineMatch[3])}</span>`;
+        }
+
+        return escapeHtml(line);
+      })
+      .join("\n");
+
+    const bodyMode = detectHighlightMode(structuredText.body, contentType);
+    const highlightedBody =
+      bodyMode === "json" ? highlightJson(structuredText.body) : bodyMode === "xml" ? highlightXml(structuredText.body) : escapeHtml(structuredText.body);
+
+    return `${highlightedPrefix}\n\n${highlightedBody}`;
+  }
+
+  function getHighlightedPreviewHtml(text, contentType) {
+    const highlightMode = detectHighlightMode(text, contentType);
+    if (highlightMode === "json") {
+      return highlightJson(text);
+    }
+
+    if (highlightMode === "xml") {
+      return highlightXml(text);
+    }
+
+    if (highlightMode.startsWith("structured")) {
+      return highlightStructuredText(text, contentType);
+    }
+
+    return escapeHtml(text);
+  }
+
+  function renderPreviewContent(dialog, text, contentType) {
+    dialog.pre.innerHTML = getHighlightedPreviewHtml(text, contentType);
   }
 
   async function blobToPreview(blob, contentType) {
@@ -460,6 +577,20 @@
     pre.style.lineHeight = "1.5";
     pre.style.color = "#0f172a";
 
+    const style = document.createElement("style");
+    style.textContent = `
+      .gm-syntax-key { color: #9f1239; }
+      .gm-syntax-string { color: #0f766e; }
+      .gm-syntax-number { color: #1d4ed8; }
+      .gm-syntax-keyword { color: #7c3aed; font-weight: 600; }
+      .gm-syntax-tag { color: #475569; }
+      .gm-syntax-tag-name { color: #b45309; }
+      .gm-syntax-attr { color: #9a3412; }
+      .gm-syntax-punctuation { color: #64748b; }
+      .gm-syntax-comment { color: #6b7280; font-style: italic; }
+      .gm-syntax-cdata { color: #0f766e; }
+    `;
+
     body.append(notice, pre);
 
     const footer = document.createElement("div");
@@ -477,6 +608,7 @@
     footer.append(meta);
     panel.append(header, body, footer);
     backdrop.appendChild(panel);
+    backdrop.appendChild(style);
     document.body.appendChild(backdrop);
 
     backdrop.addEventListener("click", (event) => {
@@ -510,7 +642,7 @@
       if (!dialogState?.formattedText) return;
 
       dialogState.isFormatted = !dialogState.isFormatted;
-      dialogState.pre.textContent = dialogState.isFormatted ? dialogState.formattedText : dialogState.rawText;
+      renderPreviewContent(dialogState, dialogState.isFormatted ? dialogState.formattedText : dialogState.rawText, dialogState.meta.textContent);
       dialogState.formatButton.textContent = dialogState.isFormatted ? "Raw" : "Format";
     });
 
@@ -544,7 +676,7 @@
     dialog.rawText = text;
     dialog.formattedText = getFormattedPreviewText(text, meta);
     dialog.isFormatted = false;
-    dialog.pre.textContent = text;
+    renderPreviewContent(dialog, text, meta);
     dialog.meta.textContent = meta || "";
     dialog.notice.textContent = notice || "";
     dialog.notice.style.display = notice ? "block" : "none";
@@ -609,11 +741,32 @@
     }
   }
 
-  function createButtonIcon(symbol) {
-    const icon = document.createElement("span");
-    icon.textContent = symbol;
-    icon.style.fontSize = "16px";
-    icon.style.lineHeight = "1";
+  function createButtonIcon() {
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("width", "18");
+    icon.setAttribute("height", "18");
+    icon.setAttribute("aria-hidden", "true");
+    icon.style.display = "block";
+
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "11");
+    circle.setAttribute("cy", "11");
+    circle.setAttribute("r", "6");
+    circle.setAttribute("fill", "none");
+    circle.setAttribute("stroke", "currentColor");
+    circle.setAttribute("stroke-width", "2");
+
+    const handle = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    handle.setAttribute("x1", "15.5");
+    handle.setAttribute("y1", "15.5");
+    handle.setAttribute("x2", "21");
+    handle.setAttribute("y2", "21");
+    handle.setAttribute("stroke", "currentColor");
+    handle.setAttribute("stroke-width", "2");
+    handle.setAttribute("stroke-linecap", "round");
+
+    icon.append(circle, handle);
     return icon;
   }
 
@@ -638,7 +791,8 @@
     button.style.padding = "0";
     button.style.marginLeft = options.marginLeft || "6px";
     button.style.flex = "0 0 auto";
-    button.appendChild(createButtonIcon("🔍"));
+    button.style.color = window.getComputedStyle(referenceButton).color;
+    button.appendChild(createButtonIcon());
 
     if (options.disabled) {
       button.disabled = true;
