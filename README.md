@@ -18,8 +18,11 @@ Go to TamperMonkey addon
 | Copy uuBml as PNG to clipboard | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/uubml-copy-as-png.js] |
 | Autoclose authentication page | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/close-auth-page.js] |
 | JSONATA JAVA Checker | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.js] |
+| Message Registry - Preview downloads | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.js] |
 
 ## Changelog
 
 * 1.0 - initial version
 * 1.1 - fix of block element text
+* 1.2 - add message detail download preview userscript
+* 1.3 - add preview format button for JSON and XML payloads
