@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.8
+// @version      1.10
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -16,6 +16,7 @@
   const SCRIPT_FLAG = "__gmMessageRegistryPreviewDownloads";
   const PREVIEW_TIMEOUT_MS = 15000;
   const DOWNLOAD_SUPPRESSION_MS = 5000;
+  const SYNTAX_HIGHLIGHT_MAX_CHARS = 50000;
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
 
@@ -140,6 +141,42 @@
     } catch {
       return "download.bin";
     }
+  }
+
+  function formatFileSize(sizeInBytes) {
+    if (!Number.isFinite(sizeInBytes) || sizeInBytes < 0) {
+      return null;
+    }
+
+    const units = ["B", "KB", "MB", "GB"];
+    let size = sizeInBytes;
+    let unitIndex = 0;
+
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex += 1;
+    }
+
+    const roundedSize = size >= 100 || unitIndex === 0 ? Math.round(size) : size.toFixed(1);
+    return `${roundedSize} ${units[unitIndex]}`;
+  }
+
+  async function copyTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
   }
 
   function getCurrentMessageId() {
@@ -431,8 +468,83 @@
     return escapeHtml(text);
   }
 
+  function shouldUseSyntaxHighlight(text) {
+    return text.length <= SYNTAX_HIGHLIGHT_MAX_CHARS;
+  }
+
   function renderPreviewContent(dialog, text, contentType) {
+    if (!shouldUseSyntaxHighlight(text)) {
+      dialog.pre.textContent = text;
+      return;
+    }
+
     dialog.pre.innerHTML = getHighlightedPreviewHtml(text, contentType);
+  }
+
+  function createDialogActionIcon(kind) {
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("width", "18");
+    icon.setAttribute("height", "18");
+    icon.setAttribute("aria-hidden", "true");
+    icon.style.display = "block";
+
+    const addPath = (d, fill = "none") => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", fill);
+      path.setAttribute("stroke", fill === "none" ? "currentColor" : "none");
+      path.setAttribute("stroke-width", "2");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      icon.appendChild(path);
+    };
+
+    if (kind === "download") {
+      addPath("M12 4v9");
+      addPath("M8.5 10.5 12 14l3.5-3.5");
+      addPath("M7 18h10");
+      return icon;
+    }
+
+    if (kind === "copy") {
+      addPath("M9 9h10v12H9z");
+      addPath("M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1");
+      return icon;
+    }
+
+    if (kind === "format") {
+      addPath("M8 9 5 12l3 3");
+      addPath("M16 9l3 3-3 3");
+      addPath("M10 12h4");
+      return icon;
+    }
+
+    addPath("M6 6l12 12");
+    addPath("M18 6 6 18");
+    return icon;
+  }
+
+  function styleDialogActionControl(control, isPrimary = false) {
+    control.style.display = "inline-flex";
+    control.style.alignItems = "center";
+    control.style.justifyContent = "center";
+    control.style.width = "40px";
+    control.style.minWidth = "40px";
+    control.style.height = "40px";
+    control.style.padding = "0";
+    control.style.border = "none";
+    control.style.borderRadius = "999px";
+    control.style.background = isPrimary ? "#0f172a" : "#e2e8f0";
+    control.style.color = isPrimary ? "#ffffff" : "#0f172a";
+    control.style.cursor = "pointer";
+    control.style.textDecoration = "none";
+    control.style.flex = "0 0 auto";
+  }
+
+  function setDialogActionLabel(control, label) {
+    control.title = label;
+    control.setAttribute("aria-label", label);
   }
 
   async function blobToPreview(blob, contentType) {
@@ -508,52 +620,32 @@
     actions.style.flexShrink = "0";
 
     const downloadLink = document.createElement("a");
-    downloadLink.textContent = "Download";
     downloadLink.style.display = "none";
-    downloadLink.style.alignItems = "center";
-    downloadLink.style.justifyContent = "center";
-    downloadLink.style.borderRadius = "999px";
-    downloadLink.style.padding = "10px 16px";
-    downloadLink.style.background = "#e2e8f0";
-    downloadLink.style.color = "#0f172a";
-    downloadLink.style.textDecoration = "none";
-    downloadLink.style.fontSize = "13px";
-    downloadLink.style.lineHeight = "1";
-    downloadLink.style.whiteSpace = "nowrap";
+    styleDialogActionControl(downloadLink);
+    setDialogActionLabel(downloadLink, "Download file");
+    downloadLink.appendChild(createDialogActionIcon("download"));
+
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    styleDialogActionControl(copyButton);
+    setDialogActionLabel(copyButton, "Copy content");
+    copyButton.appendChild(createDialogActionIcon("copy"));
 
     const formatButton = document.createElement("button");
     formatButton.type = "button";
-    formatButton.textContent = "Format";
     formatButton.style.display = "none";
-    formatButton.style.alignItems = "center";
-    formatButton.style.justifyContent = "center";
-    formatButton.style.flex = "0 0 auto";
-    formatButton.style.border = "none";
-    formatButton.style.borderRadius = "999px";
-    formatButton.style.padding = "10px 16px";
-    formatButton.style.width = "84px";
-    formatButton.style.background = "#e2e8f0";
-    formatButton.style.color = "#0f172a";
-    formatButton.style.cursor = "pointer";
-    formatButton.style.fontSize = "13px";
-    formatButton.style.lineHeight = "1";
+    styleDialogActionControl(formatButton);
+    setDialogActionLabel(formatButton, "Format content");
+    formatButton.appendChild(createDialogActionIcon("format"));
 
     const closeButton = document.createElement("button");
     closeButton.type = "button";
-    closeButton.textContent = "Close";
-    closeButton.style.display = "inline-flex";
-    closeButton.style.alignItems = "center";
-    closeButton.style.justifyContent = "center";
-    closeButton.style.flex = "0 0 auto";
-    closeButton.style.border = "none";
-    closeButton.style.borderRadius = "999px";
-    closeButton.style.padding = "10px 16px";
-    closeButton.style.background = "#0f172a";
-    closeButton.style.color = "#ffffff";
-    closeButton.style.cursor = "pointer";
+    styleDialogActionControl(closeButton, true);
+    setDialogActionLabel(closeButton, "Close preview");
+    closeButton.appendChild(createDialogActionIcon("close"));
     closeButton.addEventListener("click", () => hideDialog());
 
-    actions.append(downloadLink, formatButton, closeButton);
+    actions.append(downloadLink, copyButton, formatButton, closeButton);
     header.append(headingWrap, actions);
 
     const body = document.createElement("div");
@@ -631,6 +723,7 @@
       pre,
       meta,
       downloadLink,
+      copyButton,
       formatButton,
       rawText: "",
       formattedText: null,
@@ -643,7 +736,33 @@
 
       dialogState.isFormatted = !dialogState.isFormatted;
       renderPreviewContent(dialogState, dialogState.isFormatted ? dialogState.formattedText : dialogState.rawText, dialogState.meta.textContent);
-      dialogState.formatButton.textContent = dialogState.isFormatted ? "Raw" : "Format";
+      setDialogActionLabel(dialogState.formatButton, dialogState.isFormatted ? "Show raw content" : "Format content");
+    });
+
+    copyButton.addEventListener("click", async () => {
+      if (!dialogState) return;
+
+      const contentToCopy = dialogState.isFormatted && dialogState.formattedText ? dialogState.formattedText : dialogState.rawText;
+      if (!contentToCopy) return;
+
+      const originalBackground = copyButton.style.background;
+      const originalColor = copyButton.style.color;
+      try {
+        await copyTextToClipboard(contentToCopy);
+        copyButton.style.background = "#dcfce7";
+        copyButton.style.color = "#166534";
+        setDialogActionLabel(copyButton, "Copied");
+        window.setTimeout(() => {
+          copyButton.style.background = originalBackground;
+          copyButton.style.color = originalColor;
+          setDialogActionLabel(copyButton, "Copy content");
+        }, 1200);
+      } catch {
+        setDialogActionLabel(copyButton, "Copy failed");
+        window.setTimeout(() => {
+          setDialogActionLabel(copyButton, "Copy content");
+        }, 1200);
+      }
     });
 
     return dialogState;
@@ -680,7 +799,8 @@
     dialog.meta.textContent = meta || "";
     dialog.notice.textContent = notice || "";
     dialog.notice.style.display = notice ? "block" : "none";
-    dialog.formatButton.textContent = "Format";
+    setDialogActionLabel(dialog.copyButton, "Copy content");
+    setDialogActionLabel(dialog.formatButton, "Format content");
     dialog.formatButton.style.display = dialog.formattedText ? "inline-flex" : "none";
 
     if (blob) {
@@ -703,7 +823,8 @@
     const previewBlob = await response.clone().blob();
     const previewText = await blobToPreview(previewBlob, contentType);
     const statusLabel = `${response.status} ${response.statusText}`.trim();
-    const meta = `Status: ${statusLabel} | Content-Type: ${contentType} | Filename: ${filename}`;
+    const sizeLabel = formatFileSize(previewBlob.size);
+    const meta = `Status: ${statusLabel} | Content-Type: ${contentType} | Filename: ${filename}${sizeLabel ? ` | Size: ${sizeLabel}` : ""}`;
 
     showDialog({
       title: previewInfo.title,
@@ -933,7 +1054,7 @@
               text:
                 previewText ||
                 `Binary content cannot be rendered safely as text.\n\nContent-Type: ${blob.type || "application/octet-stream"}\nSize: ${blob.size} bytes`,
-              meta: `Captured a generated blob (${blob.type || "application/octet-stream"}).`,
+              meta: `Captured a generated blob (${blob.type || "application/octet-stream"})${formatFileSize(blob.size) ? ` | Size: ${formatFileSize(blob.size)}` : ""}.`,
               blob,
               filename: previewInfo.filename || "download.bin",
               notice: previewText ? "" : "Use Download if you still want the original file.",
