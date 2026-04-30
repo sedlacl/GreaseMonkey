@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Message Registry - Auto refresh
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.1
+// @version      1.2
 // @description  Adds an auto refresh checkbox to Message Registry messages list.
 // @author       Lukáš Sedláček
-// @match        *://*/uu-energygateway-messageregistryg01/*/messages*
+// @match        *://*/uu-energygateway-messageregistryg01/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.js
 // @downloadURL  https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.js
@@ -27,6 +27,14 @@
   let isEnabled = getStoredValue(STORAGE_KEY) === "true";
   let countdownStartedAt = getLastReloadTimestamp() || Date.now();
   let lastProgressRatio = 0;
+
+  function isMessagesPage() {
+    return /\/messages(?:$|[/?#])/u.test(window.location.pathname);
+  }
+
+  function removeControl() {
+    document.getElementById(CONTROL_ID)?.remove();
+  }
 
   function getStoredValue(key) {
     try {
@@ -127,6 +135,11 @@
   }
 
   function ensureControl() {
+    if (!isMessagesPage()) {
+      removeControl();
+      return;
+    }
+
     const bookmarkButton = getBookmarkButton();
     const controlHost = getControlHost();
     const actionGroup = bookmarkButton?.parentElement || null;
@@ -212,7 +225,7 @@
   }
 
   function triggerRefresh() {
-    if (!isEnabled) {
+    if (!isMessagesPage() || !isEnabled) {
       return;
     }
 

@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.14
+// @version      1.15
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
-// @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
+// @match        *://*/uu-energygateway-messageregistryg01/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.js
 // @downloadURL  https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.js
@@ -28,6 +28,10 @@
   let pendingPreviewTimeout = null;
   let suppressDownloadsUntil = 0;
   let dialogState = null;
+
+  function isMessageDetailPage() {
+    return /\/messageDetail(?:$|[/?#])/u.test(window.location.pathname);
+  }
 
   function armPreview(info) {
     pendingPreview = {
@@ -181,6 +185,10 @@
   }
 
   function getCurrentMessageId() {
+    if (!isMessageDetailPage()) {
+      return null;
+    }
+
     return new URL(window.location.href).searchParams.get("messageId");
   }
 
@@ -1283,6 +1291,11 @@
   }
 
   function ensurePayloadPreviewButtons() {
+    if (!isMessageDetailPage()) {
+      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="payload"]`).forEach((button) => button.remove());
+      return;
+    }
+
     [...document.querySelectorAll(PAYLOAD_BUTTON_SELECTOR)]
       .filter((button) => button instanceof HTMLButtonElement)
       .forEach((button) => {
@@ -1307,6 +1320,11 @@
   }
 
   function ensureMessageSourceButton() {
+    if (!isMessageDetailPage()) {
+      document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`)?.remove();
+      return;
+    }
+
     const internalButton = document.querySelector('[data-testid="internal-payload-button"]');
     if (!(internalButton instanceof HTMLButtonElement)) {
       return;
@@ -1337,6 +1355,11 @@
   }
 
   function ensureChannelMetadataButton() {
+    if (!isMessageDetailPage()) {
+      document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`)?.remove();
+      return;
+    }
+
     const headerText = Array.from(document.querySelectorAll('[data-testid="page-header-text"]')).find((node) => {
       return BUSINESS_METADATA_LABELS.includes((node.textContent || "").trim());
     });
@@ -1363,6 +1386,11 @@
   }
 
   function ensureAttachmentPreviewButtons() {
+    if (!isMessageDetailPage()) {
+      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="attachment"]`).forEach((button) => button.remove());
+      return;
+    }
+
     document.querySelectorAll("tr a[role='link']").forEach((link) => {
       if (!(link instanceof HTMLAnchorElement)) {
         return;
