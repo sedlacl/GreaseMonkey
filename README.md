@@ -8,18 +8,20 @@ If you want, you can use them but on your own risk.
 
 ## Installation
 
-Go to TamperMonkey addon
+Click the install link below. In TamperMonkey or GreaseMonkey it should open the install or update prompt directly.
 
-* page Settings (Nastavení)
-* Import from URL - use addresses bellow
+If direct install is blocked by the browser, use the same URL in the addon page:
+
+* Settings (Nastaveni)
+* Import from URL
 
 | Addon | Address |
 | --- | --- |
-| Copy uuBml as PNG to clipboard | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/uubml-copy-as-png.js] |
-| Autoclose authentication page | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/close-auth-page.js] |
-| JSONATA JAVA Checker | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.js] |
-| Message Registry - Auto refresh | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.js] |
-| Message Registry - Preview downloads | [https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.js] |
+| Copy uuBml as PNG to clipboard | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/uubml-copy-as-png.user.js) |
+| Autoclose authentication page | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/close-auth-page.user.js) |
+| JSONATA JAVA Checker | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.user.js) |
+| Message Registry - Auto refresh | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.user.js) |
+| Message Registry - Preview downloads | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js) |
 
 ## Changelog
 
