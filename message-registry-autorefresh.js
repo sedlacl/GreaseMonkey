@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Auto refresh
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.0
+// @version      1.1
 // @description  Adds an auto refresh checkbox to Message Registry messages list.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messages*
@@ -19,6 +19,7 @@
   const CONTROL_ID = "gm-message-registry-autorefresh";
   const STORAGE_KEY = "gm-message-registry-autorefresh-enabled";
   const LAST_RELOAD_STORAGE_KEY = "gm-message-registry-autorefresh-last-reload";
+  const RELOAD_BUTTON_LABELS = ["Reload Data", "Obnovit data"];
 
   if (window[SCRIPT_FLAG]) return;
   window[SCRIPT_FLAG] = true;
@@ -91,9 +92,21 @@
     return document.querySelector(".uugds-bookmark")?.closest("button") || null;
   }
 
+  function getControlHost() {
+    return getBookmarkButton()?.parentElement?.parentElement || null;
+  }
+
   function getReloadButton() {
-    const button = document.querySelector('button[title="Reload Data"]');
-    return button instanceof HTMLButtonElement ? button : null;
+    const button = Array.from(document.querySelectorAll("button")).find((candidate) => {
+      if (!(candidate instanceof HTMLButtonElement)) {
+        return false;
+      }
+
+      const label = candidate.getAttribute("title") || candidate.getAttribute("aria-label") || "";
+      return RELOAD_BUTTON_LABELS.includes(label.trim());
+    });
+
+    return button || null;
   }
 
   function setEnabled(nextValue) {
@@ -115,12 +128,15 @@
 
   function ensureControl() {
     const bookmarkButton = getBookmarkButton();
-    if (!bookmarkButton?.parentElement) {
+    const controlHost = getControlHost();
+    const actionGroup = bookmarkButton?.parentElement || null;
+
+    if (!bookmarkButton || !controlHost || !actionGroup) {
       return;
     }
 
     const existingControl = document.getElementById(CONTROL_ID);
-    if (existingControl?.parentElement === bookmarkButton.parentElement) {
+    if (existingControl?.parentElement === controlHost) {
       const checkbox = existingControl.querySelector("input");
       if (checkbox instanceof HTMLInputElement) {
         checkbox.checked = isEnabled;
@@ -137,7 +153,7 @@
     wrapper.style.flexDirection = "column";
     wrapper.style.alignSelf = "center";
     wrapper.style.gap = "4px";
-    wrapper.style.marginRight = "12px";
+    wrapper.style.marginLeft = "12px";
 
     const label = document.createElement("label");
     label.style.display = "inline-flex";
@@ -183,7 +199,7 @@
     progressTrack.appendChild(progressFill);
     label.append(checkbox, text);
     wrapper.append(label, progressTrack);
-    bookmarkButton.insertAdjacentElement("beforebegin", wrapper);
+    actionGroup.insertAdjacentElement("afterend", wrapper);
     updateControlTooltip();
     updateProgressBar();
   }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.12
+// @version      1.13
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -198,6 +198,17 @@
     url.searchParams.set("payloadType", payloadType);
     url.searchParams.set("contentDisposition", "inline");
     url.searchParams.set("forceDownload", "false");
+    return url.toString();
+  }
+
+  function buildMessageSourcePreviewUrl() {
+    const messageId = getCurrentMessageId();
+    if (!messageId) {
+      throw new Error("Message ID was not found in the current URL.");
+    }
+
+    const url = new URL(`${window.location.origin}${getWorkspaceBaseUri()}/message/get`);
+    url.searchParams.set("id", messageId);
     return url.toString();
   }
 
@@ -701,6 +712,13 @@
       return icon;
     }
 
+    if (kind === "source") {
+      addPath("M8.5 8.5 5 12l3.5 3.5");
+      addPath("M15.5 8.5 19 12l-3.5 3.5");
+      addPath("M13 6.5 11 17.5");
+      return icon;
+    }
+
     addPath("M6 6l12 12");
     addPath("M18 6 6 18");
     return icon;
@@ -1044,13 +1062,60 @@
     }
   }
 
-  function createButtonIcon() {
+  async function previewMessageSourceDirectly() {
+    const requestUrl = buildMessageSourcePreviewUrl();
+
+    try {
+      const response = await window.fetch(requestUrl, {
+        headers: {
+          Accept: "application/json",
+        },
+      });
+      const sourceBlob = await response.clone().blob();
+      const sourceText = await response.text();
+
+      if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`.trim() + (sourceText ? `\n\n${sourceText}` : ""));
+      }
+
+      const contentType = response.headers.get("content-type") || "application/json";
+      const sizeLabel = formatFileSize(sourceBlob.size);
+      showDialog({
+        title: "Message Source",
+        subtitle: requestUrl,
+        text: sourceText,
+        meta: `Status: ${`${response.status} ${response.statusText}`.trim()} | Content-Type: ${contentType}${sizeLabel ? ` | Size: ${sizeLabel}` : ""}`,
+      });
+    } catch (error) {
+      await showErrorPreview(error, requestUrl, { title: "Message Source" });
+    }
+  }
+
+  function createButtonIcon(kind = "preview") {
     const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     icon.setAttribute("viewBox", "0 0 24 24");
     icon.setAttribute("width", "18");
     icon.setAttribute("height", "18");
     icon.setAttribute("aria-hidden", "true");
     icon.style.display = "block";
+
+    const addPath = (d, fill = "none") => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", fill);
+      path.setAttribute("stroke", fill === "none" ? "currentColor" : "none");
+      path.setAttribute("stroke-width", "2");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      icon.appendChild(path);
+    };
+
+    if (kind === "source") {
+      addPath("M8.5 8.5 5 12l3.5 3.5");
+      addPath("M15.5 8.5 19 12l-3.5 3.5");
+      addPath("M13 6.5 11 17.5");
+      return icon;
+    }
 
     const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     circle.setAttribute("cx", "11");
@@ -1095,7 +1160,7 @@
     button.style.marginLeft = options.marginLeft || "6px";
     button.style.flex = "0 0 auto";
     button.style.color = window.getComputedStyle(referenceButton).color;
-    button.appendChild(createButtonIcon());
+    button.appendChild(createButtonIcon(options.kind));
 
     if (options.disabled) {
       button.disabled = true;
@@ -1146,6 +1211,36 @@
       });
   }
 
+  function ensureMessageSourceButton() {
+    const internalButton = document.querySelector('[data-testid="internal-payload-button"]');
+    if (!(internalButton instanceof HTMLButtonElement)) {
+      return;
+    }
+
+    const payloadPreviewButton =
+      internalButton.nextElementSibling?.classList?.contains(PREVIEW_BUTTON_CLASS) && internalButton.nextElementSibling.dataset.previewKind === "payload"
+        ? internalButton.nextElementSibling
+        : null;
+    const anchorElement = payloadPreviewButton || internalButton;
+    const existingButton = document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`);
+
+    if (existingButton?.previousElementSibling === anchorElement) {
+      return;
+    }
+
+    existingButton?.remove();
+    anchorElement.insertAdjacentElement(
+      "afterend",
+      createPreviewButton(internalButton, {
+        kind: "source",
+        title: "Preview message source",
+        onClick: () => {
+          void previewMessageSourceDirectly();
+        },
+      }),
+    );
+  }
+
   function ensureAttachmentPreviewButtons() {
     document.querySelectorAll("tr a[role='link']").forEach((link) => {
       if (!(link instanceof HTMLAnchorElement)) {
@@ -1182,16 +1277,19 @@
 
   function observePayloadButtons() {
     ensurePayloadPreviewButtons();
+    ensureMessageSourceButton();
     ensureAttachmentPreviewButtons();
 
     const observer = new MutationObserver(() => {
       ensurePayloadPreviewButtons();
+      ensureMessageSourceButton();
       ensureAttachmentPreviewButtons();
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
     window.setInterval(() => {
       ensurePayloadPreviewButtons();
+      ensureMessageSourceButton();
       ensureAttachmentPreviewButtons();
     }, 1000);
   }
