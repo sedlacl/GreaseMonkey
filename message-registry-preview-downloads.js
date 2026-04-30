@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.13
+// @version      1.14
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*/messageDetail*
@@ -19,6 +19,7 @@
   const SYNTAX_HIGHLIGHT_MAX_CHARS = 50000;
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
+  const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
 
   if (window[SCRIPT_FLAG]) return;
   window[SCRIPT_FLAG] = true;
@@ -673,6 +674,23 @@
     dialog.pre.innerHTML = getHighlightedPreviewHtml(text, contentType, dialog.isFormatted);
   }
 
+  function scrollDialogToText(dialog, searchText) {
+    if (!searchText) {
+      return;
+    }
+
+    const currentText = dialog.isFormatted && dialog.formattedText ? dialog.formattedText : dialog.rawText;
+    const matchIndex = currentText.indexOf(searchText);
+    if (matchIndex < 0) {
+      return;
+    }
+
+    const linesBeforeMatch = currentText.slice(0, matchIndex).split("\n").length - 1;
+    const lineHeight = Number.parseFloat(window.getComputedStyle(dialog.pre).lineHeight) || 20;
+    const paddingTop = Number.parseFloat(window.getComputedStyle(dialog.pre).paddingTop) || 0;
+    dialog.body.scrollTop = Math.max(0, linesBeforeMatch * lineHeight + paddingTop);
+  }
+
   function createDialogActionIcon(kind) {
     const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     icon.setAttribute("viewBox", "0 0 24 24");
@@ -917,6 +935,7 @@
 
     dialogState = {
       backdrop,
+      body,
       title,
       subtitle,
       notice,
@@ -982,7 +1001,7 @@
     dialogState.downloadLink.removeAttribute("download");
   }
 
-  function showDialog({ title, subtitle, text, meta, blob, filename, notice }) {
+  function showDialog({ title, subtitle, text, meta, blob, filename, notice, initialFormatted = false, scrollToText = null }) {
     const dialog = ensureDialog();
 
     if (dialog.objectUrl) {
@@ -994,13 +1013,13 @@
     dialog.subtitle.textContent = subtitle || "";
     dialog.rawText = text;
     dialog.formattedText = getFormattedPreviewText(text, meta);
-    dialog.isFormatted = false;
-    renderPreviewContent(dialog, text, meta);
+    dialog.isFormatted = Boolean(initialFormatted && dialog.formattedText);
+    renderPreviewContent(dialog, dialog.isFormatted && dialog.formattedText ? dialog.formattedText : text, meta);
     dialog.meta.textContent = meta || "";
     dialog.notice.textContent = notice || "";
     dialog.notice.style.display = notice ? "block" : "none";
     setDialogActionLabel(dialog.copyButton, "Copy content");
-    updateFormatButtonState(dialog.formatButton, false);
+    updateFormatButtonState(dialog.formatButton, dialog.isFormatted);
     dialog.formatButton.style.display = dialog.formattedText ? "inline-flex" : "none";
 
     if (blob) {
@@ -1015,6 +1034,13 @@
     }
 
     dialog.backdrop.style.display = "flex";
+    dialog.body.scrollTop = 0;
+
+    if (scrollToText) {
+      window.requestAnimationFrame(() => {
+        scrollDialogToText(dialog, scrollToText);
+      });
+    }
   }
 
   async function showResponsePreview(response, requestUrl, previewInfo) {
@@ -1085,9 +1111,41 @@
         subtitle: requestUrl,
         text: sourceText,
         meta: `Status: ${`${response.status} ${response.statusText}`.trim()} | Content-Type: ${contentType}${sizeLabel ? ` | Size: ${sizeLabel}` : ""}`,
+        initialFormatted: true,
       });
     } catch (error) {
       await showErrorPreview(error, requestUrl, { title: "Message Source" });
+    }
+  }
+
+  async function previewChannelMetadataDirectly() {
+    const requestUrl = buildMessageSourcePreviewUrl();
+
+    try {
+      const response = await window.fetch(requestUrl, {
+        headers: {
+          Accept: "application/json",
+        },
+      });
+      const sourceBlob = await response.clone().blob();
+      const sourceText = await response.text();
+
+      if (!response.ok) {
+        throw new Error(`${response.status} ${response.statusText}`.trim() + (sourceText ? `\n\n${sourceText}` : ""));
+      }
+
+      const contentType = response.headers.get("content-type") || "application/json";
+      const sizeLabel = formatFileSize(sourceBlob.size);
+      showDialog({
+        title: "Channel Metadata",
+        subtitle: requestUrl,
+        text: sourceText,
+        meta: `Status: ${`${response.status} ${response.statusText}`.trim()} | Content-Type: ${contentType}${sizeLabel ? ` | Size: ${sizeLabel}` : ""}`,
+        initialFormatted: true,
+        scrollToText: '"channelMetadata": {',
+      });
+    } catch (error) {
+      await showErrorPreview(error, requestUrl, { title: "Channel Metadata" });
     }
   }
 
@@ -1114,6 +1172,12 @@
       addPath("M8.5 8.5 5 12l3.5 3.5");
       addPath("M15.5 8.5 19 12l-3.5 3.5");
       addPath("M13 6.5 11 17.5");
+      return icon;
+    }
+
+    if (kind === "hidden") {
+      addPath("M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6");
+      addPath("M5 5l14 14");
       return icon;
     }
 
@@ -1175,6 +1239,37 @@
       });
     }
 
+    return button;
+  }
+
+  function createSectionActionButton(options) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = PREVIEW_BUTTON_CLASS;
+    button.title = options.title;
+    button.setAttribute("aria-label", options.title);
+    button.dataset.previewKind = options.kind;
+    button.style.display = "inline-flex";
+    button.style.alignItems = "center";
+    button.style.justifyContent = "center";
+    button.style.width = "28px";
+    button.style.minWidth = "28px";
+    button.style.height = "28px";
+    button.style.padding = "0";
+    button.style.marginLeft = "8px";
+    button.style.border = "none";
+    button.style.borderRadius = "999px";
+    button.style.background = "transparent";
+    button.style.color = "#475569";
+    button.style.cursor = "pointer";
+    button.style.verticalAlign = "middle";
+    button.appendChild(createButtonIcon(options.kind));
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      options.onClick();
+    });
     return button;
   }
 
@@ -1241,6 +1336,32 @@
     );
   }
 
+  function ensureChannelMetadataButton() {
+    const headerText = Array.from(document.querySelectorAll('[data-testid="page-header-text"]')).find((node) => {
+      return BUSINESS_METADATA_LABELS.includes((node.textContent || "").trim());
+    });
+    if (!(headerText instanceof HTMLSpanElement)) {
+      return;
+    }
+
+    const existingButton = document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`);
+    if (existingButton?.previousElementSibling === headerText) {
+      return;
+    }
+
+    existingButton?.remove();
+    headerText.insertAdjacentElement(
+      "afterend",
+      createSectionActionButton({
+        kind: "hidden",
+        title: "Channel metadata",
+        onClick: () => {
+          void previewChannelMetadataDirectly();
+        },
+      }),
+    );
+  }
+
   function ensureAttachmentPreviewButtons() {
     document.querySelectorAll("tr a[role='link']").forEach((link) => {
       if (!(link instanceof HTMLAnchorElement)) {
@@ -1278,11 +1399,13 @@
   function observePayloadButtons() {
     ensurePayloadPreviewButtons();
     ensureMessageSourceButton();
+    ensureChannelMetadataButton();
     ensureAttachmentPreviewButtons();
 
     const observer = new MutationObserver(() => {
       ensurePayloadPreviewButtons();
       ensureMessageSourceButton();
+      ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
     });
 
@@ -1290,6 +1413,7 @@
     window.setInterval(() => {
       ensurePayloadPreviewButtons();
       ensureMessageSourceButton();
+      ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
     }, 1000);
   }
