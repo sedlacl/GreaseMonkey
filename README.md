@@ -22,6 +22,13 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 | JSONATA JAVA Checker | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.user.js) |
 | Message Registry - Auto refresh | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.user.js) |
 | Message Registry - Preview downloads | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js) |
+| Message Registry - Preview downloads (UUCloud1) | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.uucloud1.user.js) |
+
+## Notes
+
+Use `Message Registry - Preview downloads` for the standard `uu-energygateway-messageregistryg01` UI.
+
+Use `Message Registry - Preview downloads (UUCloud1)` for the `usy-idsmari-messageregistryg01` / IDS Apps variant. This version keeps the same preview dialogs and formatting tools, but adds compatibility fixes for older UU5 rendering, attachment button placement, and authenticated preview requests.
 
 ## Changelog
 
@@ -30,3 +37,4 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 * 1.2 - add message detail download preview userscript
 * 1.3 - add preview format button for JSON and XML payloads
 * 1.4 - add message registry auto refresh userscript
+* 1.5 - add UUCloud1-specific message registry preview downloads variant
