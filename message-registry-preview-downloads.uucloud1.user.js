@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads (UUCloud1)
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.15
+// @version      1.18
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/usy-idsmari-messageregistryg01/*
@@ -22,6 +22,18 @@
   const LEGACY_ACTION_SELECTOR = "button, a[role='button'], a[role='link'], [role='button']";
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
   const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
+  const MESSAGE_DETAIL_GRID_SELECTOR = "tbody.uutileselements-fib3tt";
+  const MESSAGE_DETAIL_LEGACY_TABLE_SELECTOR = ".uu5-bricks-table-responsive > table.uu5-bricks-table-table";
+  const MESSAGE_DETAIL_GRID_FIXED_COLUMNS = Object.freeze({
+    first: 200,
+    second: 100,
+    thirdMin: 200,
+    thirdMax: 400,
+    fourthMin: 400,
+    fifth: 120,
+    sixth: 0,
+    panelAdjustment: 4,
+  });
 
   if (window[SCRIPT_FLAG]) return;
   window[SCRIPT_FLAG] = true;
@@ -30,9 +42,215 @@
   let pendingPreviewTimeout = null;
   let suppressDownloadsUntil = 0;
   let dialogState = null;
+  let responsiveGridFrame = 0;
 
   function isMessageDetailPage() {
     return /\/messageDetail(?:$|[/?#])/u.test(window.location.pathname);
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  function getResponsiveMessageDetailColumnSizes(panelWidth, hasSixthColumn = false, fifthWidth = MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fifth) {
+    const reservedWidth =
+      MESSAGE_DETAIL_GRID_FIXED_COLUMNS.first +
+      MESSAGE_DETAIL_GRID_FIXED_COLUMNS.second +
+      fifthWidth +
+      (hasSixthColumn ? MESSAGE_DETAIL_GRID_FIXED_COLUMNS.sixth : 0);
+    const distributableWidth = Math.max(
+      MESSAGE_DETAIL_GRID_FIXED_COLUMNS.thirdMin + MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fourthMin,
+      panelWidth - reservedWidth - MESSAGE_DETAIL_GRID_FIXED_COLUMNS.panelAdjustment,
+    );
+    const thirdWidth = clamp(
+      distributableWidth - MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fourthMin,
+      MESSAGE_DETAIL_GRID_FIXED_COLUMNS.thirdMin,
+      MESSAGE_DETAIL_GRID_FIXED_COLUMNS.thirdMax,
+    );
+    const fourthWidth = Math.max(MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fourthMin, distributableWidth - thirdWidth);
+
+    return {
+      thirdWidth,
+      fourthWidth,
+      totalWidth:
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.first +
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.second +
+        thirdWidth +
+        fourthWidth +
+        fifthWidth +
+        (hasSixthColumn ? MESSAGE_DETAIL_GRID_FIXED_COLUMNS.sixth : 0),
+    };
+  }
+
+  function measureLegacyCellContentWidth(cell) {
+    const childElements = Array.from(cell.children);
+    if (childElements.length) {
+      return childElements.reduce((totalWidth, child) => {
+        if (!(child instanceof HTMLElement)) {
+          return totalWidth;
+        }
+
+        const style = window.getComputedStyle(child);
+        return totalWidth + child.getBoundingClientRect().width + (Number.parseFloat(style.marginLeft) || 0) + (Number.parseFloat(style.marginRight) || 0);
+      }, 0);
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    const contentWidth = range.getBoundingClientRect().width;
+    range.detach?.();
+    return contentWidth;
+  }
+
+  function measureLegacyColumnWidth(table, columnIndex, minimumWidth) {
+    const cells = [
+      table.tHead?.rows[0]?.cells[columnIndex],
+      ...Array.from(table.tBodies).flatMap((body) => Array.from(body.rows, (row) => row.cells[columnIndex])),
+    ].filter((cell) => cell instanceof HTMLTableCellElement);
+
+    return cells.reduce((maxWidth, cell) => {
+      const contentWidth = Math.ceil(measureLegacyCellContentWidth(cell));
+      const paddingLeft = Number.parseFloat(window.getComputedStyle(cell).paddingLeft) || 0;
+      const paddingRight = Number.parseFloat(window.getComputedStyle(cell).paddingRight) || 0;
+      return Math.max(maxWidth, contentWidth + paddingLeft + paddingRight + 8);
+    }, minimumWidth);
+  }
+
+  function ensureResponsiveMessageDetailGrids() {
+    if (!isMessageDetailPage()) {
+      return;
+    }
+
+    document.querySelectorAll(MESSAGE_DETAIL_GRID_SELECTOR).forEach((gridBody) => {
+      if (!(gridBody instanceof HTMLTableSectionElement)) {
+        return;
+      }
+
+      const table = gridBody.closest("table");
+      const wrapper = table?.parentElement;
+      const panel = table?.closest(".uuelements-1pvk5pq");
+      if (!(table instanceof HTMLTableElement) || !(wrapper instanceof HTMLDivElement) || !(panel instanceof HTMLDivElement)) {
+        return;
+      }
+
+      const panelWidth = Math.floor(panel.clientWidth || panel.getBoundingClientRect().width);
+      const { thirdWidth, fourthWidth, totalWidth } = getResponsiveMessageDetailColumnSizes(panelWidth, true);
+      const columns = `${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.first}px ${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.second}px ${thirdWidth}px ${fourthWidth}px ${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fifth}px ${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.sixth}px`;
+      const totalWidthPx = `${totalWidth}px`;
+
+      gridBody.style.gridTemplateColumns = columns;
+      table.style.width = totalWidthPx;
+      table.style.minWidth = totalWidthPx;
+      wrapper.style.width = totalWidthPx;
+      wrapper.style.minWidth = totalWidthPx;
+    });
+  }
+
+  function getLegacyMessageDetailPanel(table) {
+    return table.closest(".uu5-bricks-panel-body-body, .uu5-common-div, .uu5-bricks-panel-body") || table.parentElement;
+  }
+
+  function ensureLegacyColGroup(table, columnCount) {
+    let colGroup = table.querySelector("colgroup[data-gm-message-detail-columns='true']");
+    if (!(colGroup instanceof HTMLTableColElement) && !(colGroup instanceof HTMLTableSectionElement)) {
+      colGroup = document.createElement("colgroup");
+      colGroup.setAttribute("data-gm-message-detail-columns", "true");
+      table.insertBefore(colGroup, table.firstChild);
+    }
+
+    while (colGroup.children.length < columnCount) {
+      colGroup.appendChild(document.createElement("col"));
+    }
+
+    while (colGroup.children.length > columnCount) {
+      colGroup.lastElementChild?.remove();
+    }
+
+    return Array.from(colGroup.children);
+  }
+
+  function ensureResponsiveLegacyMessageDetailTables() {
+    if (!isMessageDetailPage()) {
+      return;
+    }
+
+    document.querySelectorAll(MESSAGE_DETAIL_LEGACY_TABLE_SELECTOR).forEach((table) => {
+      if (!(table instanceof HTMLTableElement)) {
+        return;
+      }
+
+      const wrapper = table.parentElement;
+      const panel = getLegacyMessageDetailPanel(table);
+      const bodyRows = table.tBodies[0]?.rows;
+      const columnCount = table.tHead?.rows[0]?.cells.length || bodyRows?.[0]?.cells.length || 0;
+      if (!(wrapper instanceof HTMLDivElement) || !(panel instanceof HTMLElement) || columnCount !== 5) {
+        return;
+      }
+
+      const panelWidth = Math.floor(panel.clientWidth || panel.getBoundingClientRect().width || wrapper.clientWidth);
+      const fifthWidth = measureLegacyColumnWidth(table, 4, MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fifth);
+      const { thirdWidth, fourthWidth, totalWidth } = getResponsiveMessageDetailColumnSizes(panelWidth, false, fifthWidth);
+      const totalWidthPx = `${totalWidth}px`;
+      const columnWidths = [
+        `${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.first}px`,
+        `${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.second}px`,
+        `${thirdWidth}px`,
+        `${fourthWidth}px`,
+        `${fifthWidth}px`,
+      ];
+
+      const cols = ensureLegacyColGroup(table, columnWidths.length);
+      cols.forEach((col, index) => {
+        if (!(col instanceof HTMLTableColElement)) {
+          return;
+        }
+
+        col.style.width = columnWidths[index];
+        col.style.minWidth = columnWidths[index];
+      });
+
+      table.style.tableLayout = "fixed";
+      table.style.width = totalWidthPx;
+      table.style.minWidth = totalWidthPx;
+      wrapper.style.width = totalWidthPx;
+      wrapper.style.minWidth = totalWidthPx;
+
+      [table.tHead, ...table.tBodies].forEach((section) => {
+        if (!(section instanceof HTMLTableSectionElement)) {
+          return;
+        }
+
+        Array.from(section.rows).forEach((row) => {
+          Array.from(row.cells).forEach((cell, index) => {
+            const width = columnWidths[index];
+            if (!width) {
+              return;
+            }
+
+            cell.style.width = width;
+            cell.style.minWidth = width;
+            cell.style.maxWidth = width;
+            if (index === 2 || index === 3) {
+              cell.style.whiteSpace = "normal";
+              cell.style.overflowWrap = "anywhere";
+              cell.style.wordBreak = "break-word";
+            }
+          });
+        });
+      });
+    });
+  }
+
+  function scheduleResponsiveMessageDetailGridUpdate() {
+    if (responsiveGridFrame) {
+      return;
+    }
+
+    responsiveGridFrame = window.requestAnimationFrame(() => {
+      responsiveGridFrame = 0;
+      ensureResponsiveMessageDetailGrids();
+      ensureResponsiveLegacyMessageDetailTables();
+    });
   }
 
   function armPreview(info) {
@@ -1594,12 +1812,14 @@
     ensureMessageSourceButton();
     ensureChannelMetadataButton();
     ensureAttachmentPreviewButtons();
+    scheduleResponsiveMessageDetailGridUpdate();
 
     const observer = new MutationObserver(() => {
       ensurePayloadPreviewButtons();
       ensureMessageSourceButton();
       ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
+      scheduleResponsiveMessageDetailGridUpdate();
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
@@ -1608,7 +1828,10 @@
       ensureMessageSourceButton();
       ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
+      scheduleResponsiveMessageDetailGridUpdate();
     }, 1000);
+
+    window.addEventListener("resize", scheduleResponsiveMessageDetailGridUpdate, { passive: true });
   }
 
   function patchFetch() {
@@ -1688,4 +1911,5 @@
   patchFetch();
   patchBlobDownloads();
   observePayloadButtons();
+  scheduleResponsiveMessageDetailGridUpdate();
 })();
