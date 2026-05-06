@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.16
+// @version      1.18
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -21,7 +21,16 @@
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
   const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
   const MESSAGE_DETAIL_GRID_SELECTOR = "tbody.uutileselements-fib3tt";
-  const MESSAGE_DETAIL_GRID_COLUMNS = "minmax(100px, 200px) minmax(80px, 100px) minmax(200px, 400px) minmax(400px, 1fr) minmax(80px, 120px) 0px";
+  const MESSAGE_DETAIL_GRID_FIXED_COLUMNS = Object.freeze({
+    first: 200,
+    second: 100,
+    thirdMin: 200,
+    thirdMax: 400,
+    fourthMin: 400,
+    fifth: 120,
+    sixth: 0,
+    panelAdjustment: 4,
+  });
 
   if (window[SCRIPT_FLAG]) return;
   window[SCRIPT_FLAG] = true;
@@ -36,6 +45,10 @@
     return /\/messageDetail(?:$|[/?#])/u.test(window.location.pathname);
   }
 
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
   function ensureResponsiveMessageDetailGrids() {
     if (!isMessageDetailPage()) {
       return;
@@ -46,13 +59,44 @@
         return;
       }
 
-      if (!gridBody.closest(".uuelements-1pvk5pq")) {
+      const table = gridBody.closest("table");
+      const wrapper = table?.parentElement;
+      const panel = table?.closest(".uuelements-1pvk5pq");
+      if (!(table instanceof HTMLTableElement) || !(wrapper instanceof HTMLDivElement) || !(panel instanceof HTMLDivElement)) {
         return;
       }
 
-      if (gridBody.style.gridTemplateColumns !== MESSAGE_DETAIL_GRID_COLUMNS) {
-        gridBody.style.gridTemplateColumns = MESSAGE_DETAIL_GRID_COLUMNS;
-      }
+      const panelWidth = Math.floor(panel.clientWidth || panel.getBoundingClientRect().width);
+      const reservedWidth =
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.first +
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.second +
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fifth +
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.sixth;
+      const distributableWidth = Math.max(
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.thirdMin + MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fourthMin,
+        panelWidth - reservedWidth - MESSAGE_DETAIL_GRID_FIXED_COLUMNS.panelAdjustment,
+      );
+      const thirdWidth = clamp(
+        distributableWidth - MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fourthMin,
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.thirdMin,
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.thirdMax,
+      );
+      const fourthWidth = Math.max(MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fourthMin, distributableWidth - thirdWidth);
+      const totalWidth =
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.first +
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.second +
+        thirdWidth +
+        fourthWidth +
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fifth +
+        MESSAGE_DETAIL_GRID_FIXED_COLUMNS.sixth;
+      const columns = `${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.first}px ${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.second}px ${thirdWidth}px ${fourthWidth}px ${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.fifth}px ${MESSAGE_DETAIL_GRID_FIXED_COLUMNS.sixth}px`;
+      const totalWidthPx = `${totalWidth}px`;
+
+      gridBody.style.gridTemplateColumns = columns;
+      table.style.width = totalWidthPx;
+      table.style.minWidth = totalWidthPx;
+      wrapper.style.width = totalWidthPx;
+      wrapper.style.minWidth = totalWidthPx;
     });
   }
 
