@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.15
+// @version      1.16
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -20,6 +20,8 @@
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
   const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
+  const MESSAGE_DETAIL_GRID_SELECTOR = "tbody.uutileselements-fib3tt";
+  const MESSAGE_DETAIL_GRID_COLUMNS = "minmax(100px, 200px) minmax(80px, 100px) minmax(200px, 400px) minmax(400px, 1fr) minmax(80px, 120px) 0px";
 
   if (window[SCRIPT_FLAG]) return;
   window[SCRIPT_FLAG] = true;
@@ -28,9 +30,41 @@
   let pendingPreviewTimeout = null;
   let suppressDownloadsUntil = 0;
   let dialogState = null;
+  let responsiveGridFrame = 0;
 
   function isMessageDetailPage() {
     return /\/messageDetail(?:$|[/?#])/u.test(window.location.pathname);
+  }
+
+  function ensureResponsiveMessageDetailGrids() {
+    if (!isMessageDetailPage()) {
+      return;
+    }
+
+    document.querySelectorAll(MESSAGE_DETAIL_GRID_SELECTOR).forEach((gridBody) => {
+      if (!(gridBody instanceof HTMLTableSectionElement)) {
+        return;
+      }
+
+      if (!gridBody.closest(".uuelements-1pvk5pq")) {
+        return;
+      }
+
+      if (gridBody.style.gridTemplateColumns !== MESSAGE_DETAIL_GRID_COLUMNS) {
+        gridBody.style.gridTemplateColumns = MESSAGE_DETAIL_GRID_COLUMNS;
+      }
+    });
+  }
+
+  function scheduleResponsiveMessageDetailGridUpdate() {
+    if (responsiveGridFrame) {
+      return;
+    }
+
+    responsiveGridFrame = window.requestAnimationFrame(() => {
+      responsiveGridFrame = 0;
+      ensureResponsiveMessageDetailGrids();
+    });
   }
 
   function armPreview(info) {
@@ -1429,12 +1463,14 @@
     ensureMessageSourceButton();
     ensureChannelMetadataButton();
     ensureAttachmentPreviewButtons();
+    scheduleResponsiveMessageDetailGridUpdate();
 
     const observer = new MutationObserver(() => {
       ensurePayloadPreviewButtons();
       ensureMessageSourceButton();
       ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
+      scheduleResponsiveMessageDetailGridUpdate();
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
@@ -1443,7 +1479,10 @@
       ensureMessageSourceButton();
       ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
+      scheduleResponsiveMessageDetailGridUpdate();
     }, 1000);
+
+    window.addEventListener("resize", scheduleResponsiveMessageDetailGridUpdate, { passive: true });
   }
 
   function patchFetch() {
@@ -1523,4 +1562,5 @@
   patchFetch();
   patchBlobDownloads();
   observePayloadButtons();
+  scheduleResponsiveMessageDetailGridUpdate();
 })();
