@@ -159,7 +159,7 @@
 
   function setIntervalSeconds(nextValueSeconds) {
     const parsedSeconds = Number(nextValueSeconds);
-    if (!Number.isFinite(parsedSeconds) || parsedSeconds < 1) {
+    if (!Number.isFinite(parsedSeconds) || parsedSeconds < MIN_AUTO_REFRESH_INTERVAL_MS / 1000) {
       return false;
     }
 
@@ -240,7 +240,7 @@
       event.preventDefault();
       event.stopPropagation();
 
-      if (isIntervalEditing || intervalValue.querySelector("input")) {
+      if (isIntervalEditing) {
         return;
       }
       isIntervalEditing = true;
@@ -268,7 +268,7 @@
         if (shouldSave) {
           const hasSaved = setIntervalSeconds(editInput.value);
           if (!hasSaved) {
-            editInput.setCustomValidity("Interval must be at least 1 second.");
+            editInput.setCustomValidity("Interval must be at least 1 second");
             editInput.reportValidity();
             return;
           }
