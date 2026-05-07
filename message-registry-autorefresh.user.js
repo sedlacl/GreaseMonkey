@@ -16,6 +16,7 @@
   const SCRIPT_FLAG = "__gmMessageRegistryAutoRefresh";
   const DEFAULT_AUTO_REFRESH_INTERVAL_MS = 10000;
   const MIN_AUTO_REFRESH_INTERVAL_MS = 1000;
+  const MIN_AUTO_REFRESH_INTERVAL_SECONDS = MIN_AUTO_REFRESH_INTERVAL_MS / 1000;
   const PROGRESS_UPDATE_INTERVAL_MS = 1000;
   const CONTROL_ID = "gm-message-registry-autorefresh";
   const STORAGE_KEY = "gm-message-registry-autorefresh-enabled";
@@ -159,7 +160,7 @@
 
   function setIntervalSeconds(nextValueSeconds) {
     const parsedSeconds = Number(nextValueSeconds);
-    if (!Number.isFinite(parsedSeconds) || parsedSeconds < MIN_AUTO_REFRESH_INTERVAL_MS / 1000) {
+    if (!Number.isFinite(parsedSeconds) || parsedSeconds < MIN_AUTO_REFRESH_INTERVAL_SECONDS) {
       return false;
     }
 
@@ -247,7 +248,7 @@
 
       const editInput = document.createElement("input");
       editInput.type = "number";
-      editInput.min = "1";
+      editInput.min = String(MIN_AUTO_REFRESH_INTERVAL_SECONDS);
       editInput.step = "1";
       editInput.required = true;
       editInput.value = String(getIntervalSeconds());
@@ -268,7 +269,7 @@
         if (shouldSave) {
           const hasSaved = setIntervalSeconds(editInput.value);
           if (!hasSaved) {
-            editInput.setCustomValidity("Interval must be at least 1 second");
+            editInput.setCustomValidity(`Interval must be at least ${MIN_AUTO_REFRESH_INTERVAL_SECONDS} second`);
             editInput.reportValidity();
             return;
           }
