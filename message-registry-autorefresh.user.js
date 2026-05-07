@@ -30,6 +30,7 @@
   let autoRefreshIntervalMs = getStoredInterval();
   let countdownStartedAt = getLastReloadTimestamp() || Date.now();
   let lastProgressRatio = 0;
+  let isIntervalEditing = false;
 
   function isMessagesPage() {
     return /\/messages(?:$|[/?#])/u.test(window.location.pathname);
@@ -37,6 +38,7 @@
 
   function removeControl() {
     document.getElementById(CONTROL_ID)?.remove();
+    isIntervalEditing = false;
   }
 
   function getStoredValue(key) {
@@ -196,6 +198,7 @@
     }
 
     existingControl?.remove();
+    isIntervalEditing = false;
 
     const wrapper = document.createElement("div");
     wrapper.id = CONTROL_ID;
@@ -237,14 +240,16 @@
       event.preventDefault();
       event.stopPropagation();
 
-      if (intervalValue.querySelector("input")) {
+      if (isIntervalEditing || intervalValue.querySelector("input")) {
         return;
       }
+      isIntervalEditing = true;
 
       const editInput = document.createElement("input");
       editInput.type = "number";
       editInput.min = "1";
       editInput.step = "1";
+      editInput.required = true;
       editInput.value = String(getIntervalSeconds());
       editInput.style.width = "56px";
       editInput.style.font = "inherit";
@@ -256,14 +261,22 @@
 
       const finishEditing = (shouldSave) => {
         if (!editInput.isConnected) {
+          isIntervalEditing = false;
           return;
         }
 
         if (shouldSave) {
-          setIntervalSeconds(editInput.value);
+          const hasSaved = setIntervalSeconds(editInput.value);
+          if (!hasSaved) {
+            editInput.setCustomValidity("Enter at least 1 second.");
+            editInput.reportValidity();
+            return;
+          }
+          editInput.setCustomValidity("");
         }
 
         intervalValue.textContent = `${getIntervalSeconds()}s`;
+        isIntervalEditing = false;
       };
 
       editInput.addEventListener("keydown", (keyEvent) => {
@@ -280,10 +293,8 @@
       });
 
       intervalValue.replaceChildren(editInput);
-      window.requestAnimationFrame(() => {
-        editInput.focus();
-        editInput.select();
-      });
+      editInput.focus();
+      editInput.select();
     });
 
     text.append(intervalValue);
