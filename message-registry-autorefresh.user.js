@@ -268,7 +268,7 @@
         if (shouldSave) {
           const hasSaved = setIntervalSeconds(editInput.value);
           if (!hasSaved) {
-            editInput.setCustomValidity("Enter at least 1 second.");
+            editInput.setCustomValidity("Interval must be at least 1 second.");
             editInput.reportValidity();
             return;
           }
