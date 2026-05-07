@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Auto refresh
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.2
+// @version      1.3
 // @description  Adds an auto refresh checkbox to Message Registry messages list.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -14,10 +14,12 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmMessageRegistryAutoRefresh";
-  const AUTO_REFRESH_INTERVAL_MS = 10000;
+  const DEFAULT_AUTO_REFRESH_INTERVAL_MS = 10000;
+  const MIN_AUTO_REFRESH_INTERVAL_MS = 1000;
   const PROGRESS_UPDATE_INTERVAL_MS = 1000;
   const CONTROL_ID = "gm-message-registry-autorefresh";
   const STORAGE_KEY = "gm-message-registry-autorefresh-enabled";
+  const INTERVAL_STORAGE_KEY = "gm-message-registry-autorefresh-interval-ms";
   const LAST_RELOAD_STORAGE_KEY = "gm-message-registry-autorefresh-last-reload";
   const RELOAD_BUTTON_LABELS = ["Reload Data", "Obnovit data"];
 
@@ -25,6 +27,7 @@
   window[SCRIPT_FLAG] = true;
 
   let isEnabled = getStoredValue(STORAGE_KEY) === "true";
+  let autoRefreshIntervalMs = getStoredInterval();
   let countdownStartedAt = getLastReloadTimestamp() || Date.now();
   let lastProgressRatio = 0;
 
@@ -60,10 +63,20 @@
     return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
   }
 
+  function getStoredInterval() {
+    const rawValue = getStoredValue(INTERVAL_STORAGE_KEY);
+    const parsedValue = rawValue ? Number(rawValue) : NaN;
+    return Number.isFinite(parsedValue) && parsedValue >= MIN_AUTO_REFRESH_INTERVAL_MS ? parsedValue : DEFAULT_AUTO_REFRESH_INTERVAL_MS;
+  }
+
+  function getIntervalSeconds() {
+    return Math.round(autoRefreshIntervalMs / 1000);
+  }
+
   function getTooltipText() {
     const lastReloadTimestamp = getLastReloadTimestamp();
     const lastReloadLabel = lastReloadTimestamp ? new Date(lastReloadTimestamp).toLocaleString() : "never";
-    return `Autorefresh every ${Math.round(AUTO_REFRESH_INTERVAL_MS / 1000)}s. Last reload: ${lastReloadLabel}`;
+    return `Autorefresh every ${getIntervalSeconds()}s. Last reload: ${lastReloadLabel}`;
   }
 
   function updateControlTooltip() {
@@ -89,11 +102,18 @@
     }
 
     const elapsed = isEnabled ? Math.max(0, Date.now() - countdownStartedAt) : 0;
-    const progressRatio = Math.min(1, elapsed / AUTO_REFRESH_INTERVAL_MS);
+    const progressRatio = Math.min(1, elapsed / autoRefreshIntervalMs);
     fill.style.transition = progressRatio < lastProgressRatio ? "opacity 160ms ease" : `transform ${PROGRESS_UPDATE_INTERVAL_MS}ms linear, opacity 160ms ease`;
     fill.style.transform = `scaleX(${progressRatio})`;
     fill.style.opacity = isEnabled ? "1" : "0.35";
     lastProgressRatio = progressRatio;
+  }
+
+  function updateIntervalLabel() {
+    const intervalLabel = document.querySelector(`#${CONTROL_ID} [data-role="autorefresh-interval-value"]`);
+    if (intervalLabel instanceof HTMLSpanElement) {
+      intervalLabel.textContent = `${getIntervalSeconds()}s`;
+    }
   }
 
   function getBookmarkButton() {
@@ -131,7 +151,22 @@
     }
 
     updateControlTooltip();
+    updateIntervalLabel();
     updateProgressBar();
+  }
+
+  function setIntervalSeconds(nextValueSeconds) {
+    const parsedSeconds = Number(nextValueSeconds);
+    if (!Number.isFinite(parsedSeconds) || parsedSeconds < 1) {
+      return false;
+    }
+
+    autoRefreshIntervalMs = Math.max(MIN_AUTO_REFRESH_INTERVAL_MS, Math.round(parsedSeconds * 1000));
+    setStoredValue(INTERVAL_STORAGE_KEY, String(autoRefreshIntervalMs));
+    updateControlTooltip();
+    updateIntervalLabel();
+    updateProgressBar();
+    return true;
   }
 
   function ensureControl() {
@@ -155,6 +190,8 @@
         checkbox.checked = isEnabled;
       }
       updateControlTooltip();
+      updateIntervalLabel();
+      updateProgressBar();
       return;
     }
 
@@ -188,7 +225,68 @@
     });
 
     const text = document.createElement("span");
-    text.textContent = `autorefresh every ${Math.round(AUTO_REFRESH_INTERVAL_MS / 1000)}s`;
+    text.append("autorefresh every ");
+
+    const intervalValue = document.createElement("span");
+    intervalValue.dataset.role = "autorefresh-interval-value";
+    intervalValue.textContent = `${getIntervalSeconds()}s`;
+    intervalValue.style.textDecoration = "underline";
+    intervalValue.style.cursor = "text";
+    intervalValue.style.textUnderlineOffset = "2px";
+    intervalValue.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (intervalValue.querySelector("input")) {
+        return;
+      }
+
+      const editInput = document.createElement("input");
+      editInput.type = "number";
+      editInput.min = "1";
+      editInput.step = "1";
+      editInput.value = String(getIntervalSeconds());
+      editInput.style.width = "56px";
+      editInput.style.font = "inherit";
+      editInput.style.padding = "0 4px";
+      editInput.style.margin = "0";
+      editInput.style.border = "1px solid #94a3b8";
+      editInput.style.borderRadius = "3px";
+      editInput.style.color = "inherit";
+
+      const finishEditing = (shouldSave) => {
+        if (!editInput.isConnected) {
+          return;
+        }
+
+        if (shouldSave) {
+          setIntervalSeconds(editInput.value);
+        }
+
+        intervalValue.textContent = `${getIntervalSeconds()}s`;
+      };
+
+      editInput.addEventListener("keydown", (keyEvent) => {
+        if (keyEvent.key === "Enter") {
+          keyEvent.preventDefault();
+          finishEditing(true);
+        } else if (keyEvent.key === "Escape") {
+          keyEvent.preventDefault();
+          finishEditing(false);
+        }
+      });
+      editInput.addEventListener("blur", () => {
+        finishEditing(true);
+      });
+
+      intervalValue.replaceChildren(editInput);
+      window.requestAnimationFrame(() => {
+        editInput.focus();
+        editInput.select();
+      });
+    });
+
+    text.append(intervalValue);
 
     const progressTrack = document.createElement("span");
     progressTrack.setAttribute("aria-hidden", "true");
@@ -234,7 +332,7 @@
       return;
     }
 
-    if (Date.now() - countdownStartedAt < AUTO_REFRESH_INTERVAL_MS) {
+    if (Date.now() - countdownStartedAt < autoRefreshIntervalMs) {
       updateProgressBar();
       return;
     }
