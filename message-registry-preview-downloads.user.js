@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.19
+// @version      1.20
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -42,8 +42,29 @@
   let dialogState = null;
   let responsiveGridFrame = 0;
 
+  function getMessageDetailContext() {
+    const url = new URL(window.location.href);
+    const legacyMatch = url.pathname.match(/^(.*)\/messageDetail(?:$|[/?#])/u);
+    if (legacyMatch) {
+      return {
+        workspaceBaseUri: legacyMatch[1],
+        messageId: url.searchParams.get("messageId"),
+      };
+    }
+
+    const dataFlowsMatch = url.pathname.match(/^(.*)\/dataFlows\/messages(?:$|[/?#])/u);
+    if (dataFlowsMatch) {
+      return {
+        workspaceBaseUri: dataFlowsMatch[1],
+        messageId: url.searchParams.get("displayMessageId") || url.searchParams.get("messageId"),
+      };
+    }
+
+    return null;
+  }
+
   function isMessageDetailPage() {
-    return /\/messageDetail(?:$|[/?#])/u.test(window.location.pathname);
+    return Boolean(getMessageDetailContext());
   }
 
   function clamp(value, min, max) {
@@ -264,15 +285,11 @@
   }
 
   function getCurrentMessageId() {
-    if (!isMessageDetailPage()) {
-      return null;
-    }
-
-    return new URL(window.location.href).searchParams.get("messageId");
+    return getMessageDetailContext()?.messageId || null;
   }
 
   function getWorkspaceBaseUri() {
-    return window.location.pathname.replace(/\/messageDetail.*$/u, "");
+    return getMessageDetailContext()?.workspaceBaseUri || "";
   }
 
   function buildPayloadPreviewUrl(payloadType) {
