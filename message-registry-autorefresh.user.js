@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Message Registry - Auto refresh
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3
+// @version      1.4
 // @description  Adds an auto refresh checkbox to Message Registry messages list.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
+// @match        *://*/usy-edcaflex-maing01/*
 // @grant        none
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.user.js
 // @downloadURL  https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.user.js
