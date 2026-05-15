@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.21
+// @version      1.23
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
 // @match        *://*/usy-edcaflex-maing01/*
 // @grant        none
+// @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js
 // @downloadURL  https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js
 // ==/UserScript==
@@ -44,6 +45,8 @@
   let suppressDownloadsUntil = 0;
   let dialogState = null;
   let responsiveGridFrame = 0;
+  let lastMessageSourceRequestContext = null;
+  let lastMessageSourceResponseCache = null;
 
   function getMessageDetailContext() {
     const url = new URL(window.location.href);
@@ -298,6 +301,89 @@
   function getMessageApiBaseUri() {
     const workspaceBaseUri = getWorkspaceBaseUri();
     return MESSAGE_API_BASE_URI_OVERRIDES[workspaceBaseUri] || workspaceBaseUri;
+  }
+
+  function getMessageSourceCacheKey() {
+    const messageId = getCurrentMessageId();
+    return messageId ? `${window.location.origin}${getMessageApiBaseUri()}/message/get?id=${messageId}` : null;
+  }
+
+  function getReusableRequestHeaders(input, init) {
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    if (init?.headers) {
+      new Headers(init.headers).forEach((value, key) => {
+        headers.set(key, value);
+      });
+    }
+
+    const reusableHeaders = new Headers();
+    headers.forEach((value, key) => {
+      if (/^(accept|authorization|content-type|x-|uu-)/iu.test(key)) {
+        reusableHeaders.set(key, value);
+      }
+    });
+    return reusableHeaders;
+  }
+
+  function rememberMessageSourceRequest(requestUrl, input, init) {
+    if (!requestUrl || !/\/message\/get(?:$|[/?#])/u.test(new URL(requestUrl, window.location.href).pathname)) {
+      return;
+    }
+
+    lastMessageSourceRequestContext = {
+      headers: getReusableRequestHeaders(input, init),
+      credentials: init?.credentials || (input instanceof Request ? input.credentials : undefined) || "same-origin",
+      mode: init?.mode || (input instanceof Request ? input.mode : undefined) || "same-origin",
+    };
+  }
+
+  async function rememberMessageSourceResponse(requestUrl, response) {
+    if (!response.ok || !requestUrl || !/\/message\/get(?:$|[/?#])/u.test(new URL(requestUrl, window.location.href).pathname)) {
+      return;
+    }
+
+    try {
+      const clonedResponse = response.clone();
+      const text = await clonedResponse.text();
+      const blob = await response.clone().blob();
+      lastMessageSourceResponseCache = {
+        cacheKey: requestUrl,
+        text,
+        contentType: response.headers.get("content-type") || "application/json",
+        statusLabel: `${response.status} ${response.statusText}`.trim(),
+        size: blob.size,
+      };
+    } catch {
+      // Ignore cache failures and fall back to direct fetch when needed.
+    }
+  }
+
+  function buildMessageSourceRequestInit() {
+    return {
+      credentials: lastMessageSourceRequestContext?.credentials || "same-origin",
+      mode: lastMessageSourceRequestContext?.mode || "same-origin",
+      headers: new Headers({
+        Accept: "application/json",
+      }),
+    };
+  }
+
+  function mergeRequestContext(baseInit) {
+    if (!lastMessageSourceRequestContext?.headers) {
+      return baseInit;
+    }
+
+    const headers = new Headers(lastMessageSourceRequestContext.headers);
+    new Headers(baseInit.headers).forEach((value, key) => {
+      headers.set(key, value);
+    });
+
+    return {
+      ...baseInit,
+      credentials: lastMessageSourceRequestContext.credentials || baseInit.credentials,
+      mode: lastMessageSourceRequestContext.mode || baseInit.mode,
+      headers,
+    };
   }
 
   function buildPayloadPreviewUrl(payloadType) {
@@ -1192,7 +1278,16 @@
     const requestUrl = buildPayloadPreviewUrl(payloadType);
 
     try {
-      const response = await window.fetch(requestUrl);
+      const response = await window.fetch(
+        requestUrl,
+        mergeRequestContext({
+          credentials: "same-origin",
+          mode: "same-origin",
+          headers: new Headers({
+            Accept: "*/*",
+          }),
+        }),
+      );
       activateDownloadSuppression();
       await showResponsePreview(response, requestUrl, { title });
     } catch (error) {
@@ -1202,13 +1297,22 @@
 
   async function previewMessageSourceDirectly() {
     const requestUrl = buildMessageSourcePreviewUrl();
+    const cachedResponse = lastMessageSourceResponseCache?.cacheKey === requestUrl ? lastMessageSourceResponseCache : null;
+
+    if (cachedResponse) {
+      const sizeLabel = formatFileSize(cachedResponse.size);
+      showDialog({
+        title: "Message Source",
+        subtitle: requestUrl,
+        text: cachedResponse.text,
+        meta: `Status: ${cachedResponse.statusLabel} | Content-Type: ${cachedResponse.contentType}${sizeLabel ? ` | Size: ${sizeLabel}` : ""}`,
+        initialFormatted: true,
+      });
+      return;
+    }
 
     try {
-      const response = await window.fetch(requestUrl, {
-        headers: {
-          Accept: "application/json",
-        },
-      });
+      const response = await window.fetch(requestUrl, mergeRequestContext(buildMessageSourceRequestInit()));
       const sourceBlob = await response.clone().blob();
       const sourceText = await response.text();
 
@@ -1232,13 +1336,23 @@
 
   async function previewChannelMetadataDirectly() {
     const requestUrl = buildMessageSourcePreviewUrl();
+    const cachedResponse = lastMessageSourceResponseCache?.cacheKey === requestUrl ? lastMessageSourceResponseCache : null;
+
+    if (cachedResponse) {
+      const sizeLabel = formatFileSize(cachedResponse.size);
+      showDialog({
+        title: "Channel Metadata",
+        subtitle: requestUrl,
+        text: cachedResponse.text,
+        meta: `Status: ${cachedResponse.statusLabel} | Content-Type: ${cachedResponse.contentType}${sizeLabel ? ` | Size: ${sizeLabel}` : ""}`,
+        initialFormatted: true,
+        scrollToText: '"channelMetadata": {',
+      });
+      return;
+    }
 
     try {
-      const response = await window.fetch(requestUrl, {
-        headers: {
-          Accept: "application/json",
-        },
-      });
+      const response = await window.fetch(requestUrl, mergeRequestContext(buildMessageSourceRequestInit()));
       const sourceBlob = await response.clone().blob();
       const sourceText = await response.text();
 
@@ -1560,10 +1674,13 @@
 
     window.fetch = async function patchedFetch(input, init) {
       const requestUrl = typeof input === "string" ? input : input?.url;
+      rememberMessageSourceRequest(requestUrl, input, init);
       const previewInfo = hasPendingPreview() && requestUrl && shouldInspectUrl(requestUrl) ? consumePreview() : null;
 
       if (!previewInfo) {
-        return originalFetch(input, init);
+        const response = await originalFetch(input, init);
+        void rememberMessageSourceResponse(requestUrl, response);
+        return response;
       }
 
       const adjustedUrl = previewInfo.kind === "payload" ? adjustDownloadUrl(requestUrl) : requestUrl;
@@ -1571,6 +1688,7 @@
 
       try {
         const response = await originalFetch(actualInput, init);
+        void rememberMessageSourceResponse(typeof actualInput === "string" ? actualInput : actualInput?.url, response);
         activateDownloadSuppression();
         await showResponsePreview(response, adjustedUrl, previewInfo);
         return response;
