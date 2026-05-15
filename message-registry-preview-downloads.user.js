@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.20
+// @version      1.21
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -18,6 +18,9 @@
   const PREVIEW_TIMEOUT_MS = 15000;
   const DOWNLOAD_SUPPRESSION_MS = 5000;
   const SYNTAX_HIGHLIGHT_MAX_CHARS = 50000;
+  const MESSAGE_API_BASE_URI_OVERRIDES = Object.freeze({
+    "/usy-edcaflex-maing01/00413101100000000000000000000101": "/usy-edcaflex-commproxyg01/00413101700000000000000000000101/messageRegistry",
+  });
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
   const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
@@ -292,13 +295,18 @@
     return getMessageDetailContext()?.workspaceBaseUri || "";
   }
 
+  function getMessageApiBaseUri() {
+    const workspaceBaseUri = getWorkspaceBaseUri();
+    return MESSAGE_API_BASE_URI_OVERRIDES[workspaceBaseUri] || workspaceBaseUri;
+  }
+
   function buildPayloadPreviewUrl(payloadType) {
     const messageId = getCurrentMessageId();
     if (!messageId) {
       throw new Error("Message ID was not found in the current URL.");
     }
 
-    const url = new URL(`${window.location.origin}${getWorkspaceBaseUri()}/message/payload/get`);
+    const url = new URL(`${window.location.origin}${getMessageApiBaseUri()}/message/payload/get`);
     url.searchParams.set("messageId", messageId);
     url.searchParams.set("payloadType", payloadType);
     url.searchParams.set("contentDisposition", "inline");
@@ -312,7 +320,7 @@
       throw new Error("Message ID was not found in the current URL.");
     }
 
-    const url = new URL(`${window.location.origin}${getWorkspaceBaseUri()}/message/get`);
+    const url = new URL(`${window.location.origin}${getMessageApiBaseUri()}/message/get`);
     url.searchParams.set("id", messageId);
     return url.toString();
   }
