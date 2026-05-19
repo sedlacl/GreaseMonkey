@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.24
+// @version      1.29
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -24,8 +24,9 @@
   });
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
+  const MESSAGE_ID_LABELS = ["Message ID", "ID zprávy"];
   const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
-  const AUDIT_LOG_HEADER_LABELS = ["Audit log"];
+  const AUDIT_LOG_HEADER_LABELS = ["Audit log", "Auditní protokol"];
   const AUDIT_LOG_SECTION_SELECTOR = '[data-testid="message-detail-table-auditlog"]';
   const AUDIT_LOG_SUMMARY_SELECTOR = '[data-gm-audit-log-summary="true"]';
   const AUDIT_LOG_SEVERITY_ORDER = Object.freeze(["warning", "error", "critical"]);
@@ -71,6 +72,7 @@
   let auditLogSeverityCountCache = null;
   let pendingAuditLogFocusSeverity = "";
   let auditLogSummaryPrimingMessageId = null;
+  let activeEnhancedMessageId = "";
 
   function getMessageDetailContext() {
     const url = new URL(window.location.href);
@@ -322,6 +324,27 @@
     return getMessageDetailContext()?.workspaceBaseUri || "";
   }
 
+  function getRenderedMessageId() {
+    const label = Array.from(document.querySelectorAll("div, span, td")).find((node) => {
+      return node instanceof HTMLElement && MESSAGE_ID_LABELS.includes((node.textContent || "").trim());
+    });
+
+    if (!(label instanceof HTMLElement) || !(label.parentElement instanceof HTMLElement)) {
+      return "";
+    }
+
+    let current = label.nextElementSibling;
+    while (current instanceof HTMLElement) {
+      const text = (current.textContent || "").trim();
+      if (text) {
+        return text;
+      }
+      current = current.nextElementSibling;
+    }
+
+    return "";
+  }
+
   function createEmptyAuditLogSeverityCounts() {
     return {
       warning: 0,
@@ -334,6 +357,48 @@
     auditLogSeverityCountCache = null;
     pendingAuditLogFocusSeverity = "";
     auditLogSummaryPrimingMessageId = null;
+  }
+
+  function resetInjectedMessageDetailUi() {
+    document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}`).forEach((button) => button.remove());
+    document.querySelector(AUDIT_LOG_SUMMARY_SELECTOR)?.remove();
+    resetAuditLogSummaryState();
+    lastMessageSourceRequestContext = null;
+    lastMessageSourceResponseCache = null;
+  }
+
+  function ensureMessageDetailUiState() {
+    const messageId = getCurrentMessageId() || "";
+    const renderedMessageId = getRenderedMessageId();
+
+    if (!messageId) {
+      if (activeEnhancedMessageId) {
+        resetInjectedMessageDetailUi();
+        activeEnhancedMessageId = "";
+      }
+      return false;
+    }
+
+    if (!renderedMessageId) {
+      if (activeEnhancedMessageId && activeEnhancedMessageId !== messageId) {
+        resetInjectedMessageDetailUi();
+        activeEnhancedMessageId = "";
+      }
+      return false;
+    }
+
+    if (renderedMessageId !== messageId) {
+      resetInjectedMessageDetailUi();
+      activeEnhancedMessageId = "";
+      return false;
+    }
+
+    if (activeEnhancedMessageId && activeEnhancedMessageId !== messageId) {
+      resetInjectedMessageDetailUi();
+    }
+
+    activeEnhancedMessageId = messageId;
+    return true;
   }
 
   function ensureAuditLogSummaryState(messageId) {
@@ -1570,6 +1635,20 @@
     return toggle instanceof HTMLElement ? toggle : null;
   }
 
+  function getAuditLogHeaderAnchor(auditLogSection) {
+    const headerText = auditLogSection?.querySelector('[data-testid="page-header-text"]');
+    if (headerText instanceof HTMLElement) {
+      return headerText;
+    }
+
+    const toggle = getAuditLogToggle(auditLogSection);
+    if (toggle instanceof HTMLElement) {
+      return toggle;
+    }
+
+    return findHeaderText(AUDIT_LOG_HEADER_LABELS) || null;
+  }
+
   function resetAuditLogSeverityChip(chip) {
     if (!(chip instanceof HTMLElement)) {
       return;
@@ -1703,6 +1782,14 @@
     };
   }
 
+  function triggerAuditLogToggle(toggle) {
+    if (!(toggle instanceof HTMLElement)) {
+      return;
+    }
+
+    toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+  }
+
   function ensureAuditLogDecorations() {
     if (!isMessageDetailPage()) {
       resetAuditLogSummaryState();
@@ -1714,7 +1801,7 @@
     ensureAuditLogSummaryState(messageId);
 
     const auditLogSection = document.querySelector(AUDIT_LOG_SECTION_SELECTOR);
-    const auditLogHeader = findHeaderText(AUDIT_LOG_HEADER_LABELS);
+    const auditLogHeader = getAuditLogHeaderAnchor(auditLogSection);
     if (!(auditLogSection instanceof HTMLElement) || !(auditLogHeader instanceof HTMLElement)) {
       document.querySelector(AUDIT_LOG_SUMMARY_SELECTOR)?.remove();
       return;
@@ -1722,42 +1809,6 @@
 
     const auditLogToggle = getAuditLogToggle(auditLogSection);
     const isAuditLogExpanded = auditLogToggle?.getAttribute("aria-expanded") === "true";
-
-    const severityEntries = Array.from(auditLogSection.querySelectorAll("tbody tr td"))
-      .map((cell) => {
-        if (!(cell instanceof HTMLTableCellElement)) {
-          return null;
-        }
-
-        const severity = normalizeAuditLogSeverity(cell.textContent);
-        const chip = cell.querySelector("span") || cell.querySelector("div") || cell;
-        if (!(chip instanceof HTMLElement) || !severity) {
-          return null;
-        }
-
-        return { severity, cell, chip };
-      })
-      .filter(Boolean);
-
-    if (
-      !severityEntries.length &&
-      !isAuditLogExpanded &&
-      !auditLogSeverityCountCache?.hasData &&
-      auditLogToggle &&
-      auditLogSummaryPrimingMessageId !== messageId
-    ) {
-      auditLogSummaryPrimingMessageId = messageId;
-      auditLogToggle.click();
-      return;
-    }
-
-    severityEntries.forEach(({ severity, chip }) => {
-      if (severity === "info") {
-        resetAuditLogSeverityChip(chip);
-      } else {
-        styleAuditLogSeverityChip(chip, severity);
-      }
-    });
 
     let summaryContainer = auditLogHeader.parentElement?.querySelector(AUDIT_LOG_SUMMARY_SELECTOR) || null;
     if (!(summaryContainer instanceof HTMLDivElement)) {
@@ -1778,6 +1829,46 @@
       });
       auditLogHeader.insertAdjacentElement("afterend", summaryContainer);
     }
+
+    const severityEntries = Array.from(auditLogSection.querySelectorAll("tbody tr td"))
+      .map((cell) => {
+        if (!(cell instanceof HTMLTableCellElement)) {
+          return null;
+        }
+
+        const severity = normalizeAuditLogSeverity(cell.textContent);
+        const chip = cell.querySelector("span") || cell.querySelector("div") || cell;
+        if (!(chip instanceof HTMLElement) || !severity) {
+          return null;
+        }
+
+        return { severity, cell, chip };
+      })
+      .filter(Boolean);
+
+    if (!isAuditLogExpanded && !auditLogSeverityCountCache?.hasData && auditLogToggle) {
+      const initialCounts = createEmptyAuditLogSeverityCounts();
+      summaryContainer.replaceChildren(
+        ...AUDIT_LOG_SEVERITY_ORDER.map((severity) => {
+          return createAuditLogSummaryButton(severity, initialCounts[severity], () => {
+            pendingAuditLogFocusSeverity = severity;
+            triggerAuditLogToggle(auditLogToggle);
+          });
+        }),
+      );
+      summaryContainer.dataset.gmAuditLogSummarySignature = getAuditLogCountsSignature(initialCounts);
+      auditLogSummaryPrimingMessageId = messageId;
+      triggerAuditLogToggle(auditLogToggle);
+      return;
+    }
+
+    severityEntries.forEach(({ severity, chip }) => {
+      if (severity === "info") {
+        resetAuditLogSeverityChip(chip);
+      } else {
+        styleAuditLogSeverityChip(chip, severity);
+      }
+    });
 
     const entriesBySeverity = severityEntries.reduce(
       (result, entry) => {
@@ -1819,7 +1910,7 @@
       auditLogSummaryPrimingMessageId = null;
       window.setTimeout(() => {
         if (auditLogToggle?.getAttribute("aria-expanded") === "true") {
-          auditLogToggle.click();
+          triggerAuditLogToggle(auditLogToggle);
         }
       }, 0);
     }
@@ -1832,6 +1923,12 @@
     summaryContainer.replaceChildren(
       ...AUDIT_LOG_SEVERITY_ORDER.map((severity) => {
         return createAuditLogSummaryButton(severity, summaryCounts[severity], () => {
+          if (auditLogToggle?.getAttribute("aria-expanded") !== "true") {
+            pendingAuditLogFocusSeverity = severity;
+            triggerAuditLogToggle(auditLogToggle);
+            return;
+          }
+
           const liveEntry = entriesBySeverity[severity][0];
           if (liveEntry) {
             focusAuditLogEntry(liveEntry);
@@ -1840,7 +1937,7 @@
 
           pendingAuditLogFocusSeverity = severity;
           if (auditLogToggle?.getAttribute("aria-expanded") !== "true") {
-            auditLogToggle?.click();
+            triggerAuditLogToggle(auditLogToggle);
           }
         });
       }),
@@ -1857,43 +1954,66 @@
     link.click();
   }
 
+  function getPayloadButtonType(button) {
+    if (!(button instanceof HTMLButtonElement)) {
+      return "";
+    }
+
+    return button.dataset.testid === "external-payload-button" ? "external" : button.dataset.testid === "internal-payload-button" ? "internal" : "";
+  }
+
   function ensurePayloadPreviewButtons() {
     if (!isMessageDetailPage()) {
       document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="payload"]`).forEach((button) => button.remove());
       return;
     }
 
-    [...document.querySelectorAll(PAYLOAD_BUTTON_SELECTOR)]
-      .filter((button) => button instanceof HTMLButtonElement)
-      .forEach((button) => {
-        const payloadType = button.dataset.testid === "external-payload-button" ? "external" : "internal";
-        const existingButton = button.nextElementSibling;
-        if (existingButton?.classList?.contains(PREVIEW_BUTTON_CLASS) && existingButton.getAttribute("data-payload-type") === payloadType) {
-          return;
-        }
+    const payloadButtons = [...document.querySelectorAll(PAYLOAD_BUTTON_SELECTOR)].filter((button) => button instanceof HTMLButtonElement);
 
-        button.insertAdjacentElement(
-          "afterend",
-          createPreviewButton(button, {
-            kind: "payload",
-            payloadType,
-            title: payloadType === "external" ? "Preview external payload" : "Preview internal payload",
-            onClick: () => {
-              void previewPayloadDirectly(payloadType);
-            },
-          }),
-        );
-      });
+    document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="payload"]`).forEach((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        return;
+      }
+
+      const anchorButton = button.previousElementSibling;
+      const isValidAnchor =
+        anchorButton instanceof HTMLButtonElement && payloadButtons.includes(anchorButton) && button.dataset.payloadType === getPayloadButtonType(anchorButton);
+
+      if (!isValidAnchor) {
+        button.remove();
+      }
+    });
+
+    payloadButtons.forEach((button) => {
+      const payloadType = getPayloadButtonType(button);
+      const existingButton = button.nextElementSibling;
+      if (existingButton?.classList?.contains(PREVIEW_BUTTON_CLASS) && existingButton.getAttribute("data-payload-type") === payloadType) {
+        return;
+      }
+
+      button.insertAdjacentElement(
+        "afterend",
+        createPreviewButton(button, {
+          kind: "payload",
+          payloadType,
+          title: payloadType === "external" ? "Preview external payload" : "Preview internal payload",
+          onClick: () => {
+            void previewPayloadDirectly(payloadType);
+          },
+        }),
+      );
+    });
   }
 
   function ensureMessageSourceButton() {
     if (!isMessageDetailPage()) {
-      document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`)?.remove();
+      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`).forEach((button) => button.remove());
       return;
     }
 
     const internalButton = document.querySelector('[data-testid="internal-payload-button"]');
     if (!(internalButton instanceof HTMLButtonElement)) {
+      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`).forEach((button) => button.remove());
       return;
     }
 
@@ -1902,13 +2022,19 @@
         ? internalButton.nextElementSibling
         : null;
     const anchorElement = payloadPreviewButton || internalButton;
-    const existingButton = document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`);
+
+    document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`).forEach((button) => {
+      if (button.previousElementSibling !== anchorElement) {
+        button.remove();
+      }
+    });
+
+    const existingButton = anchorElement.nextElementSibling;
 
     if (existingButton?.previousElementSibling === anchorElement) {
       return;
     }
 
-    existingButton?.remove();
     anchorElement.insertAdjacentElement(
       "afterend",
       createPreviewButton(internalButton, {
@@ -1923,7 +2049,7 @@
 
   function ensureChannelMetadataButton() {
     if (!isMessageDetailPage()) {
-      document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`)?.remove();
+      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`).forEach((button) => button.remove());
       return;
     }
 
@@ -1931,15 +2057,21 @@
       return BUSINESS_METADATA_LABELS.includes((node.textContent || "").trim());
     });
     if (!(headerText instanceof HTMLSpanElement)) {
+      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`).forEach((button) => button.remove());
       return;
     }
 
-    const existingButton = document.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`);
+    document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`).forEach((button) => {
+      if (button.previousElementSibling !== headerText) {
+        button.remove();
+      }
+    });
+
+    const existingButton = headerText.nextElementSibling;
     if (existingButton?.previousElementSibling === headerText) {
       return;
     }
 
-    existingButton?.remove();
     headerText.insertAdjacentElement(
       "afterend",
       createSectionActionButton({
@@ -1991,31 +2123,54 @@
     });
   }
 
-  function observePayloadButtons() {
+  function refreshInjectedMessageDetailUi() {
+    if (!ensureMessageDetailUiState()) {
+      return;
+    }
+
     ensurePayloadPreviewButtons();
     ensureMessageSourceButton();
     ensureChannelMetadataButton();
     ensureAttachmentPreviewButtons();
     ensureAuditLogDecorations();
     scheduleResponsiveMessageDetailGridUpdate();
+  }
+
+  function patchHistoryNavigation() {
+    const scheduleRefresh = () => {
+      window.setTimeout(refreshInjectedMessageDetailUi, 0);
+      window.requestAnimationFrame(() => {
+        refreshInjectedMessageDetailUi();
+      });
+    };
+
+    const originalPushState = window.history.pushState.bind(window.history);
+    window.history.pushState = function patchedPushState(...args) {
+      const result = originalPushState(...args);
+      scheduleRefresh();
+      return result;
+    };
+
+    const originalReplaceState = window.history.replaceState.bind(window.history);
+    window.history.replaceState = function patchedReplaceState(...args) {
+      const result = originalReplaceState(...args);
+      scheduleRefresh();
+      return result;
+    };
+
+    window.addEventListener("popstate", scheduleRefresh);
+  }
+
+  function observePayloadButtons() {
+    refreshInjectedMessageDetailUi();
 
     const observer = new MutationObserver(() => {
-      ensurePayloadPreviewButtons();
-      ensureMessageSourceButton();
-      ensureChannelMetadataButton();
-      ensureAttachmentPreviewButtons();
-      ensureAuditLogDecorations();
-      scheduleResponsiveMessageDetailGridUpdate();
+      refreshInjectedMessageDetailUi();
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
     window.setInterval(() => {
-      ensurePayloadPreviewButtons();
-      ensureMessageSourceButton();
-      ensureChannelMetadataButton();
-      ensureAttachmentPreviewButtons();
-      ensureAuditLogDecorations();
-      scheduleResponsiveMessageDetailGridUpdate();
+      refreshInjectedMessageDetailUi();
     }, 1000);
 
     window.addEventListener("resize", scheduleResponsiveMessageDetailGridUpdate, { passive: true });
@@ -2101,6 +2256,7 @@
 
   patchFetch();
   patchBlobDownloads();
+  patchHistoryNavigation();
   observePayloadButtons();
   scheduleResponsiveMessageDetailGridUpdate();
 })();
