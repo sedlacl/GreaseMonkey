@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.30
+// @version      1.31
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -29,6 +29,7 @@
   const AUDIT_LOG_HEADER_LABELS = ["Audit log", "Auditní protokol"];
   const AUDIT_LOG_SECTION_SELECTOR = '[data-testid="message-detail-table-auditlog"]';
   const AUDIT_LOG_SUMMARY_SELECTOR = '[data-gm-audit-log-summary="true"]';
+  const AUDIT_LOG_HOVER_STYLE_ID = "gm-audit-log-hover-style";
   const AUDIT_LOG_SEVERITY_ORDER = Object.freeze(["warning", "error", "critical"]);
   const AUDIT_LOG_STATUS_PREFIXES = Object.freeze(["Status:", "Stav:"]);
   const AUDIT_LOG_SEVERITY_STYLES = Object.freeze({
@@ -1926,6 +1927,26 @@
     toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
   }
 
+  function ensureAuditLogHoverStyles() {
+    if (document.getElementById(AUDIT_LOG_HOVER_STYLE_ID)) {
+      return;
+    }
+
+    const style = document.createElement("style");
+    style.id = AUDIT_LOG_HOVER_STYLE_ID;
+    style.textContent = `
+      [data-gm-audit-log-row="true"] > td {
+        transition: background-color 140ms ease;
+      }
+
+      [data-gm-audit-log-row="true"]:hover > td,
+      [data-gm-audit-log-row="true"][data-gm-audit-log-hover="true"] > td {
+        background-color: rgba(59, 130, 246, 0.14) !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
   function ensureAuditLogDecorations() {
     if (!isMessageDetailPage()) {
       resetAuditLogSummaryState();
@@ -1942,6 +1963,13 @@
       document.querySelector(AUDIT_LOG_SUMMARY_SELECTOR)?.remove();
       return;
     }
+
+    ensureAuditLogHoverStyles();
+    auditLogSection.querySelectorAll("tbody tr").forEach((row) => {
+      if (row instanceof HTMLTableRowElement) {
+        row.dataset.gmAuditLogRow = "true";
+      }
+    });
 
     const auditLogToggle = getAuditLogToggle(auditLogSection);
     const isAuditLogExpanded = auditLogToggle?.getAttribute("aria-expanded") === "true";
