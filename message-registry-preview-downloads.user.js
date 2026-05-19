@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.23
+// @version      1.24
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -25,6 +25,27 @@
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
   const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
+  const AUDIT_LOG_HEADER_LABELS = ["Audit log"];
+  const AUDIT_LOG_SECTION_SELECTOR = '[data-testid="message-detail-table-auditlog"]';
+  const AUDIT_LOG_SUMMARY_SELECTOR = '[data-gm-audit-log-summary="true"]';
+  const AUDIT_LOG_SEVERITY_ORDER = Object.freeze(["warning", "error", "critical"]);
+  const AUDIT_LOG_SEVERITY_STYLES = Object.freeze({
+    warning: Object.freeze({
+      background: "#fef3c7",
+      color: "#92400e",
+      border: "#fcd34d",
+    }),
+    error: Object.freeze({
+      background: "#fee2e2",
+      color: "#991b1b",
+      border: "#fca5a5",
+    }),
+    critical: Object.freeze({
+      background: "#fecaca",
+      color: "#7f1d1d",
+      border: "#f87171",
+    }),
+  });
   const MESSAGE_DETAIL_GRID_SELECTOR = "tbody.uutileselements-fib3tt";
   const MESSAGE_DETAIL_GRID_FIXED_COLUMNS = Object.freeze({
     first: 200,
@@ -47,6 +68,9 @@
   let responsiveGridFrame = 0;
   let lastMessageSourceRequestContext = null;
   let lastMessageSourceResponseCache = null;
+  let auditLogSeverityCountCache = null;
+  let pendingAuditLogFocusSeverity = "";
+  let auditLogSummaryPrimingMessageId = null;
 
   function getMessageDetailContext() {
     const url = new URL(window.location.href);
@@ -296,6 +320,37 @@
 
   function getWorkspaceBaseUri() {
     return getMessageDetailContext()?.workspaceBaseUri || "";
+  }
+
+  function createEmptyAuditLogSeverityCounts() {
+    return {
+      warning: 0,
+      error: 0,
+      critical: 0,
+    };
+  }
+
+  function resetAuditLogSummaryState() {
+    auditLogSeverityCountCache = null;
+    pendingAuditLogFocusSeverity = "";
+    auditLogSummaryPrimingMessageId = null;
+  }
+
+  function ensureAuditLogSummaryState(messageId) {
+    if (!messageId) {
+      resetAuditLogSummaryState();
+      return;
+    }
+
+    if (auditLogSeverityCountCache?.messageId !== messageId) {
+      auditLogSeverityCountCache = {
+        messageId,
+        counts: createEmptyAuditLogSeverityCounts(),
+        hasData: false,
+      };
+      pendingAuditLogFocusSeverity = "";
+      auditLogSummaryPrimingMessageId = null;
+    }
   }
 
   function getMessageApiBaseUri() {
@@ -1499,6 +1554,300 @@
     return button;
   }
 
+  function normalizeAuditLogSeverity(value) {
+    const normalizedValue = (value || "").trim().toLowerCase();
+    return ["info", ...AUDIT_LOG_SEVERITY_ORDER].includes(normalizedValue) ? normalizedValue : "";
+  }
+
+  function findHeaderText(labels) {
+    return Array.from(document.querySelectorAll('[data-testid="page-header-text"]')).find((node) => {
+      return node instanceof HTMLElement && labels.includes((node.textContent || "").trim());
+    });
+  }
+
+  function getAuditLogToggle(auditLogSection) {
+    const toggle = auditLogSection?.querySelector('[role="button"][aria-controls]');
+    return toggle instanceof HTMLElement ? toggle : null;
+  }
+
+  function resetAuditLogSeverityChip(chip) {
+    if (!(chip instanceof HTMLElement)) {
+      return;
+    }
+
+    chip.style.display = "";
+    chip.style.alignItems = "";
+    chip.style.justifyContent = "";
+    chip.style.padding = "";
+    chip.style.borderRadius = "";
+    chip.style.fontSize = "";
+    chip.style.fontWeight = "";
+    chip.style.lineHeight = "";
+    chip.style.background = "";
+    chip.style.color = "";
+    chip.style.border = "";
+  }
+
+  function styleAuditLogSeverityChip(chip, severity) {
+    resetAuditLogSeverityChip(chip);
+
+    const severityStyle = AUDIT_LOG_SEVERITY_STYLES[severity];
+    if (!(chip instanceof HTMLElement) || !severityStyle) {
+      return;
+    }
+
+    chip.style.display = "inline-flex";
+    chip.style.alignItems = "center";
+    chip.style.justifyContent = "center";
+    chip.style.padding = "2px 8px";
+    chip.style.borderRadius = "999px";
+    chip.style.fontSize = "12px";
+    chip.style.fontWeight = "600";
+    chip.style.lineHeight = "1.4";
+    chip.style.background = severityStyle.background;
+    chip.style.color = severityStyle.color;
+    chip.style.border = `1px solid ${severityStyle.border}`;
+  }
+
+  function createAuditLogSummaryButton(severity, count, onClick) {
+    const severityStyle = AUDIT_LOG_SEVERITY_STYLES[severity];
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${severity} ${count}`;
+    button.title = count ? `Go to first ${severity} entry` : `No ${severity} entries`;
+    button.setAttribute("aria-label", button.title);
+    button.disabled = !count;
+    button.style.display = "inline-flex";
+    button.style.alignItems = "center";
+    button.style.justifyContent = "center";
+    button.style.padding = "3px 10px";
+    button.style.borderRadius = "999px";
+    button.style.border = `1px solid ${severityStyle.border}`;
+    button.style.background = severityStyle.background;
+    button.style.color = severityStyle.color;
+    button.style.fontSize = "12px";
+    button.style.fontWeight = "600";
+    button.style.lineHeight = "1.4";
+    button.style.cursor = count ? "pointer" : "default";
+    button.style.opacity = count ? "1" : "0.5";
+    button.style.margin = "0";
+    ["pointerdown", "mousedown", "mouseup", "click", "dblclick"].forEach((eventName) => {
+      button.addEventListener(eventName, (event) => {
+        event.stopPropagation();
+        if (eventName !== "click") {
+          event.stopImmediatePropagation();
+        }
+      });
+    });
+    if (count) {
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        onClick();
+      });
+    }
+    return button;
+  }
+
+  function getScrollableAncestor(element) {
+    let current = element?.parentElement || null;
+
+    while (current) {
+      const style = window.getComputedStyle(current);
+      const overflowY = style.overflowY || style.overflow;
+      if (/(auto|scroll)/u.test(overflowY) && current.scrollHeight > current.clientHeight + 4) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+
+    return null;
+  }
+
+  function focusAuditLogEntry(entry) {
+    const row = entry?.cell?.closest("tr");
+    const target = entry?.chip instanceof HTMLElement ? entry.chip : entry?.cell instanceof HTMLElement ? entry.cell : row;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const scrollableAncestor = getScrollableAncestor(target);
+    if (scrollableAncestor instanceof HTMLElement) {
+      const targetRect = target.getBoundingClientRect();
+      const containerRect = scrollableAncestor.getBoundingClientRect();
+      const targetScrollTop = scrollableAncestor.scrollTop + targetRect.top - containerRect.top - (containerRect.height / 2 - targetRect.height / 2);
+      scrollableAncestor.scrollTo({ top: Math.max(0, targetScrollTop), behavior: "smooth" });
+    }
+
+    target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    target.animate?.(
+      [{ boxShadow: "0 0 0 0 rgba(248, 113, 113, 0)" }, { boxShadow: "0 0 0 3px rgba(248, 113, 113, 0.35)" }, { boxShadow: "0 0 0 0 rgba(248, 113, 113, 0)" }],
+      { duration: 900, easing: "ease-out" },
+    );
+  }
+
+  function getAuditLogSummarySignature(entriesBySeverity) {
+    return AUDIT_LOG_SEVERITY_ORDER.map((severity) => `${severity}:${entriesBySeverity[severity].length}`).join("|");
+  }
+
+  function getAuditLogCountsSignature(counts) {
+    return AUDIT_LOG_SEVERITY_ORDER.map((severity) => `${severity}:${counts[severity] || 0}`).join("|");
+  }
+
+  function cloneAuditLogSeverityCounts(counts) {
+    return {
+      warning: counts.warning || 0,
+      error: counts.error || 0,
+      critical: counts.critical || 0,
+    };
+  }
+
+  function ensureAuditLogDecorations() {
+    if (!isMessageDetailPage()) {
+      resetAuditLogSummaryState();
+      document.querySelector(AUDIT_LOG_SUMMARY_SELECTOR)?.remove();
+      return;
+    }
+
+    const messageId = getCurrentMessageId();
+    ensureAuditLogSummaryState(messageId);
+
+    const auditLogSection = document.querySelector(AUDIT_LOG_SECTION_SELECTOR);
+    const auditLogHeader = findHeaderText(AUDIT_LOG_HEADER_LABELS);
+    if (!(auditLogSection instanceof HTMLElement) || !(auditLogHeader instanceof HTMLElement)) {
+      document.querySelector(AUDIT_LOG_SUMMARY_SELECTOR)?.remove();
+      return;
+    }
+
+    const auditLogToggle = getAuditLogToggle(auditLogSection);
+    const isAuditLogExpanded = auditLogToggle?.getAttribute("aria-expanded") === "true";
+
+    const severityEntries = Array.from(auditLogSection.querySelectorAll("tbody tr td"))
+      .map((cell) => {
+        if (!(cell instanceof HTMLTableCellElement)) {
+          return null;
+        }
+
+        const severity = normalizeAuditLogSeverity(cell.textContent);
+        const chip = cell.querySelector("span") || cell.querySelector("div") || cell;
+        if (!(chip instanceof HTMLElement) || !severity) {
+          return null;
+        }
+
+        return { severity, cell, chip };
+      })
+      .filter(Boolean);
+
+    if (
+      !severityEntries.length &&
+      !isAuditLogExpanded &&
+      !auditLogSeverityCountCache?.hasData &&
+      auditLogToggle &&
+      auditLogSummaryPrimingMessageId !== messageId
+    ) {
+      auditLogSummaryPrimingMessageId = messageId;
+      auditLogToggle.click();
+      return;
+    }
+
+    severityEntries.forEach(({ severity, chip }) => {
+      if (severity === "info") {
+        resetAuditLogSeverityChip(chip);
+      } else {
+        styleAuditLogSeverityChip(chip, severity);
+      }
+    });
+
+    let summaryContainer = auditLogHeader.parentElement?.querySelector(AUDIT_LOG_SUMMARY_SELECTOR) || null;
+    if (!(summaryContainer instanceof HTMLDivElement)) {
+      summaryContainer = document.createElement("div");
+      summaryContainer.dataset.gmAuditLogSummary = "true";
+      summaryContainer.style.display = "inline-flex";
+      summaryContainer.style.alignItems = "center";
+      summaryContainer.style.gap = "6px";
+      summaryContainer.style.marginLeft = "12px";
+      summaryContainer.style.verticalAlign = "middle";
+      ["pointerdown", "mousedown", "mouseup", "click", "dblclick"].forEach((eventName) => {
+        summaryContainer.addEventListener(eventName, (event) => {
+          event.stopPropagation();
+          if (eventName !== "click") {
+            event.stopImmediatePropagation();
+          }
+        });
+      });
+      auditLogHeader.insertAdjacentElement("afterend", summaryContainer);
+    }
+
+    const entriesBySeverity = severityEntries.reduce(
+      (result, entry) => {
+        if (AUDIT_LOG_SEVERITY_ORDER.includes(entry.severity)) {
+          result[entry.severity].push(entry);
+        }
+        return result;
+      },
+      { warning: [], error: [], critical: [] },
+    );
+
+    if (severityEntries.length) {
+      auditLogSeverityCountCache = {
+        messageId,
+        counts: cloneAuditLogSeverityCounts({
+          warning: entriesBySeverity.warning.length,
+          error: entriesBySeverity.error.length,
+          critical: entriesBySeverity.critical.length,
+        }),
+        hasData: true,
+      };
+    }
+
+    const summaryCounts = severityEntries.length
+      ? auditLogSeverityCountCache.counts
+      : auditLogSeverityCountCache?.hasData
+        ? auditLogSeverityCountCache.counts
+        : createEmptyAuditLogSeverityCounts();
+
+    if (severityEntries.length && pendingAuditLogFocusSeverity && entriesBySeverity[pendingAuditLogFocusSeverity]?.[0]) {
+      const pendingEntry = entriesBySeverity[pendingAuditLogFocusSeverity][0];
+      pendingAuditLogFocusSeverity = "";
+      window.requestAnimationFrame(() => {
+        focusAuditLogEntry(pendingEntry);
+      });
+    }
+
+    if (severityEntries.length && auditLogSummaryPrimingMessageId === messageId && isAuditLogExpanded && !pendingAuditLogFocusSeverity) {
+      auditLogSummaryPrimingMessageId = null;
+      window.setTimeout(() => {
+        if (auditLogToggle?.getAttribute("aria-expanded") === "true") {
+          auditLogToggle.click();
+        }
+      }, 0);
+    }
+
+    const summarySignature = severityEntries.length ? getAuditLogSummarySignature(entriesBySeverity) : getAuditLogCountsSignature(summaryCounts);
+    if (summaryContainer.dataset.gmAuditLogSummarySignature === summarySignature) {
+      return;
+    }
+
+    summaryContainer.replaceChildren(
+      ...AUDIT_LOG_SEVERITY_ORDER.map((severity) => {
+        return createAuditLogSummaryButton(severity, summaryCounts[severity], () => {
+          const liveEntry = entriesBySeverity[severity][0];
+          if (liveEntry) {
+            focusAuditLogEntry(liveEntry);
+            return;
+          }
+
+          pendingAuditLogFocusSeverity = severity;
+          if (auditLogToggle?.getAttribute("aria-expanded") !== "true") {
+            auditLogToggle?.click();
+          }
+        });
+      }),
+    );
+    summaryContainer.dataset.gmAuditLogSummarySignature = summarySignature;
+  }
+
   function triggerAttachmentPreview(link) {
     if (!(link instanceof HTMLAnchorElement)) {
       return;
@@ -1647,6 +1996,7 @@
     ensureMessageSourceButton();
     ensureChannelMetadataButton();
     ensureAttachmentPreviewButtons();
+    ensureAuditLogDecorations();
     scheduleResponsiveMessageDetailGridUpdate();
 
     const observer = new MutationObserver(() => {
@@ -1654,6 +2004,7 @@
       ensureMessageSourceButton();
       ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
+      ensureAuditLogDecorations();
       scheduleResponsiveMessageDetailGridUpdate();
     });
 
@@ -1663,6 +2014,7 @@
       ensureMessageSourceButton();
       ensureChannelMetadataButton();
       ensureAttachmentPreviewButtons();
+      ensureAuditLogDecorations();
       scheduleResponsiveMessageDetailGridUpdate();
     }, 1000);
 
