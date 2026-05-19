@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.29
+// @version      1.30
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -30,6 +30,7 @@
   const AUDIT_LOG_SECTION_SELECTOR = '[data-testid="message-detail-table-auditlog"]';
   const AUDIT_LOG_SUMMARY_SELECTOR = '[data-gm-audit-log-summary="true"]';
   const AUDIT_LOG_SEVERITY_ORDER = Object.freeze(["warning", "error", "critical"]);
+  const AUDIT_LOG_STATUS_PREFIXES = Object.freeze(["Status:", "Stav:"]);
   const AUDIT_LOG_SEVERITY_STYLES = Object.freeze({
     warning: Object.freeze({
       background: "#fef3c7",
@@ -45,6 +46,33 @@
       background: "#fecaca",
       color: "#7f1d1d",
       border: "#f87171",
+    }),
+  });
+  const AUDIT_LOG_STATUS_SCHEMA_STYLES = Object.freeze({
+    positive: Object.freeze({
+      background: "#dcfce7",
+      color: "#166534",
+      border: "#86efac",
+    }),
+    dim: Object.freeze({
+      background: "#e5e7eb",
+      color: "#4b5563",
+      border: "#d1d5db",
+    }),
+    primary: Object.freeze({
+      background: "#dbeafe",
+      color: "#1d4ed8",
+      border: "#93c5fd",
+    }),
+    warning: Object.freeze({
+      background: "#fef3c7",
+      color: "#92400e",
+      border: "#fcd34d",
+    }),
+    negative: Object.freeze({
+      background: "#fee2e2",
+      color: "#991b1b",
+      border: "#fca5a5",
     }),
   });
   const MESSAGE_DETAIL_GRID_SELECTOR = "tbody.uutileselements-fib3tt";
@@ -1624,6 +1652,55 @@
     return ["info", ...AUDIT_LOG_SEVERITY_ORDER].includes(normalizedValue) ? normalizedValue : "";
   }
 
+  function getAuditLogStatusSchema(status) {
+    switch ((status || "").trim()) {
+      case "received":
+      case "readyForProcessing":
+      case "produced":
+      case "delivering":
+        return "positive";
+      case "pending":
+        return "dim";
+      case "partiallyProcessed":
+      case "processed":
+      case "sent":
+      case "incomingAck":
+        return "primary";
+      case "invalid":
+      case "duplicated":
+      case "unrecognized":
+        return "warning";
+      case "error":
+        return "negative";
+      default:
+        return "";
+    }
+  }
+
+  function parseAuditLogStatusText(text) {
+    const trimmedText = (text || "").trim();
+    const prefix = AUDIT_LOG_STATUS_PREFIXES.find((candidatePrefix) => trimmedText.startsWith(candidatePrefix));
+    if (!prefix) {
+      return "";
+    }
+
+    return trimmedText.slice(prefix.length).trim();
+  }
+
+  function getAuditLogStatusPrefixText(text, status) {
+    const trimmedText = (text || "").trim();
+    if (!trimmedText || !status) {
+      return "";
+    }
+
+    const statusIndex = trimmedText.lastIndexOf(status);
+    if (statusIndex <= 0) {
+      return "";
+    }
+
+    return trimmedText.slice(0, statusIndex).trimEnd();
+  }
+
   function findHeaderText(labels) {
     return Array.from(document.querySelectorAll('[data-testid="page-header-text"]')).find((node) => {
       return node instanceof HTMLElement && labels.includes((node.textContent || "").trim());
@@ -1686,6 +1763,65 @@
     chip.style.background = severityStyle.background;
     chip.style.color = severityStyle.color;
     chip.style.border = `1px solid ${severityStyle.border}`;
+  }
+
+  function clearAuditLogStatusIndicatorStyles(element) {
+    if (!(element instanceof HTMLElement)) {
+      return;
+    }
+
+    element.style.display = "";
+    element.style.alignItems = "";
+    element.style.width = "";
+    element.style.maxWidth = "";
+    element.style.padding = "";
+    element.style.borderRadius = "";
+    element.style.fontSize = "";
+    element.style.fontWeight = "";
+    element.style.lineHeight = "";
+    element.style.background = "";
+    element.style.color = "";
+    element.style.border = "";
+  }
+
+  function resetAuditLogStatusIndicator(element) {
+    if (!(element instanceof HTMLElement)) {
+      return;
+    }
+
+    const originalText = element.dataset.gmAuditLogStatusSource || "";
+    const currentValue = (element.textContent || "").trim();
+    const injectedValue = element.dataset.gmAuditLogStatusValue || "";
+
+    if (originalText && currentValue === injectedValue) {
+      element.textContent = originalText;
+    }
+
+    delete element.dataset.gmAuditLogStatusSource;
+    delete element.dataset.gmAuditLogStatusValue;
+    delete element.dataset.gmAuditLogStatusPrefix;
+    clearAuditLogStatusIndicatorStyles(element);
+  }
+
+  function styleAuditLogStatusIndicator(element, schema) {
+    const schemaStyle = AUDIT_LOG_STATUS_SCHEMA_STYLES[schema];
+    if (!(element instanceof HTMLElement) || !schemaStyle) {
+      return;
+    }
+
+    clearAuditLogStatusIndicatorStyles(element);
+    element.style.display = "inline-flex";
+    element.style.alignItems = "center";
+    element.style.width = "fit-content";
+    element.style.maxWidth = "100%";
+    element.style.padding = "2px 8px";
+    element.style.borderRadius = "999px";
+    element.style.fontSize = "12px";
+    element.style.fontWeight = "600";
+    element.style.lineHeight = "1.4";
+    element.style.background = schemaStyle.background;
+    element.style.color = schemaStyle.color;
+    element.style.border = `1px solid ${schemaStyle.border}`;
   }
 
   function createAuditLogSummaryButton(severity, count, onClick) {
@@ -1869,6 +2005,59 @@
         styleAuditLogSeverityChip(chip, severity);
       }
     });
+
+    Array.from(auditLogSection.querySelectorAll("tbody tr td div, tbody tr td span, tbody tr td p"))
+      .filter((element) => {
+        return element instanceof HTMLElement && element.dataset.gmAuditLogStatusBadge !== "true";
+      })
+      .forEach((element) => {
+        const currentText = (element.textContent || "").trim();
+        const storedSource = element.dataset.gmAuditLogStatusSource || "";
+        const storedValue = element.dataset.gmAuditLogStatusValue || "";
+        const sourceText = storedSource && currentText === storedValue ? storedSource : currentText;
+        const status = parseAuditLogStatusText(sourceText);
+        const schema = getAuditLogStatusSchema(status);
+        const prefixText = getAuditLogStatusPrefixText(sourceText, status);
+
+        if (!schema || !status) {
+          resetAuditLogStatusIndicator(element);
+          return;
+        }
+
+        if (element.dataset.gmAuditLogStatusSource !== sourceText) {
+          element.dataset.gmAuditLogStatusSource = sourceText;
+        }
+
+        if (element.dataset.gmAuditLogStatusValue !== status) {
+          element.dataset.gmAuditLogStatusValue = status;
+        }
+
+        if (element.dataset.gmAuditLogStatusPrefix !== prefixText) {
+          element.dataset.gmAuditLogStatusPrefix = prefixText;
+        }
+
+        const badge = element.querySelector(':scope > [data-gm-audit-log-status-badge="true"]');
+        const expectedText = prefixText ? `${prefixText} ${status}` : status;
+        const currentBadgeText = badge instanceof HTMLElement ? (badge.textContent || "").trim() : "";
+        const needsStructuredRender = currentText !== expectedText || !(badge instanceof HTMLElement) || currentBadgeText !== status;
+
+        if (needsStructuredRender) {
+          const nextBadge = document.createElement("span");
+          nextBadge.dataset.gmAuditLogStatusBadge = "true";
+          nextBadge.textContent = status;
+
+          if (prefixText) {
+            element.replaceChildren(document.createTextNode(`${prefixText} `), nextBadge);
+          } else {
+            element.replaceChildren(nextBadge);
+          }
+        }
+
+        const liveBadge = element.querySelector(':scope > [data-gm-audit-log-status-badge="true"]');
+        if (liveBadge instanceof HTMLElement) {
+          styleAuditLogStatusIndicator(liveBadge, schema);
+        }
+      });
 
     const entriesBySeverity = severityEntries.reduce(
       (result, entry) => {
