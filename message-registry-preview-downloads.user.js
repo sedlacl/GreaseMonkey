@@ -2008,7 +2008,12 @@
 
     Array.from(auditLogSection.querySelectorAll("tbody tr td div, tbody tr td span, tbody tr td p"))
       .filter((element) => {
-        return element instanceof HTMLElement && element.dataset.gmAuditLogStatusBadge !== "true";
+        if (!(element instanceof HTMLElement) || element.dataset.gmAuditLogStatusBadge === "true") {
+          return false;
+        }
+
+        const text = (element.textContent || "").trim();
+        return Boolean(element.dataset.gmAuditLogStatusSource) || AUDIT_LOG_STATUS_PREFIXES.some((prefix) => text.startsWith(prefix));
       })
       .forEach((element) => {
         const currentText = (element.textContent || "").trim();
