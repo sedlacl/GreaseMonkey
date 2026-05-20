@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.31
+// @version      1.32
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -96,6 +96,10 @@
   let suppressDownloadsUntil = 0;
   let dialogState = null;
   let responsiveGridFrame = 0;
+  let refreshMessageDetailUiTimeout = 0;
+  let refreshMessageDetailUiFrame = 0;
+  let isRefreshingMessageDetailUi = false;
+  let refreshMessageDetailUiRequested = false;
   let lastMessageSourceRequestContext = null;
   let lastMessageSourceResponseCache = null;
   let auditLogSeverityCountCache = null;
@@ -2346,24 +2350,56 @@
   }
 
   function refreshInjectedMessageDetailUi() {
-    if (!ensureMessageDetailUiState()) {
+    if (isRefreshingMessageDetailUi) {
+      refreshMessageDetailUiRequested = true;
       return;
     }
 
-    ensurePayloadPreviewButtons();
-    ensureMessageSourceButton();
-    ensureChannelMetadataButton();
-    ensureAttachmentPreviewButtons();
-    ensureAuditLogDecorations();
-    scheduleResponsiveMessageDetailGridUpdate();
+    isRefreshingMessageDetailUi = true;
+
+    try {
+      if (!ensureMessageDetailUiState()) {
+        return;
+      }
+
+      ensurePayloadPreviewButtons();
+      ensureMessageSourceButton();
+      ensureChannelMetadataButton();
+      ensureAttachmentPreviewButtons();
+      ensureAuditLogDecorations();
+      scheduleResponsiveMessageDetailGridUpdate();
+    } finally {
+      isRefreshingMessageDetailUi = false;
+
+      if (refreshMessageDetailUiRequested) {
+        refreshMessageDetailUiRequested = false;
+        scheduleInjectedMessageDetailUiRefresh();
+      }
+    }
+  }
+
+  function scheduleInjectedMessageDetailUiRefresh() {
+    if (refreshMessageDetailUiTimeout) {
+      return;
+    }
+
+    refreshMessageDetailUiTimeout = window.setTimeout(() => {
+      refreshMessageDetailUiTimeout = 0;
+
+      if (refreshMessageDetailUiFrame) {
+        return;
+      }
+
+      refreshMessageDetailUiFrame = window.requestAnimationFrame(() => {
+        refreshMessageDetailUiFrame = 0;
+        refreshInjectedMessageDetailUi();
+      });
+    }, 0);
   }
 
   function patchHistoryNavigation() {
     const scheduleRefresh = () => {
-      window.setTimeout(refreshInjectedMessageDetailUi, 0);
-      window.requestAnimationFrame(() => {
-        refreshInjectedMessageDetailUi();
-      });
+      scheduleInjectedMessageDetailUiRefresh();
     };
 
     const originalPushState = window.history.pushState.bind(window.history);
@@ -2384,15 +2420,15 @@
   }
 
   function observePayloadButtons() {
-    refreshInjectedMessageDetailUi();
+    scheduleInjectedMessageDetailUiRefresh();
 
     const observer = new MutationObserver(() => {
-      refreshInjectedMessageDetailUi();
+      scheduleInjectedMessageDetailUiRefresh();
     });
 
     observer.observe(document.documentElement, { childList: true, subtree: true });
     window.setInterval(() => {
-      refreshInjectedMessageDetailUi();
+      scheduleInjectedMessageDetailUiRefresh();
     }, 1000);
 
     window.addEventListener("resize", scheduleResponsiveMessageDetailGridUpdate, { passive: true });
