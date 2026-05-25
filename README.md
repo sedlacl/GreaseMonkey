@@ -19,6 +19,7 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 | --- | --- |
 | Copy uuBml as PNG to clipboard | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/uubml-copy-as-png.user.js) |
 | Autoclose authentication page | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/close-auth-page.user.js) |
+| Identity login password manager bridge | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/identity-login-password-manager.user.js) |
 | JSONATA JAVA Checker | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.user.js) |
 | Message Registry - Auto refresh | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.user.js) |
 | Message Registry - Preview downloads | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js) |
@@ -30,6 +31,8 @@ Use `Message Registry - Preview downloads` for the standard `uu-energygateway-me
 
 Use `Message Registry - Preview downloads (UUCloud1)` for the `usy-idsmari-messageregistryg01` / IDS Apps variant. This version keeps the same preview dialogs and formatting tools, but adds compatibility fixes for older UU5 rendering, attachment button placement, and authenticated preview requests.
 
+Use `Identity login password manager bridge` on uuIdentity login pages where password managers do not recognize the original `accessCode1` / `accessCode2` fields. The script decorates the native fields and inserts two compatible proxy password inputs that mirror back into the original form.
+
 ## Changelog
 
 * 1.0 - initial version
@@ -38,3 +41,4 @@ Use `Message Registry - Preview downloads (UUCloud1)` for the `usy-idsmari-messa
 * 1.3 - add preview format button for JSON and XML payloads
 * 1.4 - add message registry auto refresh userscript
 * 1.5 - add UUCloud1-specific message registry preview downloads variant
+* 1.6 - add uuIdentity login password manager bridge
