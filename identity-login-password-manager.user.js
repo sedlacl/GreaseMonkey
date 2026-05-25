@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Plus4U - Identity login password manager bridge
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.2
-// @description  Adds password-manager-friendly proxy fields to uuIdentity login forms and syncs them into the original access code inputs.
+// @version      1.6
+// @description  Adds password-manager-friendly overlay fields to uuIdentity login forms and syncs them into the original access code inputs.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-identitymanagement-maing01/*/login*
 // @grant        none
@@ -15,13 +15,7 @@
   "use strict";
 
   const STYLE_ID = "tm-password-manager-bridge-style";
-  const USERNAME_SELECTOR = [
-    'input[name="username"]',
-    'input[name="login"]',
-    'input[type="email"]',
-    'input[autocomplete="username"]',
-    'input[type="text"]',
-  ].join(", ");
+  const nativeInputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
 
   function ensureStyles() {
     if (document.getElementById(STYLE_ID)) {
@@ -31,88 +25,144 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      .tm-password-manager-source-wrapper {
-        display: none !important;
-      }
-
-      .tm-password-manager-proxy {
+      .tm-password-manager-host {
         position: relative;
       }
 
-      .tm-password-manager-proxy .uu5-forms-input-form-item {
-        background-color: #f7fbfc;
-        padding-left: 36px;
+      .tm-password-manager-host .uu5-forms-text-input {
+        position: relative;
+        min-height: 40px;
       }
 
-      .tm-password-manager-proxy__masked-username {
+      .tm-password-manager-host .tm-password-manager-underlay {
+        position: absolute !important;
+        inset: 0 !important;
+        width: 100% !important;
+        height: 40px !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+        margin: 0 !important;
+        z-index: 1 !important;
+      }
+
+      .tm-password-manager-host .tm-password-manager-overlay {
+        position: absolute !important;
+        inset: 0 !important;
+        display: block !important;
+        width: 100% !important;
+        height: 40px !important;
+        box-sizing: border-box !important;
+        margin: 0 !important;
+        padding: 9px 40px 10px 36px !important;
+        border: 1px solid #bdbdbd !important;
+        border-radius: 2px !important;
+        background-color: #f7fbfc !important;
+        color: rgba(0, 0, 0, 0.87) !important;
+        font: inherit !important;
+        z-index: 2 !important;
+      }
+
+      .tm-password-manager-host .tm-password-manager-overlay:focus {
+        outline: none;
+        border-color: #1976d2;
+        box-shadow: 0 0 0 1px #1976d2;
+      }
+
+      .tm-password-manager-host .tm-password-manager-overlay--masked {
         -webkit-text-security: disc;
       }
 
-      .tm-password-manager-proxy__icon {
-        position: absolute;
-        left: 12px;
-        top: 50%;
-        z-index: 2;
-        width: 16px;
-        height: 16px;
-        color: #607d8b;
-        transform: translateY(-50%);
-        pointer-events: none;
+      .tm-password-manager-host .tm-password-manager-icon {
+        position: absolute !important;
+        left: 12px !important;
+        top: 50% !important;
+        display: block !important;
+        width: 16px !important;
+        min-width: 16px !important;
+        max-width: 16px !important;
+        height: 16px !important;
+        min-height: 16px !important;
+        max-height: 16px !important;
+        overflow: hidden !important;
+        color: #607d8b !important;
+        line-height: 0 !important;
+        transform: translateY(-50%) !important;
+        pointer-events: none !important;
+        z-index: 3 !important;
       }
 
-      .tm-password-manager-proxy__icon svg {
-        display: block;
-        width: 100%;
-        height: 100%;
+      .tm-password-manager-host .tm-password-manager-icon svg {
+        display: block !important;
+        width: 16px !important;
+        height: 16px !important;
+      }
+
+      .tm-password-manager-host .uu5-forms-text-input-reveal-button,
+      .tm-password-manager-host button,
+      .tm-password-manager-host [role='button'] {
+        position: absolute !important;
+        top: 0 !important;
+        right: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 40px !important;
+        height: 40px !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        background: transparent !important;
+        z-index: 4 !important;
+      }
+
+      .tm-password-manager-host .uu5-forms-text-input-reveal-icon,
+      .tm-password-manager-host .uu5-bricks-icon {
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 20px !important;
+        height: 20px !important;
+        font-size: 20px !important;
+        line-height: 1 !important;
+        color: #607d8b !important;
       }
     `;
 
     document.head.appendChild(style);
   }
 
-  function dispatchInputLikeEvents(element) {
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  function copyValue(source, target) {
-    if (!target || target.value === source.value) {
+  function driveOriginalField(field, value) {
+    if (!field || !nativeInputValueSetter || field.value === value) {
       return;
     }
 
-    target.value = source.value;
-    dispatchInputLikeEvents(target);
-  }
-
-  function decorateUsernameField(field) {
-    if (!field || field.dataset.tmPasswordManagerDecorated === "true") {
-      return;
-    }
-
-    field.dataset.tmPasswordManagerDecorated = "true";
-    field.autocomplete = "username";
-    if (!field.name || /^input/u.test(field.name)) {
-      field.name = "username";
-    }
-
-    if (!field.id) {
-      field.id = "tm-login-username";
-    }
+    nativeInputValueSetter.call(field, value);
+    field.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   function decorateAccessCodeField(field, index) {
-    if (!field) {
+    const wrapper = field?.closest(".uu5-forms-input");
+    if (!field || !wrapper) {
       return;
     }
 
-    field.type = "hidden";
-    field.removeAttribute("autocomplete");
+    wrapper.classList.add("tm-password-manager-host");
+    field.classList.add("tm-password-manager-underlay");
     field.setAttribute("aria-hidden", "true");
     field.setAttribute("tabindex", "-1");
     field.setAttribute("data-lpignore", "true");
     field.setAttribute("data-1p-ignore", "true");
-    field.setAttribute("data-form-type", "other");
-    field.dataset.tmPasswordManagerDecorated = "true";
+
+    if (!field.dataset.tmOriginalPlaceholder) {
+      field.dataset.tmOriginalPlaceholder = field.placeholder || "";
+    }
+
+    if (index === 0) {
+      field.placeholder = "Jméno";
+    } else {
+      field.placeholder = "Heslo";
+    }
   }
 
   function findLoginForm() {
@@ -127,7 +177,7 @@
 
   function createIcon(iconType) {
     const icon = document.createElement("span");
-    icon.className = "tm-password-manager-proxy__icon";
+    icon.className = "tm-password-manager-icon";
     icon.setAttribute("aria-hidden", "true");
 
     icon.innerHTML =
@@ -138,83 +188,74 @@
     return icon;
   }
 
-  function createProxyField({ form, target, fieldName, type, autocomplete, inputMode, iconType, placeholder }) {
-    const sourceWrapper = target.closest(".uu5-forms-input");
-    if (!sourceWrapper || sourceWrapper.previousElementSibling?.dataset.tmPasswordManagerProxy === "true") {
+  function createOverlayField(field, index) {
+    const wrapper = field.closest(".uu5-forms-input");
+    if (!wrapper) {
       return;
     }
-
-    const wrapper = sourceWrapper.cloneNode(true);
-    wrapper.classList.add("tm-password-manager-proxy");
-    wrapper.dataset.tmPasswordManagerProxy = "true";
-
-    const input = wrapper.querySelector("input");
-    if (!input) {
-      return;
-    }
-
-    input.value = target.value;
-    input.name = fieldName;
-    input.type = type;
-    input.autocomplete = autocomplete;
-    input.inputMode = inputMode;
-    input.spellcheck = false;
-    input.placeholder = placeholder || target.placeholder || "";
-    input.style.paddingLeft = "36px";
-    input.setAttribute("data-lpignore", "false");
-    input.setAttribute("data-1p-ignore", "false");
-    input.setAttribute("aria-label", target.placeholder || fieldName);
-
-    if (fieldName === "username") {
-      input.classList.add("tm-password-manager-proxy__masked-username");
-      input.dataset.tmMaskedUsername = "true";
-    }
-
-    const proxyId = `tm-password-manager-${fieldName}`;
-    input.id = proxyId;
-    wrapper.querySelectorAll("label").forEach((label) => {
-      label.htmlFor = proxyId;
-    });
 
     const inputContainer = wrapper.querySelector(".uu5-forms-text-input");
-    if (inputContainer) {
-      inputContainer.prepend(createIcon(iconType));
+    if (!inputContainer) {
+      return;
     }
 
-    sourceWrapper.classList.add("tm-password-manager-source-wrapper");
+    let overlay = inputContainer.querySelector(".tm-password-manager-overlay");
+    if (!overlay) {
+      overlay = document.createElement("input");
+      overlay.className = "tm-password-manager-overlay";
+      overlay.type = index === 0 ? "text" : "password";
+      overlay.name = index === 0 ? "username" : "password";
+      overlay.autocomplete = index === 0 ? "username" : "current-password";
+      overlay.inputMode = "text";
+      overlay.spellcheck = false;
+      overlay.placeholder = index === 0 ? "Jméno" : "Heslo";
+      overlay.value = field.value;
+      overlay.setAttribute("aria-label", overlay.placeholder);
+      overlay.setAttribute("data-lpignore", "false");
+      overlay.setAttribute("data-1p-ignore", "false");
+      overlay.dataset.tmOverlayFor = field.name;
 
-    const syncToTarget = () => {
-      copyValue(input, target);
-    };
-
-    input.addEventListener("input", syncToTarget);
-    input.addEventListener("change", syncToTarget);
-    input.addEventListener("blur", syncToTarget);
-
-    target.addEventListener("input", () => {
-      if (document.activeElement !== input && input.value !== target.value) {
-        input.value = target.value;
+      if (index === 0) {
+        overlay.classList.add("tm-password-manager-overlay--masked");
+        overlay.dataset.tmMaskedUsername = "true";
       }
-    });
+
+      inputContainer.prepend(overlay);
+
+      overlay.addEventListener("input", () => {
+        driveOriginalField(field, overlay.value);
+      });
+
+      overlay.addEventListener("change", () => {
+        driveOriginalField(field, overlay.value);
+      });
+
+      field.addEventListener("input", () => {
+        if (document.activeElement !== overlay && overlay.value !== field.value) {
+          overlay.value = field.value;
+        }
+      });
+    }
+
+    if (!inputContainer.querySelector(".tm-password-manager-icon")) {
+      inputContainer.prepend(createIcon(index === 0 ? "username" : "password"));
+    }
 
     const visibilityToggle = wrapper.querySelector("button, [role='button']");
-    if (visibilityToggle) {
+    if (visibilityToggle && visibilityToggle.dataset.tmPasswordManagerBound !== "true") {
+      visibilityToggle.dataset.tmPasswordManagerBound = "true";
       visibilityToggle.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
 
-        if (input.dataset.tmMaskedUsername === "true") {
-          input.classList.toggle("tm-password-manager-proxy__masked-username");
+        if (overlay.dataset.tmMaskedUsername === "true") {
+          overlay.classList.toggle("tm-password-manager-overlay--masked");
           return;
         }
 
-        input.type = input.type === "password" ? "text" : "password";
+        overlay.type = overlay.type === "password" ? "text" : "password";
       });
     }
-
-    sourceWrapper.before(wrapper);
-
-    form.addEventListener("submit", syncToTarget, { capture: true });
   }
 
   function setupPasswordManagerBridge() {
@@ -230,35 +271,12 @@
     }
 
     ensureStyles();
-
-    const usernameField = form.querySelector(USERNAME_SELECTOR);
-    decorateUsernameField(usernameField);
     decorateAccessCodeField(accessCode1, 0);
     decorateAccessCodeField(accessCode2, 1);
+    createOverlayField(accessCode1, 0);
+    createOverlayField(accessCode2, 1);
 
     form.dataset.tmPasswordManagerBridgeReady = "true";
-
-    createProxyField({
-      form,
-      target: accessCode1,
-      fieldName: "username",
-      type: "text",
-      autocomplete: "username",
-      inputMode: "text",
-      iconType: "username",
-      placeholder: "Jméno",
-    });
-
-    createProxyField({
-      form,
-      target: accessCode2,
-      fieldName: "password",
-      type: "password",
-      autocomplete: "current-password",
-      inputMode: "text",
-      iconType: "password",
-      placeholder: "Heslo",
-    });
 
     return true;
   }
