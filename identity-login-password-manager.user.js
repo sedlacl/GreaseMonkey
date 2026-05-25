@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Plus4U - Identity login password manager bridge
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.1
+// @version      1.2
 // @description  Adds password-manager-friendly proxy fields to uuIdentity login forms and syncs them into the original access code inputs.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-identitymanagement-maing01/*/login*
@@ -42,6 +42,10 @@
       .tm-password-manager-proxy .uu5-forms-input-form-item {
         background-color: #f7fbfc;
         padding-left: 36px;
+      }
+
+      .tm-password-manager-proxy__masked-username {
+        -webkit-text-security: disc;
       }
 
       .tm-password-manager-proxy__icon {
@@ -161,6 +165,11 @@
     input.setAttribute("data-1p-ignore", "false");
     input.setAttribute("aria-label", target.placeholder || fieldName);
 
+    if (fieldName === "username") {
+      input.classList.add("tm-password-manager-proxy__masked-username");
+      input.dataset.tmMaskedUsername = "true";
+    }
+
     const proxyId = `tm-password-manager-${fieldName}`;
     input.id = proxyId;
     wrapper.querySelectorAll("label").forEach((label) => {
@@ -193,6 +202,12 @@
       visibilityToggle.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
+
+        if (input.dataset.tmMaskedUsername === "true") {
+          input.classList.toggle("tm-password-manager-proxy__masked-username");
+          return;
+        }
+
         input.type = input.type === "password" ? "text" : "password";
       });
     }
