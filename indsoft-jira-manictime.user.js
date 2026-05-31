@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IndSoft JIRA - ManiTime copy tag
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.4
+// @version      1.5
 // @description  Adds a fast ManiTime copy button on JIRA issue browse pages and overrides the embedded copy icons.
 // @author       Lukáš Sedláček
 // @match        *://jira.indsoft.local/browse/*
@@ -20,7 +20,9 @@
   const FEEDBACK_ATTRIBUTE = "data-copied";
   const BREADCRUMB_SELECTOR = ".aui-nav.aui-nav-breadcrumbs";
   const ISSUE_KEY_PATTERN = /^\/browse\/([A-Z][A-Z0-9_]*-\d+)(?:[/?#].*)?$/iu;
+  const TITLE_SUMMARY_PATTERN = /^\[[^\]]+\]\s*(.*?)\s*-\s*IndSoft JIRA$/u;
   const OVERRIDDEN_ICON_IDS = Object.freeze(["manictime-link-icon", "copy-link-icon"]);
+  const SUMMARY_MAX_LENGTH = 30;
   let copyFeedbackTimeout = 0;
 
   function supportsQuerySelector(node) {
@@ -37,6 +39,30 @@
     return match?.[1]?.toUpperCase() ?? "";
   }
 
+  function normalizeWhitespace(value) {
+    return typeof value === "string" ? value.replace(/\s+/gu, " ").trim() : "";
+  }
+
+  function truncateSummary(value) {
+    const normalizedValue = normalizeWhitespace(value);
+    return normalizedValue.slice(0, SUMMARY_MAX_LENGTH);
+  }
+
+  function getIssueSummary() {
+    const summarySelectors = ["#summary-val", "h1#summary-val", ".aui-page-header-main > h1", "#issuedetails h1", "#issue-content h1"];
+
+    for (const selector of summarySelectors) {
+      const summaryElement = document.querySelector(selector);
+      const summaryText = truncateSummary(summaryElement?.textContent ?? "");
+      if (summaryText) {
+        return summaryText;
+      }
+    }
+
+    const titleMatch = normalizeWhitespace(document.title).match(TITLE_SUMMARY_PATTERN);
+    return truncateSummary(titleMatch?.[1] ?? "");
+  }
+
   function buildCopyText() {
     const issueKey = getIssueKey();
     if (!issueKey) {
@@ -44,7 +70,8 @@
     }
 
     const projectKey = issueKey.split("-")[0] || "";
-    return `JIRA, ${projectKey}, ${issueKey}`;
+    const issueSummary = getIssueSummary();
+    return issueSummary ? `JIRA, ${projectKey}, #${issueKey} ${issueSummary}` : `JIRA, ${projectKey}, #${issueKey}`;
   }
 
   function fallbackCopyText(text) {
