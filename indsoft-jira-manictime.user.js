@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IndSoft JIRA - ManiTime copy tag
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.5
+// @version      1.6
 // @description  Adds a fast ManiTime copy button on JIRA issue browse pages and overrides the embedded copy icons.
 // @author       Lukáš Sedláček
 // @match        *://jira.indsoft.local/browse/*
@@ -22,6 +22,7 @@
   const ISSUE_KEY_PATTERN = /^\/browse\/([A-Z][A-Z0-9_]*-\d+)(?:[/?#].*)?$/iu;
   const TITLE_SUMMARY_PATTERN = /^\[[^\]]+\]\s*(.*?)\s*-\s*IndSoft JIRA$/u;
   const OVERRIDDEN_ICON_IDS = Object.freeze(["manictime-link-icon", "copy-link-icon"]);
+  const SVG_CACHE_STORAGE_KEY = "gm-indsoft-jira-manictime-svg";
   const SUMMARY_MAX_LENGTH = 30;
   let copyFeedbackTimeout = 0;
 
@@ -196,6 +197,11 @@
   }
 
   function createFallbackIcon() {
+    const cachedIcon = createCachedIcon();
+    if (cachedIcon) {
+      return cachedIcon;
+    }
+
     const namespaceUri = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(namespaceUri, "svg");
     svg.setAttribute("width", "16");
@@ -225,7 +231,26 @@
     return svg;
   }
 
-  function cloneOriginalIcon(sourceIcon) {
+  function createCachedIcon() {
+    let cachedMarkup = "";
+
+    try {
+      cachedMarkup = window.localStorage?.getItem(SVG_CACHE_STORAGE_KEY) ?? "";
+    } catch (_error) {
+      return null;
+    }
+
+    if (!cachedMarkup) {
+      return null;
+    }
+
+    const template = document.createElement("template");
+    template.innerHTML = cachedMarkup.trim();
+    const cachedIcon = template.content.firstElementChild;
+    return cachedIcon instanceof SVGSVGElement ? cloneSvgForButton(cachedIcon) : null;
+  }
+
+  function cloneSvgForButton(sourceIcon) {
     if (!(sourceIcon instanceof SVGSVGElement)) {
       return createFallbackIcon();
     }
@@ -244,12 +269,29 @@
     return clone;
   }
 
+  function cacheOriginalIcon(sourceIcon) {
+    if (!(sourceIcon instanceof SVGSVGElement)) {
+      return;
+    }
+
+    try {
+      window.localStorage?.setItem(SVG_CACHE_STORAGE_KEY, sourceIcon.outerHTML);
+    } catch (_error) {
+      // Ignore storage failures and keep the runtime-only icon swap working.
+    }
+  }
+
+  function cloneOriginalIcon(sourceIcon) {
+    return cloneSvgForButton(sourceIcon);
+  }
+
   function updateButtonIcon(sourceIcon = getOriginalIcon()) {
     const button = document.getElementById(BUTTON_ID);
     if (!(button instanceof SVGSVGElement) || !(sourceIcon instanceof SVGSVGElement)) {
       return;
     }
 
+    cacheOriginalIcon(sourceIcon);
     const nextIcon = cloneOriginalIcon(sourceIcon);
     if (button.isEqualNode(nextIcon)) {
       return;
