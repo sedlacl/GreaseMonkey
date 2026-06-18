@@ -452,6 +452,23 @@ test("getManageButtonStates keeps remove-index disabled without index", () => {
   });
 });
 
+test("extractSearchText extracts Uu5TilesBricks.Table rows from single-quoted data attribute", () => {
+  const { extractSearchText } = require("../bookkit-fulltext-search.user.js");
+
+  const text = extractSearchText(
+    "<uu5string/>" +
+      "<Uu5TilesBricks.Table data='<uu5json/>[\n" +
+      '  ["Prostředí", "Služba", "Connection String"],\n' +
+      '  [{"value": "T1"}, "PM Tlustý klient", "http://T1-Transport1.sids.local:2558/Transport1", "Transport1.test"]\n' +
+      "]' />",
+  );
+
+  assert.match(text, /Prostředí/);
+  assert.match(text, /PM Tlustý klient/);
+  assert.match(text, /Transport1\.test/);
+  assert.match(text, /T1-Transport1/);
+});
+
 test("shouldSendDiag requires __gmBrowserBridge flag", () => {
   const { shouldSendDiag } = require("../bookkit-fulltext-search.user.js");
 

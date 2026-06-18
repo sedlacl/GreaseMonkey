@@ -47,10 +47,23 @@
   const BOOKKIT_MATCHER = /^(https?:\/\/[^/]+\/uu-bookkit-maing01\/([a-z0-9]{32}))(?:\/book\/(?:page\?code=([^&#]+)|intro)|\/?.*)?$/iu;
   const SEARCHABLE_ATTRIBUTE_PATTERN = /\b(?:header|content|label|value|title|alt|name|subtitle|description|text|code)\s*=\s*(?:"([^"]*)"|'([^']*)')/giu;
   const UU5STRING_ATTRIBUTE_PATTERN = /\buu5string\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/giu;
-  const STRUCTURED_DATA_ATTRIBUTE_PATTERN = /\bdata\s*=\s*"((?:[^"\\]|\\.)*)"/giu;
+  const STRUCTURED_DATA_ATTRIBUTE_PATTERN = /\bdata\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/giu;
   const COMPONENT_NOISE_PATTERN =
     /\b(?:uu5string|UU5(?:\.[A-Za-z0-9_]+)+|Uu5(?:\.[A-Za-z0-9_]+)+|Plus4U5(?:\.[A-Za-z0-9_]+)+|UuDcc(?:\.[A-Za-z0-9_]+)+|UuBookKit(?:\.[A-Za-z0-9_]+)+|UuContentKit(?:\.[A-Za-z0-9_]+)+|UuTerritory(?:\.[A-Za-z0-9_]+)+)\b/gu;
-  const IGNORED_STRUCTURED_DATA_KEYS = new Set(["id", "type", "customIcon", "colorSchema", "nestingLevel", "uuIdentity", "target", "rel"]);
+  const IGNORED_STRUCTURED_DATA_KEYS = new Set([
+    "id",
+    "type",
+    "customIcon",
+    "colorSchema",
+    "colorScheme",
+    "nestingLevel",
+    "uuIdentity",
+    "target",
+    "rel",
+    "style",
+    "significance",
+    "textColor",
+  ]);
   function shouldSendDiag(scope) {
     return Boolean(scope && scope.__gmBrowserBridge);
   }
@@ -228,7 +241,7 @@
     let match;
 
     while ((match = STRUCTURED_DATA_ATTRIBUTE_PATTERN.exec(text)) !== null) {
-      const decodedValue = decodeEscapedAttributeValue(match[1]).trim();
+      const decodedValue = decodeEscapedAttributeValue(match[1] ?? match[2]).trim();
       const jsonText = decodedValue.replace(/^<uu5json\s*\/>\s*/iu, "").trim();
       if (!jsonText || !/^[\[{]/u.test(jsonText)) continue;
 
@@ -1764,7 +1777,7 @@
           <div></div>
         </div>
         <div class="gm-bookkit-fulltext__results">
-          <div class="gm-bookkit-fulltext__empty">Načítám registry BookKitů…</div>
+          <div class="gm-bookkit-fulltext__empty">Zadej dotaz, fulltext hledá v názvech stránek i obsahu sekcí.</div>
         </div>
       </div>
     `;
@@ -3077,6 +3090,7 @@
         syncSelectedBookToContext(state);
         state.ui.modal.hidden = false;
         await prepareSearchContextIfNeeded(state);
+        await renderResults(state);
         state.ui.searchInput.focus();
         probeIndexFreshness(state).catch(() => {});
       } catch (error) {
@@ -3111,6 +3125,10 @@
         },
         "A",
       );
+
+      if (state.ui && !state.ui.modal.hidden) {
+        await renderResults(state);
+      }
     } catch (error) {
       dbg("initialize", "Init failed", { error: String(error?.message || error) }, "A");
       sendDiag("init.failed", { error: String(error?.message || error) });
