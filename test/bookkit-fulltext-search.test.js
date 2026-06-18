@@ -243,22 +243,77 @@ test("groupSearchResultsByPage merges hits from the same page", () => {
   assert.equal(grouped[1].pageTitle, "Jiná stránka");
 });
 
-test("getNavBooks returns known books enriched with stored metadata", () => {
+test("extractBookTitleFromBookDto reads book name from getBook payload", () => {
+  const { extractBookTitleFromBookDto } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(
+    extractBookTitleFromBookDto({
+      name: { en: "GMA2 Application Model", cs: "GMA2 Application Model" },
+    }),
+    "GMA2 Application Model",
+  );
+});
+
+test("parseBookTitleFromDocumentTitle extracts book name from browser title", () => {
+  const { parseBookTitleFromDocumentTitle } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(parseBookTitleFromDocumentTitle("Intro - IDS Maintenance - Documentation - uuBookKit"), "IDS Maintenance - Documentation");
+  assert.equal(parseBookTitleFromDocumentTitle("Page - uuBookKit"), "Page");
+});
+
+test("pickBetterBookTitle keeps specific titles over generic page labels", () => {
+  const { pickBetterBookTitle } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(pickBetterBookTitle("uuBookKit", "IDS Maintenance - Documentation"), "IDS Maintenance - Documentation");
+  assert.equal(pickBetterBookTitle("IDS Maintenance - Documentation", "Page"), "IDS Maintenance - Documentation");
+});
+
+test("getNavBooks returns visited books sorted by recency", () => {
   const { getNavBooks } = require("../bookkit-fulltext-search.user.js");
   const books = getNavBooks({
     books: [
       {
         bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3",
         title: "IDS Maintenance - aktualizovaný název",
+        lastVisitedAt: 100,
         lastIndexedAt: 123,
+      },
+      {
+        bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        title: "Návštívená kniha",
+        lastVisitedAt: 500,
+      },
+      {
+        bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/e3f5c648e85f4319bd8fc25ea5be6c2c",
+        title: "uuBookKit Documentation",
+        known: true,
+        seed: true,
       },
     ],
   });
 
   assert.equal(books.length, 2);
-  assert.equal(books[0].title, "IDS Maintenance - aktualizovaný název");
-  assert.equal(books[0].lastIndexedAt, 123);
-  assert.equal(books[1].title, "uuBookKit Documentation");
+  assert.equal(books[0].title, "Návštívená kniha");
+  assert.equal(books[1].title, "IDS Maintenance - aktualizovaný název");
+});
+
+test("fingerprintStructure changes when book structure changes", () => {
+  const { fingerprintStructure } = require("../bookkit-fulltext-search.user.js");
+
+  const before = {
+    itemMap: {
+      home: { next: "", previous: "", indent: 0, label: { cs: "Home" } },
+    },
+  };
+  const after = {
+    itemMap: {
+      home: { next: "intro", previous: "", indent: 0, label: { cs: "Home" } },
+      intro: { next: "", previous: "home", indent: 0, label: { cs: "Intro" } },
+    },
+  };
+
+  assert.equal(fingerprintStructure(before), fingerprintStructure(before));
+  assert.notEqual(fingerprintStructure(before), fingerprintStructure(after));
 });
 
 test("formatBookIndexLabel describes index freshness", () => {
