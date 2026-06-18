@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         uuBookKit Fulltext Search
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.5.7
+// @version      1.6.1
 // @description  Adds a cached fulltext search for uuBookKit pages and sections using BookKit JSON commands.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-bookkit-maing01/*
@@ -26,6 +26,9 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmBookKitFulltextSearch";
+  const SCRIPT_VERSION = "1.6.1";
+  const BRIDGE_DIAG_URL = "http://127.0.0.1:8766/diagnostics";
+  const DIAG_SOURCE = "bookkit-fulltext";
   const STYLE_ID = "gm-bookkit-fulltext-style";
   const MODAL_ID = "gm-bookkit-fulltext-modal";
   const TRIGGER_ID = "gm-bookkit-fulltext-trigger";
@@ -46,15 +49,25 @@
   const COMPONENT_NOISE_PATTERN =
     /\b(?:uu5string|UU5(?:\.[A-Za-z0-9_]+)+|Uu5(?:\.[A-Za-z0-9_]+)+|Plus4U5(?:\.[A-Za-z0-9_]+)+|UuDcc(?:\.[A-Za-z0-9_]+)+|UuBookKit(?:\.[A-Za-z0-9_]+)+|UuContentKit(?:\.[A-Za-z0-9_]+)+|UuTerritory(?:\.[A-Za-z0-9_]+)+)\b/gu;
   const IGNORED_STRUCTURED_DATA_KEYS = new Set(["id", "type", "customIcon", "colorSchema", "nestingLevel", "uuIdentity", "target", "rel"]);
-  // #region agent log
-  function dbg(location, message, data, hypothesisId) {
-    fetch("http://127.0.0.1:7800/ingest/e8ee066a-71cc-4312-958f-727626369721", {
+  function sendDiag(event, data = {}) {
+    fetch(BRIDGE_DIAG_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "186a15" },
-      body: JSON.stringify({ sessionId: "186a15", location, message, data, hypothesisId, timestamp: Date.now() }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        source: DIAG_SOURCE,
+        version: SCRIPT_VERSION,
+        event,
+        url: typeof location !== "undefined" ? location.href : "",
+        timestamp: Date.now(),
+        data,
+      }),
+      keepalive: true,
     }).catch(() => {});
   }
-  // #endregion
+
+  function dbg(location, message, data, hypothesisId) {
+    sendDiag(location, { message, hypothesisId, ...(data && typeof data === "object" ? data : { value: data }) });
+  }
   const KNOWN_BOOKS = Object.freeze([
     {
       bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3",
@@ -67,7 +80,7 @@
       bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/e3f5c648e85f4319bd8fc25ea5be6c2c",
       baseUri: "https://uuapp.plus4u.net/uu-bookkit-maing01/e3f5c648e85f4319bd8fc25ea5be6c2c",
       awid: "e3f5c648e85f4319bd8fc25ea5be6c2c",
-      title: "uuBookKit Documentation",
+      title: "uuBookKit Main g01 - Application Model",
       known: true,
     },
   ]);
@@ -295,6 +308,22 @@
     return stripTechnicalNoise(stripEscapedJsonNoise(text));
   }
 
+  function needsBookTitleRefresh(title) {
+    return !String(title || "").trim() || isGenericBookTitle(title);
+  }
+
+  function hasBookKindLabel(title) {
+    return /\b(?:application model|business model|documentation)\b/iu.test(String(title || ""));
+  }
+
+  function getHeaderBookTitle() {
+    const topLeft = document.querySelector(".plus4u5-app-top-left-content");
+    if (!topLeft) return "";
+
+    const titleDiv = topLeft.querySelector(":scope > .uu5-common-div");
+    return titleDiv?.textContent?.trim() || "";
+  }
+
   function parseBookTitleFromDocumentTitle(documentTitle) {
     const title = String(documentTitle || "").trim();
     if (!title) return "";
@@ -311,7 +340,7 @@
       .trim()
       .toLocaleLowerCase("cs");
     if (!normalized) return true;
-    if (["uuBookKit", "page", "intro", "home", "welcome"].includes(normalized)) return true;
+    if (["uubookkit", "page", "intro", "home", "welcome"].includes(normalized)) return true;
     if (/^welcome\b/u.test(normalized)) return true;
     if (/^vítej/u.test(normalized)) return true;
     return false;
@@ -327,22 +356,30 @@
     const nextGeneric = isGenericBookTitle(next);
     if (existingGeneric && !nextGeneric) return next;
     if (!existingGeneric && nextGeneric) return existing;
+
+    const existingHasKind = hasBookKindLabel(existing);
+    const nextHasKind = hasBookKindLabel(next);
+    if (!existingHasKind && nextHasKind) return next;
+    if (existingHasKind && !nextHasKind) return existing;
+
     if (next.length > existing.length) return next;
     return existing;
   }
 
   function getCurrentBookTitle() {
-    const fromDom = document.querySelector(".uu-bookkit-book-top-text")?.textContent?.trim();
-    if (fromDom && !isGenericBookTitle(fromDom)) {
-      return fromDom;
+    const candidates = [
+      document.querySelector(".uu-bookkit-book-top-text")?.textContent?.trim(),
+      getHeaderBookTitle(),
+      parseBookTitleFromDocumentTitle(document.title),
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      if (!isGenericBookTitle(candidate)) {
+        return candidate;
+      }
     }
 
-    const fromDocumentTitle = parseBookTitleFromDocumentTitle(document.title);
-    if (fromDocumentTitle && !isGenericBookTitle(fromDocumentTitle)) {
-      return fromDocumentTitle;
-    }
-
-    return fromDom || fromDocumentTitle || "uuBookKit";
+    return candidates[0] || "uuBookKit";
   }
 
   function resolveBookTitle(book, context) {
@@ -367,7 +404,20 @@
 
   function extractBookTitleFromBookDto(dto) {
     const data = dto?.data || dto?.body || dto;
-    return pickLabel(data?.name) || "";
+    const name = data?.name;
+    if (!name) return "";
+    if (typeof name === "string") return name.trim();
+
+    const candidates = Object.values(name)
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .sort((left, right) => {
+        const byKind = Number(hasBookKindLabel(right)) - Number(hasBookKindLabel(left));
+        if (byKind !== 0) return byKind;
+        return right.length - left.length;
+      });
+
+    return candidates[0] || pickLabel(name);
   }
 
   function mergeBookRegistries(seedBooks, runtimeBooks) {
@@ -387,6 +437,9 @@
 
       if (existing.known || book.known) next.known = true;
       if (existing.seed || book.seed) next.seed = true;
+      if (isGenericBookTitle(next.title)) {
+        delete next.title;
+      }
       merged.set(next.bookId, next);
     }
 
@@ -1655,11 +1708,9 @@
   async function loadRegistry(state) {
     state.db = await openDatabase();
     const storedBooks = await idbGetAll(state.db, BOOKS_STORE);
-    const liveTitle = getCurrentBookTitle();
     const currentBook = state.context
       ? {
           ...state.context,
-          ...(isGenericBookTitle(liveTitle) ? {} : { title: liveTitle }),
           lastVisitedAt: Date.now(),
         }
       : null;
@@ -1669,6 +1720,10 @@
       KNOWN_BOOKS.map((book) => ({ ...book, seed: true })),
       currentBook ? [...storedBooks, currentBook] : storedBooks,
     );
+
+    if (state.context?.bookId) {
+      await refreshBookTitleFromApi(state, state.context.bookId);
+    }
 
     for (const book of state.books) {
       await idbPut(state.db, BOOKS_STORE, book);
@@ -1704,8 +1759,87 @@
   }
 
   async function fetchBookTitle(baseUri) {
-    const json = await fetchBookKitJson(baseUri, "getBook", {});
-    return extractBookTitleFromBookDto(json);
+    const retryDelays = [0, 500, 1500, 4000, 10000];
+    let lastError = null;
+
+    for (const delayMs of retryDelays) {
+      if (delayMs > 0) {
+        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+      }
+
+      try {
+        const json = await fetchBookKitJson(baseUri, "getBook", {});
+        const title = extractBookTitleFromBookDto(json);
+        if (title && !isGenericBookTitle(title)) {
+          return title;
+        }
+      } catch (error) {
+        lastError = error;
+        const message = String(error?.message || error);
+        if (!/authorized|autoriz/i.test(message)) {
+          break;
+        }
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+
+    return "";
+  }
+
+  async function refreshBookTitleFromApi(state, bookId) {
+    const book = state.books.find((entry) => entry.bookId === bookId);
+    if (!book?.baseUri) return false;
+
+    if (state.context?.bookId === bookId) {
+      const domTitle = getCurrentBookTitle();
+      if (!isGenericBookTitle(domTitle)) {
+        if (await persistBookTitle(state, bookId, domTitle)) {
+          sendDiag("title.resolved", { awid: book.awid, via: "dom", title: domTitle });
+          return true;
+        }
+      }
+    }
+
+    try {
+      const title = await fetchBookTitle(book.baseUri);
+      if (title && (await persistBookTitle(state, bookId, title))) {
+        sendDiag("title.resolved", { awid: book.awid, via: "api", title });
+        return true;
+      }
+    } catch (error) {
+      sendDiag("title.failed", { awid: book.awid, error: String(error?.message || error) });
+      console.warn("[gm-bookkit-fulltext] getBook title failed", book.awid, error?.message || error);
+    }
+
+    sendDiag("title.unresolved", {
+      awid: book.awid,
+      current: book.title || null,
+      dom: state.context?.bookId === bookId ? getCurrentBookTitle() : null,
+    });
+    return false;
+  }
+
+  async function ensureBookTitlesReady(state) {
+    if (state.context?.bookId) {
+      await refreshBookTitleFromApi(state, state.context.bookId);
+    }
+    await refreshGenericNavBookTitles(state);
+    renderNavMenu(state);
+    renderBookPicker(state);
+    if (state.selectedBook?.bookId) {
+      state.selectedBook = state.books.find((book) => book.bookId === state.selectedBook.bookId) || state.selectedBook;
+      if (state.ui?.bookButton) {
+        state.ui.bookButton.textContent = state.selectedBook.title || "Vybrat BookKit";
+      }
+    }
+    sendDiag("titles.ready", {
+      selectedAwid: state.selectedBook?.awid || null,
+      selectedTitle: state.selectedBook?.title || null,
+      books: getNavBooks(state).map((entry) => ({ awid: entry.awid, title: entry.title || null })),
+    });
   }
 
   async function persistBookTitle(state, bookId, title) {
@@ -1736,38 +1870,15 @@
     return true;
   }
 
-  async function refreshBookTitleFromApi(state, bookId) {
-    const book = state.books.find((entry) => entry.bookId === bookId);
-    if (!book?.baseUri) return false;
-
-    try {
-      const title = await fetchBookTitle(book.baseUri);
-      return await persistBookTitle(state, bookId, title);
-    } catch {
-      return false;
-    }
-  }
-
   async function refreshGenericNavBookTitles(state) {
-    const staleBooks = getNavBooks(state).filter((book) => isGenericBookTitle(book.title));
+    const staleBooks = getNavBooks(state).filter((book) => needsBookTitleRefresh(book.title));
     for (const book of staleBooks) {
       await refreshBookTitleFromApi(state, book.bookId);
     }
   }
 
   async function refreshCurrentBookTitle(state) {
-    const bookId = state.context?.bookId;
-    if (!bookId) return false;
-
-    const domTitle = getCurrentBookTitle();
-    if (!isGenericBookTitle(domTitle)) {
-      return persistBookTitle(state, bookId, domTitle);
-    }
-
-    const book = state.books.find((entry) => entry.bookId === bookId);
-    if (book && !isGenericBookTitle(book.title)) return true;
-
-    return refreshBookTitleFromApi(state, bookId);
+    return refreshBookTitleFromApi(state, state.context?.bookId);
   }
 
   function scheduleCurrentBookTitleRefresh(state) {
@@ -1775,7 +1886,7 @@
     if (!bookId) return;
 
     const book = state.books.find((entry) => entry.bookId === bookId);
-    if (book && !isGenericBookTitle(book.title)) {
+    if (book && !needsBookTitleRefresh(book.title)) {
       state.titleRefreshAttempt = 0;
       return;
     }
@@ -1786,7 +1897,7 @@
     state.titleRefreshTimer = window.setTimeout(async () => {
       const fixed = await refreshCurrentBookTitle(state);
       const current = state.books.find((entry) => entry.bookId === bookId);
-      if (!fixed && isGenericBookTitle(current?.title) && state.titleRefreshAttempt < delays.length - 1) {
+      if (!fixed && needsBookTitleRefresh(current?.title) && state.titleRefreshAttempt < delays.length - 1) {
         state.titleRefreshAttempt += 1;
         scheduleCurrentBookTitleRefresh(state);
       } else {
@@ -1812,8 +1923,7 @@
 
     if (bookChanged) {
       await loadRegistry(state);
-      renderBookPicker(state);
-      renderNavMenu(state);
+      await ensureBookTitlesReady(state);
       ensureTrigger(state);
       return;
     }
@@ -1855,10 +1965,14 @@
       const structure = await loadBookStructure(book.baseUri);
       const pages = createPageListFromStructure(structure, book.baseUri);
       let resolvedTitle = resolveBookTitle(book, state.context);
-      if (isGenericBookTitle(resolvedTitle)) {
-        const apiTitle = await fetchBookTitle(book.baseUri);
-        if (apiTitle && !isGenericBookTitle(apiTitle)) {
-          resolvedTitle = apiTitle;
+      if (needsBookTitleRefresh(resolvedTitle)) {
+        try {
+          const apiTitle = await fetchBookTitle(book.baseUri);
+          if (apiTitle) {
+            resolvedTitle = apiTitle;
+          }
+        } catch {
+          // keep resolvedTitle fallback
         }
       }
 
@@ -2064,19 +2178,19 @@
     if (!state.context) return;
 
     window.__gmBookKitFulltextState = state;
+    window.__gmBookKitFulltextVersion = SCRIPT_VERSION;
 
     ensureStyles();
     createModal(state);
     ensureTrigger(state);
     await loadRegistry(state);
-    renderBookPicker(state);
-    renderNavMenu(state);
+    await ensureBookTitlesReady(state);
     renderResults(state);
     installBookContextWatchers(state);
 
     const observer = new MutationObserver(() => {
       ensureTrigger(state);
-      if (state.context && document.querySelector(".uu-bookkit-book-top-text")) {
+      if (state.context && (document.querySelector(".uu-bookkit-book-top-text") || document.querySelector(".plus4u5-app-top-left-content"))) {
         scheduleCurrentBookTitleRefresh(state);
       }
     });
@@ -2088,7 +2202,6 @@
     if (state.indexRecord?.indexedAt && Date.now() - state.indexRecord.indexedAt > INDEX_STALE_MS && !state.indexRecord.structureSignature) {
       setStatus(state, `Index je starší než 24 hodin, zvaž aktualizaci.`);
     }
-    // #region agent log
     dbg(
       "initialize",
       "Init complete",
@@ -2101,14 +2214,12 @@
       },
       "A",
     );
-    // #endregion
   }
 
   function run() {
     initialize().catch((error) => {
-      // #region agent log
       dbg("initialize", "Init failed", { error: String(error?.message || error) }, "A");
-      // #endregion
+      sendDiag("init.failed", { error: String(error?.message || error) });
       console.error("gm-bookkit-fulltext-search init failed", error);
     });
   }
@@ -2119,6 +2230,8 @@
     parseBookTitleFromDocumentTitle,
     extractBookTitleFromBookDto,
     isGenericBookTitle,
+    needsBookTitleRefresh,
+    hasBookKindLabel,
     pickBetterBookTitle,
     resolveBookTitle,
     createPageListFromStructure,

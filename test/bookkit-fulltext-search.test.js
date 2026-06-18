@@ -261,6 +261,30 @@ test("parseBookTitleFromDocumentTitle extracts book name from browser title", ()
   assert.equal(parseBookTitleFromDocumentTitle("Page - uuBookKit"), "Page");
 });
 
+test("mergeBookRegistries drops generic uuBookKit titles from storage", () => {
+  const { mergeBookRegistries } = require("../bookkit-fulltext-search.user.js");
+  const merged = mergeBookRegistries([], [{ bookId: "https://example.com/awid", baseUri: "https://example.com/awid", title: "uuBookKit" }]);
+  assert.equal(merged[0].title, undefined);
+});
+
+test("pickBetterBookTitle prefers Application Model over generic Documentation label", () => {
+  const { pickBetterBookTitle } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(pickBetterBookTitle("uuBookKit Documentation", "uuBookKit Main g01 - Application Model"), "uuBookKit Main g01 - Application Model");
+  assert.equal(pickBetterBookTitle("IDS", "IDS Business Model"), "IDS Business Model");
+});
+
+test("extractBookTitleFromBookDto prefers longest name with model kind", () => {
+  const { extractBookTitleFromBookDto } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(
+    extractBookTitleFromBookDto({
+      name: { cs: "IDS", en: "IDS Business Model" },
+    }),
+    "IDS Business Model",
+  );
+});
+
 test("pickBetterBookTitle keeps specific titles over generic page labels", () => {
   const { pickBetterBookTitle } = require("../bookkit-fulltext-search.user.js");
 

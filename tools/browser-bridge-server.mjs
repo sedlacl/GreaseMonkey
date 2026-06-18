@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const PORT = Number(process.env.BROWSER_BRIDGE_PORT || 8766);
 const HOST = process.env.BROWSER_BRIDGE_HOST || "127.0.0.1";
 const RESULT_TTL_MS = 5 * 60 * 1000;
+const DIAG_LIMIT = Number(process.env.BROWSER_BRIDGE_DIAG_LIMIT || 300);
+const DIAG_TTL_MS = Number(process.env.BROWSER_BRIDGE_DIAG_TTL_MS || 30 * 60 * 1000);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /** @type {Map<string, string>} */
@@ -20,6 +22,35 @@ const STATIC_SCRIPTS = new Map([
 const pending = new Map();
 /** @type {Map<string, { id: string, ok: boolean, result?: unknown, error?: string, finished: number }>} */
 const results = new Map();
+/** @type {Array<{ id: string, received: number, source: string, event: string, version?: string, url?: string, timestamp: number, data?: unknown }>} */
+const diagnostics = [];
+
+function pruneDiagnostics() {
+  const cutoff = Date.now() - DIAG_TTL_MS;
+  while (diagnostics.length && diagnostics[0].timestamp < cutoff) {
+    diagnostics.shift();
+  }
+  while (diagnostics.length > DIAG_LIMIT) {
+    diagnostics.shift();
+  }
+}
+
+function addDiagnostic(entry) {
+  pruneDiagnostics();
+  const normalized = {
+    id: randomUUID(),
+    received: Date.now(),
+    source: String(entry.source || "unknown"),
+    event: String(entry.event || "event"),
+    version: entry.version ? String(entry.version) : undefined,
+    url: entry.url ? String(entry.url) : undefined,
+    timestamp: Number(entry.timestamp) || Date.now(),
+    data: entry.data ?? entry.payload ?? undefined,
+  };
+  diagnostics.push(normalized);
+  console.log(`[diag] ${normalized.source} ${normalized.event}`);
+  return normalized;
+}
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -101,7 +132,37 @@ const server = http.createServer(async (req, res) => {
         results: results.size,
         port: PORT,
         scripts: Array.from(STATIC_SCRIPTS.keys()),
+        diagnostics: diagnostics.length,
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/diagnostics") {
+      pruneDiagnostics();
+      const limit = Math.min(Number(url.searchParams.get("limit") || 50), DIAG_LIMIT);
+      const source = url.searchParams.get("source");
+      let items = diagnostics;
+      if (source) {
+        items = items.filter((entry) => entry.source === source);
+      }
+      sendJson(res, 200, {
+        count: items.length,
+        items: items.slice(-limit).reverse(),
+      });
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname === "/diagnostics") {
+      diagnostics.length = 0;
+      sendJson(res, 200, { ok: true, cleared: true });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/diagnostics") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const entries = Array.isArray(body.events) ? body.events : [body];
+      const stored = entries.filter((entry) => entry && entry.event).map((entry) => addDiagnostic(entry));
+      sendJson(res, 200, { ok: true, stored: stored.length });
       return;
     }
 

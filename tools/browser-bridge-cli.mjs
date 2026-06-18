@@ -33,12 +33,36 @@ async function main() {
   node tools/browser-bridge-cli.mjs eval "<javascript expression>"
   node tools/browser-bridge-cli.mjs click "#selector"
   node tools/browser-bridge-cli.mjs fill "#selector" "value"
-  node tools/browser-bridge-cli.mjs snapshot`);
+  node tools/browser-bridge-cli.mjs snapshot
+  node tools/browser-bridge-cli.mjs diagnostics [--limit N] [--source NAME]
+  node tools/browser-bridge-cli.mjs diagnostics-clear`);
     process.exit(command ? 0 : 1);
   }
 
   if (command === "health") {
     console.log(JSON.stringify(await request("/health"), null, 2));
+    return;
+  }
+
+  if (command === "diagnostics") {
+    const params = new URLSearchParams();
+    for (let index = 0; index < rest.length; index += 1) {
+      const token = rest[index];
+      if (token === "--limit" && rest[index + 1]) {
+        params.set("limit", rest[index + 1]);
+        index += 1;
+      } else if (token === "--source" && rest[index + 1]) {
+        params.set("source", rest[index + 1]);
+        index += 1;
+      }
+    }
+    const query = params.toString();
+    console.log(JSON.stringify(await request(`/diagnostics${query ? `?${query}` : ""}`), null, 2));
+    return;
+  }
+
+  if (command === "diagnostics-clear") {
+    console.log(JSON.stringify(await request("/diagnostics", { method: "DELETE" }), null, 2));
     return;
   }
 

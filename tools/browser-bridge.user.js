@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Browser Bridge for Cursor Agent
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.1
+// @version      1.2
 // @description  Polls a local bridge server so a Cursor agent can execute JS and read results from your logged-in browser.
 // @author       Lukáš Sedláček
 // @match        *://*/*
@@ -28,10 +28,21 @@
   }
 
   function createUi() {
-    if (document.getElementById(PANEL_ID)) {
+    const existing = document.getElementById(PANEL_ID);
+    if (existing) {
+      const bookkit = existing.querySelector(".gm-bridge__bookkit");
+      const refreshBookKitVersion = () => {
+        if (!bookkit) return;
+        const version = window.__gmBookKitFulltextVersion;
+        const present = typeof version === "string" && version.length > 0;
+        bookkit.textContent = present ? `BookKit FT: ${version}` : "BookKit FT: —";
+        bookkit.dataset.present = present ? "true" : "false";
+      };
+      refreshBookKitVersion();
       return {
         setStatus() {},
         log() {},
+        refreshBookKitVersion,
       };
     }
 
@@ -92,6 +103,15 @@
         color: #94a3b8;
         font-size: 11px;
       }
+      #${PANEL_ID} .gm-bridge__extras {
+        padding: 5px 10px 6px;
+        border-bottom: 1px solid #334155;
+        color: #64748b;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .gm-bridge__bookkit[data-present="true"] {
+        color: #86efac;
+      }
       #${PANEL_ID} .gm-bridge__body {
         max-height: 180px;
         overflow: auto;
@@ -118,6 +138,9 @@
         <span class="gm-bridge__title">Browser Bridge</span>
         <span class="gm-bridge__meta">offline</span>
       </div>
+      <div class="gm-bridge__extras">
+        <span class="gm-bridge__bookkit" data-present="false">BookKit FT: —</span>
+      </div>
       <div class="gm-bridge__body"></div>
     `;
 
@@ -130,11 +153,22 @@
 
     const body = panel.querySelector(".gm-bridge__body");
     const meta = panel.querySelector(".gm-bridge__meta");
+    const bookkit = panel.querySelector(".gm-bridge__bookkit");
+
+    function refreshBookKitVersion() {
+      const version = window.__gmBookKitFulltextVersion;
+      const present = typeof version === "string" && version.length > 0;
+      bookkit.textContent = present ? `BookKit FT: ${version}` : "BookKit FT: —";
+      bookkit.dataset.present = present ? "true" : "false";
+    }
+
+    refreshBookKitVersion();
 
     return {
       setStatus(status, label) {
         panel.dataset.status = status;
         meta.textContent = label || status;
+        refreshBookKitVersion();
       },
       log(level, message) {
         const line = document.createElement("div");
@@ -147,6 +181,7 @@
         }
         body.scrollTop = body.scrollHeight;
       },
+      refreshBookKitVersion,
     };
   }
 
@@ -246,6 +281,7 @@
         loop.lastOfflineLog = Date.now();
       }
     }
+    ui.refreshBookKitVersion();
     window.setTimeout(loop, POLL_MS);
   }
 
