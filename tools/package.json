@@ -1,0 +1,11 @@
+{
+  "name": "greasemonkey-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node browser-bridge-server.mjs",
+    "bridge": "node browser-bridge-server.mjs",
+    "bridge:health": "node browser-bridge-cli.mjs health",
+    "test:fulltext": "node --test ../test/bookkit-fulltext-search.test.js"
+  }
+}

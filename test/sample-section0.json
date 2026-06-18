@@ -1,0 +1,6 @@
+{
+  "id": "404012b1-6a1f-4eb9-8e7d-edf06b773854",
+  "ok": true,
+  "result": "<uu5string/>\n<UU5.Bricks.Lsi><UU5.Bricks.Lsi.Item language=\"cs\"><Uu5Bricks.Section header=\"CA /Ubuntu\" headerSeparator=false><UU5.RichText.Block uu5string=\"<uu5string/><UU5.Bricks.Div>You'll have to <i>copy the certificate of the root CA to the</i> <UU5.Bricks.Code>/etc/ssl/certs/</UU5.Bricks.Code><i> directory in PEM format</i>. </UU5.Bricks.Div><UU5.Bricks.Div>Then you must run the <UU5.Bricks.Code>update-ca-certificates script</UU5.Bricks.Code>.</UU5.Bricks.Div>\"/></Uu5Bricks.Section></UU5.Bricks.Lsi.Item></UU5.Bricks.Lsi>",
+  "finished": 1781789239603
+}

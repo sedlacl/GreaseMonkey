@@ -18,6 +18,7 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 | Addon | Address |
 | --- | --- |
 | Copy uuBml as PNG to clipboard | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/uubml-copy-as-png.user.js) |
+| uuBookKit Fulltext Search | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/bookkit-fulltext-search.user.js) |
 | Autoclose authentication page | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/close-auth-page.user.js) |
 | Identity login password manager bridge | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/identity-login-password-manager.user.js) |
 | JSONATA JAVA Checker | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.user.js) |
@@ -34,6 +35,8 @@ Use `Message Registry - Preview downloads (UUCloud1)` for the `usy-idsmari-messa
 
 Use `Identity login password manager bridge` on uuIdentity login pages where password managers do not recognize the original `accessCode1` / `accessCode2` fields. The script decorates the native fields and inserts two compatible proxy password inputs that mirror back into the original form.
 
+Use `uuBookKit Fulltext Search` in `uu-bookkit-maing01` books where the built-in search is too limited. The script adds its own cached fulltext index over BookKit JSON commands, remembers known books, and lets you search previously indexed books from one dialog.
+
 ## Changelog
 
 * 1.0 - initial version
@@ -43,3 +46,4 @@ Use `Identity login password manager bridge` on uuIdentity login pages where pas
 * 1.4 - add message registry auto refresh userscript
 * 1.5 - add UUCloud1-specific message registry preview downloads variant
 * 1.6 - add uuIdentity login password manager bridge
+* 1.7 - add uuBookKit fulltext search userscript
