@@ -1110,7 +1110,7 @@
         position: absolute;
         right: 0;
         top: calc(100% + 8px);
-        width: min(420px, calc(100vw - 48px));
+        width: min(520px, calc(100vw - 48px));
         background: #fff;
         border: 1px solid #cbd5e1;
         border-radius: 12px;
@@ -1219,7 +1219,7 @@
 
       .gm-bookkit-fulltext__panel {
         width: min(1040px, calc(100vw - 32px));
-        min-height: min(680px, calc(100vh - 40px));
+        height: min(720px, calc(100vh - 40px));
         max-height: calc(100vh - 32px);
         overflow: hidden;
         display: flex;
@@ -1231,7 +1231,7 @@
       }
 
       .gm-bookkit-fulltext__panel--manage {
-        min-height: min(560px, calc(100vh - 40px));
+        height: min(560px, calc(100vh - 40px));
       }
 
       .gm-bookkit-fulltext__header,
@@ -1340,8 +1340,8 @@
       .gm-bookkit-fulltext__results {
         display: flex;
         flex-direction: column;
-        flex: 1 1 auto;
-        min-height: 420px;
+        flex: 1 1 0;
+        min-height: 0;
         overflow: auto;
         padding: 12px;
         background: #f8fafc;
@@ -1360,7 +1360,7 @@
         align-items: center;
         justify-content: center;
         gap: 12px;
-        min-height: 360px;
+        min-height: 0;
       }
 
       .gm-bookkit-fulltext__spinner {
@@ -1452,6 +1452,13 @@
         cursor: pointer;
       }
 
+      .gm-bookkit-fulltext__book-item strong {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.35;
+      }
+
       .gm-bookkit-fulltext__book-item:hover,
       .gm-bookkit-fulltext__book-item[data-active="true"] {
         background: #eff6ff;
@@ -1461,7 +1468,7 @@
       .gm-bookkit-fulltext__book-meta {
         display: block;
         margin-top: 4px;
-        font-size: 12px;
+        font-size: 11px;
         color: #475569;
       }
 
@@ -1514,10 +1521,13 @@
       allSearchCache: null,
       searchScope: "current",
       searchActivityMessage: "",
+      searchActivityGeneration: 0,
       selectedBookId: "",
       selectedBook: null,
       indexRecord: null,
       searchEngine: null,
+      searchEngineBuildGeneration: 0,
+      searchEngineBuildPromise: null,
       ui: null,
       searchQuery: "",
       statusMessage: "",
@@ -1616,14 +1626,52 @@
     return Boolean(state.searchActivityMessage);
   }
 
+  function needsSearchContextPrepare(state) {
+    if (state.searchScope === "all") {
+      return shouldPrepareAllScopeLoad("all", state.allSearchCache);
+    }
+
+    if (!state.selectedBook?.bookId || !state.db) {
+      return false;
+    }
+
+    if (!state.indexRecord) {
+      return true;
+    }
+
+    return Boolean(state.indexRecord.documents?.length && !state.searchEngine && !state.searchEngineBuildPromise);
+  }
+
+  function getSearchPrepareMessage(state) {
+    if (state.searchScope === "all") {
+      return getSearchActivityMessage("scope-all");
+    }
+    return getSearchActivityMessage("open");
+  }
+
+  async function prepareSearchContext(state) {
+    if (state.searchScope === "all") {
+      await resolveSearchCorpus(state);
+      return;
+    }
+
+    await hydrateSelectedBook(state, { buildEngine: true });
+  }
+
+  async function prepareSearchContextIfNeeded(state) {
+    if (!needsSearchContextPrepare(state)) {
+      return;
+    }
+
+    await runSearchActivity(state, getSearchPrepareMessage(state), async () => {
+      await prepareSearchContext(state);
+    });
+  }
+
   function updateSearchUiInteractivity(state) {
     if (!state.ui) return;
 
-    const activityActive = hasSearchActivity(state);
-    state.ui.scopeInputs.forEach((input) => {
-      input.disabled = activityActive;
-    });
-    state.ui.buildButton.disabled = activityActive || state.isBusy || !state.selectedBook?.baseUri;
+    state.ui.buildButton.disabled = state.isBusy || !state.selectedBook?.baseUri;
     state.ui.searchInput.disabled = state.isBusy && !(state.indexRecord?.documents?.length > 0);
   }
 
@@ -1658,13 +1706,21 @@
   }
 
   async function runSearchActivity(state, message, callback) {
+    const generation = (state.searchActivityGeneration || 0) + 1;
+    state.searchActivityGeneration = generation;
     setSearchActivity(state, message);
     await renderResults(state);
     await waitForNextPaint();
     try {
-      return await callback();
+      if (state.searchActivityGeneration !== generation) {
+        return;
+      }
+      await callback();
     } finally {
-      setSearchActivity(state);
+      if (state.searchActivityGeneration === generation) {
+        setSearchActivity(state);
+        await renderResults(state);
+      }
     }
   }
 
@@ -1738,22 +1794,19 @@
     ui.scopeInputs.forEach((input) => {
       input.addEventListener("change", async () => {
         if (!input.checked) return;
-        const nextScope = input.value === "all" ? "all" : "current";
-        state.searchScope = nextScope;
+        state.searchScope = input.value === "all" ? "all" : "current";
+        state.searchActivityGeneration = (state.searchActivityGeneration || 0) + 1;
         try {
-          if (shouldPrepareAllScopeLoad(nextScope, state.allSearchCache)) {
-            await runSearchActivity(state, getSearchActivityMessage("scope-all"), async () => {
-              await resolveSearchCorpus(state);
-            });
-          } else if (nextScope === "current") {
-            await runSearchActivity(state, getSearchActivityMessage("scope-current"), async () => {
-              await hydrateSelectedBook(state);
-            });
+          if (needsSearchContextPrepare(state)) {
+            await prepareSearchContextIfNeeded(state);
+          } else {
+            setSearchActivity(state);
+            await renderResults(state);
           }
         } catch (error) {
           setStatus(state, `Přepnutí hledání selhalo: ${error.message}`);
+          await renderResults(state);
         }
-        await renderResults(state);
       });
     });
     ui.searchInput.addEventListener("input", () => {
@@ -2201,6 +2254,12 @@
 
     const corpus = await resolveSearchCorpus(state);
     const documents = corpus.documents || [];
+    let engine = corpus.engine;
+
+    if (query && !engine && state.searchScope === "current" && state.searchEngineBuildPromise) {
+      await state.searchEngineBuildPromise;
+      engine = state.searchEngine;
+    }
 
     if (state.searchScope === "all") {
       ui.statusRight.textContent = `${corpus.indexedBookCount} indexovaných BookKitů · ${corpus.totalSections} sekcí`;
@@ -2222,7 +2281,7 @@
       return;
     }
 
-    const results = resolveSearchResults(searchDocuments(corpus.engine, documents, query), documents);
+    const results = resolveSearchResults(searchDocuments(engine, documents, query), documents);
     if (!results.length) {
       ui.results.innerHTML = '<div class="gm-bookkit-fulltext__empty">Nic jsem nenašel. Zkus kratší nebo obecnější dotaz.</div>';
       return;
@@ -2246,6 +2305,66 @@
       .join("");
   }
 
+  function cancelSearchEngineBuild(state) {
+    state.searchEngineBuildGeneration = (state.searchEngineBuildGeneration || 0) + 1;
+    state.searchEngineBuildPromise = null;
+  }
+
+  function scheduleSearchEngineBuild(state) {
+    const documents = state.indexRecord?.documents;
+    if (!documents?.length) {
+      state.searchEngine = null;
+      state.searchEngineBuildPromise = null;
+      return;
+    }
+
+    if (state.searchEngine || state.searchEngineBuildPromise) {
+      return;
+    }
+
+    const generation = state.searchEngineBuildGeneration || 0;
+    state.searchEngineBuildPromise = new Promise((resolve) => {
+      const run = () => {
+        if ((state.searchEngineBuildGeneration || 0) !== generation) {
+          state.searchEngineBuildPromise = null;
+          resolve();
+          return;
+        }
+
+        state.searchEngine = buildSearchEngine(documents);
+        state.searchEngineBuildPromise = null;
+        resolve();
+      };
+
+      if (typeof requestIdleCallback === "function") {
+        requestIdleCallback(run, { timeout: 2000 });
+      } else {
+        setTimeout(run, 0);
+      }
+    });
+  }
+
+  async function ensureSearchEngineReady(state) {
+    if (state.searchEngine || !state.indexRecord?.documents?.length) {
+      return;
+    }
+
+    if (state.searchEngineBuildPromise) {
+      await state.searchEngineBuildPromise;
+      return;
+    }
+
+    state.searchEngine = buildSearchEngine(state.indexRecord.documents);
+  }
+
+  async function persistRegistryBooks(state) {
+    if (!state.db) return;
+
+    for (const book of state.books) {
+      await idbPut(state.db, BOOKS_STORE, book);
+    }
+  }
+
   async function loadRegistry(state) {
     state.db = await openDatabase();
     invalidateSearchCaches(state);
@@ -2264,31 +2383,36 @@
       { dismissedBookIds: state.dismissedBookIds },
     );
 
-    if (state.context?.bookId) {
-      await refreshBookTitleFromApi(state, state.context.bookId);
-    }
-
-    for (const book of state.books) {
-      await idbPut(state.db, BOOKS_STORE, book);
-    }
-
     syncSelectedBookToContext(state);
     if (!state.selectedBook) {
       state.selectedBookId = state.books[0]?.bookId || "";
       state.selectedBook = state.books[0] || null;
     }
-    await hydrateSelectedBook(state);
+    await hydrateSelectedBook(state, { buildEngine: false });
+    void persistRegistryBooks(state);
     scheduleCurrentBookTitleRefresh(state);
   }
 
-  async function hydrateSelectedBook(state) {
+  async function hydrateSelectedBook(state, options = {}) {
+    const buildEngine = options.buildEngine === true;
+
     if (!state.selectedBook || !state.db) {
+      cancelSearchEngineBuild(state);
       state.indexRecord = null;
       state.searchEngine = null;
       return;
     }
+
+    cancelSearchEngineBuild(state);
     state.indexRecord = await idbGet(state.db, INDEXES_STORE, state.selectedBook.bookId);
-    state.searchEngine = state.indexRecord?.documents?.length ? buildSearchEngine(state.indexRecord.documents) : null;
+
+    if (buildEngine) {
+      state.searchEngine = state.indexRecord?.documents?.length ? buildSearchEngine(state.indexRecord.documents) : null;
+    } else {
+      state.searchEngine = null;
+      scheduleSearchEngineBuild(state);
+    }
+
     setStatus(
       state,
       state.indexRecord?.documents?.length
@@ -2371,7 +2495,7 @@
     return false;
   }
 
-  async function ensureBookTitlesReady(state) {
+  async function ensureBookTitlesReady(state, options = {}) {
     if (state.context?.bookId) {
       await refreshBookTitleFromApi(state, state.context.bookId);
     }
@@ -2381,7 +2505,9 @@
       state.selectedBook = state.books.find((book) => book.bookId === state.selectedBook.bookId) || state.selectedBook;
     }
     renderManageList(state);
-    await renderResults(state);
+    if (options.renderResults !== false && state.ui && !state.ui.modal.hidden) {
+      await renderResults(state);
+    }
     sendDiag("titles.ready", {
       selectedAwid: state.selectedBook?.awid || null,
       selectedTitle: state.selectedBook?.title || null,
@@ -2467,9 +2593,10 @@
     lastTrackedBookId = context.bookId;
 
     if (bookChanged) {
-      await loadRegistry(state);
-      await ensureBookTitlesReady(state);
-      ensureTrigger(state);
+      void loadRegistry(state).then(async () => {
+        await ensureBookTitlesReady(state, { renderResults: false });
+        ensureTrigger(state);
+      });
       return;
     }
 
@@ -2698,7 +2825,7 @@
           state.selectedBook = state.books[0] || null;
           state.selectedBookId = state.selectedBook?.bookId || "";
         }
-        await hydrateSelectedBook(state);
+        await hydrateSelectedBook(state, { buildEngine: false });
       }
 
       sendDiag("book.removed", { awid: book.awid, bookId });
@@ -2949,10 +3076,7 @@
         if (!state.ui) createModal(state);
         syncSelectedBookToContext(state);
         state.ui.modal.hidden = false;
-        await runSearchActivity(state, getSearchActivityMessage("open"), async () => {
-          await hydrateSelectedBook(state);
-        });
-        await renderResults(state);
+        await prepareSearchContextIfNeeded(state);
         state.ui.searchInput.focus();
         probeIndexFreshness(state).catch(() => {});
       } catch (error) {
@@ -2963,6 +3087,35 @@
     wrap.appendChild(button);
     wrap.appendChild(nav);
     searchArea.appendChild(wrap);
+  }
+
+  async function bootstrapSearchState(state) {
+    try {
+      await loadRegistry(state);
+      ensureTrigger(state);
+      void ensureBookTitlesReady(state, { renderResults: false });
+
+      if (state.indexRecord?.indexedAt && Date.now() - state.indexRecord.indexedAt > INDEX_STALE_MS && !state.indexRecord.structureSignature) {
+        setStatus(state, `Index je starší než 24 hodin, zvaž aktualizaci.`);
+      }
+
+      dbg(
+        "initialize",
+        "Init complete",
+        {
+          hasTrigger: !!document.getElementById(TRIGGER_ID),
+          hasNavTrigger: !!document.getElementById(NAV_TRIGGER_ID),
+          hasIndex: !!state.indexRecord?.documents?.length,
+          indexDocCount: state.indexRecord?.documents?.length || 0,
+          selectedBook: state.selectedBook?.title,
+        },
+        "A",
+      );
+    } catch (error) {
+      dbg("initialize", "Init failed", { error: String(error?.message || error) }, "A");
+      sendDiag("init.failed", { error: String(error?.message || error) });
+      console.error("gm-bookkit-fulltext-search bootstrap failed", error);
+    }
   }
 
   async function initialize() {
@@ -2983,9 +3136,6 @@
     ensureStyles();
     createModal(state);
     ensureTrigger(state);
-    await loadRegistry(state);
-    await ensureBookTitlesReady(state);
-    await renderResults(state);
     installBookContextWatchers(state);
 
     const observer = new MutationObserver(() => {
@@ -2999,21 +3149,7 @@
       subtree: true,
     });
 
-    if (state.indexRecord?.indexedAt && Date.now() - state.indexRecord.indexedAt > INDEX_STALE_MS && !state.indexRecord.structureSignature) {
-      setStatus(state, `Index je starší než 24 hodin, zvaž aktualizaci.`);
-    }
-    dbg(
-      "initialize",
-      "Init complete",
-      {
-        hasTrigger: !!document.getElementById(TRIGGER_ID),
-        hasNavTrigger: !!document.getElementById(NAV_TRIGGER_ID),
-        hasIndex: !!state.indexRecord?.documents?.length,
-        indexDocCount: state.indexRecord?.documents?.length || 0,
-        selectedBook: state.selectedBook?.title,
-      },
-      "A",
-    );
+    void bootstrapSearchState(state);
   }
 
   function run() {
