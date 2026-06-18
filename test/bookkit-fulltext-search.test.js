@@ -346,3 +346,116 @@ test("formatBookIndexLabel describes index freshness", () => {
   assert.equal(formatBookIndexLabel({}), "bez lokálního indexu");
   assert.match(formatBookIndexLabel({ lastIndexedAt: Date.now() - 3600000, pageCount: 42 }), /indexováno .* · 42 stránek/);
 });
+
+test("mergeBookRegistries omits dismissed seed books", () => {
+  const { mergeBookRegistries } = require("../bookkit-fulltext-search.user.js");
+
+  const merged = mergeBookRegistries(
+    [
+      {
+        bookId: "seed-book",
+        baseUri: "https://example.com/seed-book",
+        title: "Seed title",
+        seed: true,
+      },
+    ],
+    [
+      {
+        bookId: "runtime-book",
+        baseUri: "https://example.com/runtime-book",
+        title: "Runtime title",
+      },
+    ],
+    { dismissedBookIds: ["seed-book"] },
+  );
+
+  assert.deepEqual(
+    merged.map((book) => book.bookId),
+    ["runtime-book"],
+  );
+});
+
+test("formatIndexManageInfo reports index age, section count and size", () => {
+  const { estimateIndexSize, formatIndexManageInfo } = require("../bookkit-fulltext-search.user.js");
+  const documents = [
+    {
+      pageTitle: "Application Model",
+      path: "/Intro",
+      sectionTitle: "Install",
+      excerpt: "Short excerpt",
+      text: "A".repeat(1800),
+      url: "https://example.com/book/page?code=intro",
+    },
+  ];
+
+  assert.match(estimateIndexSize(documents), /KB|MB/);
+  assert.equal(formatIndexManageInfo({}, null), "bez lokálního indexu");
+  assert.match(formatIndexManageInfo({ lastIndexedAt: Date.now() - 3600000 }, { documents }), /indexováno .* · 1 sekcí · .*B/);
+});
+
+test("enrichDocumentsWithBookTitle attaches book title by bookId", () => {
+  const { enrichDocumentsWithBookTitle } = require("../bookkit-fulltext-search.user.js");
+  const enriched = enrichDocumentsWithBookTitle(
+    [
+      { id: "a", bookId: "book-a", pageTitle: "Intro" },
+      { id: "b", bookId: "book-b", pageTitle: "Install" },
+    ],
+    {
+      "book-a": { title: "Application Model" },
+      "book-b": { title: "Business Model" },
+    },
+  );
+
+  assert.equal(enriched[0].bookTitle, "Application Model");
+  assert.equal(enriched[1].bookTitle, "Business Model");
+});
+
+test("groupSearchResultsByPage keeps book title for cross-book rendering", () => {
+  const { groupSearchResultsByPage } = require("../bookkit-fulltext-search.user.js");
+  const grouped = groupSearchResultsByPage([
+    {
+      id: "1",
+      bookId: "book-a",
+      bookTitle: "Application Model",
+      pageCode: "intro",
+      url: "https://example.com/a?page=intro",
+      pageTitle: "Install",
+      path: "/Install",
+      score: 10,
+    },
+  ]);
+
+  assert.equal(grouped[0].bookTitle, "Application Model");
+});
+
+test("getProgressPercent clamps progress into 0-100 range", () => {
+  const { getProgressPercent } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(getProgressPercent(0, 0), 0);
+  assert.equal(getProgressPercent(1, 4), 25);
+  assert.equal(getProgressPercent(5, 4), 100);
+});
+
+test("getManageButtonStates keeps remove-index disabled without index", () => {
+  const { getManageButtonStates } = require("../bookkit-fulltext-search.user.js");
+
+  assert.deepEqual(getManageButtonStates({ baseUri: "https://example.com/book" }, null, false), {
+    refreshDisabled: false,
+    removeIndexDisabled: true,
+    removeBookDisabled: false,
+  });
+
+  assert.deepEqual(getManageButtonStates({ baseUri: "https://example.com/book" }, { documents: [{ id: "1" }] }, true), {
+    refreshDisabled: true,
+    removeIndexDisabled: true,
+    removeBookDisabled: true,
+  });
+});
+
+test("shouldSendDiag requires __gmBrowserBridge flag", () => {
+  const { shouldSendDiag } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(shouldSendDiag(undefined), false);
+  assert.equal(shouldSendDiag({}), false);
+  assert.equal(shouldSendDiag({ __gmBrowserBridge: true }), true);
+});
