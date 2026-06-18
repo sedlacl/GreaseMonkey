@@ -1218,7 +1218,8 @@
       }
 
       .gm-bookkit-fulltext__panel {
-        width: min(960px, calc(100vw - 32px));
+        width: min(1040px, calc(100vw - 32px));
+        min-height: min(680px, calc(100vh - 40px));
         max-height: calc(100vh - 32px);
         overflow: hidden;
         display: flex;
@@ -1227,6 +1228,10 @@
         border-radius: 14px;
         box-shadow: 0 24px 60px rgba(15, 23, 42, 0.32);
         color: #0f172a;
+      }
+
+      .gm-bookkit-fulltext__panel--manage {
+        min-height: min(560px, calc(100vh - 40px));
       }
 
       .gm-bookkit-fulltext__header,
@@ -1333,6 +1338,10 @@
       }
 
       .gm-bookkit-fulltext__results {
+        display: flex;
+        flex-direction: column;
+        flex: 1 1 auto;
+        min-height: 420px;
         overflow: auto;
         padding: 12px;
         background: #f8fafc;
@@ -1342,6 +1351,37 @@
         padding: 24px;
         color: #475569;
         text-align: center;
+      }
+
+      .gm-bookkit-fulltext__empty--loading {
+        display: flex;
+        flex: 1 1 auto;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        min-height: 360px;
+      }
+
+      .gm-bookkit-fulltext__spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid #cbd5e1;
+        border-top-color: #0f62fe;
+        border-radius: 999px;
+        animation: gm-bookkit-fulltext-spin 0.8s linear infinite;
+      }
+
+      @keyframes gm-bookkit-fulltext-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .gm-bookkit-fulltext__loading-hint {
+        max-width: 360px;
+        font-size: 13px;
+        color: #64748b;
       }
 
       .gm-bookkit-fulltext__result {
@@ -1473,6 +1513,7 @@
       manageStatusMessage: "",
       allSearchCache: null,
       searchScope: "current",
+      searchActivityMessage: "",
       selectedBookId: "",
       selectedBook: null,
       indexRecord: null,
@@ -1554,13 +1595,86 @@
 
   function setBusy(state, busy) {
     state.isBusy = busy;
-    if (state.ui) {
-      state.ui.buildButton.disabled = busy || !state.selectedBook?.baseUri;
-      state.ui.searchInput.disabled = busy && !(state.indexRecord?.documents?.length > 0);
-    }
+    updateSearchUiInteractivity(state);
     if (state.manageUi) {
       renderManageList(state);
     }
+  }
+
+  function shouldPrepareAllScopeLoad(nextScope, allSearchCache) {
+    return nextScope === "all" && !allSearchCache;
+  }
+
+  function getSearchActivityMessage(activity) {
+    if (activity === "open") return "Připravuji vyhledávání…";
+    if (activity === "scope-all") return "Načítám indexy pro hledání všude…";
+    if (activity === "scope-current") return "Načítám aktuální BookKit…";
+    return "Načítám…";
+  }
+
+  function hasSearchActivity(state) {
+    return Boolean(state.searchActivityMessage);
+  }
+
+  function updateSearchUiInteractivity(state) {
+    if (!state.ui) return;
+
+    const activityActive = hasSearchActivity(state);
+    state.ui.scopeInputs.forEach((input) => {
+      input.disabled = activityActive;
+    });
+    state.ui.buildButton.disabled = activityActive || state.isBusy || !state.selectedBook?.baseUri;
+    state.ui.searchInput.disabled = state.isBusy && !(state.indexRecord?.documents?.length > 0);
+  }
+
+  function getSearchActivityStatus(query) {
+    const normalized = normalizeWhitespace(query);
+    if (normalized) {
+      return {
+        right: "hledání začne po načtení…",
+        hint: "Dotaz se vyhledá hned po dokončení načítání.",
+      };
+    }
+    return {
+      right: "načítám…",
+      hint: "",
+    };
+  }
+
+  function setSearchActivity(state, message = "") {
+    state.searchActivityMessage = String(message || "");
+    updateSearchUiInteractivity(state);
+  }
+
+  function renderLoadingStateHtml(message, hint = "") {
+    const hintHtml = hint ? `<div class="gm-bookkit-fulltext__loading-hint">${escapeHtml(hint)}</div>` : "";
+    return `
+      <div class="gm-bookkit-fulltext__empty gm-bookkit-fulltext__empty--loading">
+        <div class="gm-bookkit-fulltext__spinner" aria-hidden="true"></div>
+        <div>${escapeHtml(message || getSearchActivityMessage())}</div>
+        ${hintHtml}
+      </div>
+    `;
+  }
+
+  async function runSearchActivity(state, message, callback) {
+    setSearchActivity(state, message);
+    await renderResults(state);
+    await waitForNextPaint();
+    try {
+      return await callback();
+    } finally {
+      setSearchActivity(state);
+    }
+  }
+
+  async function waitForNextPaint() {
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      await Promise.resolve();
+      return;
+    }
+
+    await new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
   }
 
   function createModal(state) {
@@ -1624,7 +1738,21 @@
     ui.scopeInputs.forEach((input) => {
       input.addEventListener("change", async () => {
         if (!input.checked) return;
-        state.searchScope = input.value === "all" ? "all" : "current";
+        const nextScope = input.value === "all" ? "all" : "current";
+        state.searchScope = nextScope;
+        try {
+          if (shouldPrepareAllScopeLoad(nextScope, state.allSearchCache)) {
+            await runSearchActivity(state, getSearchActivityMessage("scope-all"), async () => {
+              await resolveSearchCorpus(state);
+            });
+          } else if (nextScope === "current") {
+            await runSearchActivity(state, getSearchActivityMessage("scope-current"), async () => {
+              await hydrateSelectedBook(state);
+            });
+          }
+        } catch (error) {
+          setStatus(state, `Přepnutí hledání selhalo: ${error.message}`);
+        }
         await renderResults(state);
       });
     });
@@ -2063,6 +2191,14 @@
     const scopeLabel =
       state.searchScope === "all" ? "Všechny indexované BookKity" : state.selectedBook?.title || state.selectedBook?.baseUri || "Aktuální BookKit";
     const query = normalizeWhitespace(state.searchQuery);
+
+    if (hasSearchActivity(state)) {
+      const activityStatus = getSearchActivityStatus(query);
+      ui.statusRight.textContent = activityStatus.right;
+      ui.results.innerHTML = renderLoadingStateHtml(state.searchActivityMessage, activityStatus.hint);
+      return;
+    }
+
     const corpus = await resolveSearchCorpus(state);
     const documents = corpus.documents || [];
 
@@ -2809,13 +2945,19 @@
     button.className = buttonClasses;
     button.textContent = "Fulltext";
     button.addEventListener("click", async () => {
-      if (!state.ui) createModal(state);
-      syncSelectedBookToContext(state);
-      await hydrateSelectedBook(state);
-      state.ui.modal.hidden = false;
-      state.ui.searchInput.focus();
-      await renderResults(state);
-      probeIndexFreshness(state).catch(() => {});
+      try {
+        if (!state.ui) createModal(state);
+        syncSelectedBookToContext(state);
+        state.ui.modal.hidden = false;
+        await runSearchActivity(state, getSearchActivityMessage("open"), async () => {
+          await hydrateSelectedBook(state);
+        });
+        await renderResults(state);
+        state.ui.searchInput.focus();
+        probeIndexFreshness(state).catch(() => {});
+      } catch (error) {
+        setStatus(state, `Otevření fulltextu selhalo: ${error.message}`);
+      }
     });
 
     wrap.appendChild(button);
@@ -2910,6 +3052,8 @@
     formatIndexManageInfo,
     getProgressPercent,
     shouldSendDiag,
+    shouldPrepareAllScopeLoad,
+    getSearchActivityMessage,
     loadDismissedBookIds,
     saveDismissedBookIds,
     run,

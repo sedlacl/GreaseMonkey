@@ -459,3 +459,20 @@ test("shouldSendDiag requires __gmBrowserBridge flag", () => {
   assert.equal(shouldSendDiag({}), false);
   assert.equal(shouldSendDiag({ __gmBrowserBridge: true }), true);
 });
+
+test("shouldPrepareAllScopeLoad only when switching to all without cache", () => {
+  const { shouldPrepareAllScopeLoad } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(shouldPrepareAllScopeLoad("current", null), false);
+  assert.equal(shouldPrepareAllScopeLoad("all", null), true);
+  assert.equal(shouldPrepareAllScopeLoad("all", { documents: [] }), false);
+});
+
+test("getSearchActivityMessage returns labels for search transitions", () => {
+  const { getSearchActivityMessage } = require("../bookkit-fulltext-search.user.js");
+
+  assert.equal(getSearchActivityMessage("open"), "Připravuji vyhledávání…");
+  assert.equal(getSearchActivityMessage("scope-all"), "Načítám indexy pro hledání všude…");
+  assert.equal(getSearchActivityMessage("scope-current"), "Načítám aktuální BookKit…");
+  assert.equal(getSearchActivityMessage("other"), "Načítám…");
+});
