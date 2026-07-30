@@ -44,7 +44,7 @@
   const INDEX_STALE_MS = 24 * 60 * 60 * 1000;
   const FRESHNESS_PROBE_MS = 5 * 60 * 1000;
   const INDEX_CONCURRENCY = 4;
-  const BOOKKIT_MATCHER = /^(https?:\/\/[^/]+\/uu-bookkit-maing01\/([a-z0-9]{32}))(?:\/book\/(?:page\?code=([^&#]+)|intro)|\/?.*)?$/iu;
+  const BOOKKIT_MATCHER = /^(https?:\/\/[^/]+\/uu-bookkit-maing01\/((?:\d+-)?[a-z0-9]{32}))(?:\/book\/(?:page\?code=([^&#]+)|intro)|\/?.*)?$/iu;
   const SEARCHABLE_ATTRIBUTE_PATTERN = /\b(?:header|content|label|value|title|alt|name|subtitle|description|text|code)\s*=\s*(?:"([^"]*)"|'([^']*)')/giu;
   const UU5STRING_ATTRIBUTE_PATTERN = /\buu5string\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/giu;
   const STRUCTURED_DATA_ATTRIBUTE_PATTERN = /\bdata\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/giu;

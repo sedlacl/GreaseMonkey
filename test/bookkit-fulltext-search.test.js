@@ -13,6 +13,14 @@ test("parseBookContextFromUrl extracts baseUri, awid and pageCode", () => {
   assert.equal(context.bookId, "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3");
 });
 
+test("parseBookContextFromUrl accepts prefixed workspace ids", () => {
+  const context = parseBookContextFromUrl("https://uuapp.plus4u.net/uu-bookkit-maing01/78462435-e884539c8511447a977c7ff070e7f2cf/book/page?code=home");
+
+  assert.equal(context.awid, "78462435-e884539c8511447a977c7ff070e7f2cf");
+  assert.equal(context.baseUri, "https://uuapp.plus4u.net/uu-bookkit-maing01/78462435-e884539c8511447a977c7ff070e7f2cf");
+  assert.equal(context.pageCode, "home");
+});
+
 test("mergeBookRegistries keeps existing metadata and applies seed defaults", () => {
   const merged = mergeBookRegistries(
     [
