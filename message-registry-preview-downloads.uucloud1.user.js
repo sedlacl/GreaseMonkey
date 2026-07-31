@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads (UUCloud1)
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.18
+// @version      1.19
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/usy-idsmari-messageregistryg01/*
@@ -1834,30 +1834,52 @@
     window.addEventListener("resize", scheduleResponsiveMessageDetailGridUpdate, { passive: true });
   }
 
-  function patchFetch() {
-    const originalFetch = window.fetch.bind(window);
+  // Duck-type Request: `instanceof Request` fails across sandbox/page compartments.
+  function isRequestLike(input) {
+    return Boolean(
+      input &&
+        typeof input === "object" &&
+        typeof input.url === "string" &&
+        typeof input.clone === "function" &&
+        typeof input.text === "function",
+    );
+  }
 
-    window.fetch = async function patchedFetch(input, init) {
+  function patchFetch() {
+    const nativeFetch = window.fetch.bind(window);
+
+    /**
+     * Must stay non-async and must return the page-compartment Promise from native
+     * fetch unmodified. Calling `.then()` / using `async` on the return path creates
+     * a sandbox Promise; Firefox then throws "Permission denied to access object"
+     * when page code touches it.
+     * @see https://aweirdimagination.net/2024/05/19/monkey-patching-async-functions-in-user-scripts/
+     */
+    function patchedFetch(input, init) {
       const requestUrl = typeof input === "string" ? input : input?.url;
       const previewInfo = hasPendingPreview() && requestUrl && shouldInspectUrl(requestUrl) ? consumePreview() : null;
 
       if (!previewInfo) {
-        return originalFetch(input, init);
+        return nativeFetch(input, init);
       }
 
       const adjustedUrl = previewInfo.kind === "payload" ? adjustDownloadUrl(requestUrl) : requestUrl;
-      const actualInput = typeof input === "string" ? adjustedUrl : input instanceof Request ? new Request(adjustedUrl, input) : input;
+      const actualInput =
+        typeof input === "string" ? adjustedUrl : isRequestLike(input) ? new Request(adjustedUrl, input) : input;
 
-      try {
-        const response = await originalFetch(actualInput, init);
-        activateDownloadSuppression();
-        await showResponsePreview(response, adjustedUrl, previewInfo);
-        return response;
-      } catch (error) {
-        await showErrorPreview(error, adjustedUrl, previewInfo);
-        throw error;
-      }
-    };
+      const pending = nativeFetch(actualInput, init);
+      void pending
+        .then((response) => {
+          activateDownloadSuppression();
+          void showResponsePreview(response, adjustedUrl, previewInfo);
+        })
+        .catch((error) => {
+          void showErrorPreview(error, adjustedUrl, previewInfo);
+        });
+      return pending;
+    }
+
+    window.fetch = patchedFetch;
   }
 
   function patchBlobDownloads() {

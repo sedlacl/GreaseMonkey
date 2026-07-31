@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cursor Usage Statistics
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3.3
+// @version      1.3.4
 // @description  Adds daily spend, token charts, and per-model statistics to the Cursor usage dashboard.
 // @author       Lukáš Sedláček
 // @match        https://cursor.com/dashboard/usage*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.3.3";
+  const VERSION = "1.3.4";
   const USAGE_ENDPOINT = "/api/dashboard/get-filtered-usage-events";
 
   /**
@@ -74,19 +74,22 @@
     const originalFetch = pageWindow.fetch;
     const nativeFetch = originalFetch.bind(pageWindow);
 
-    // Non-async wrapper returns the page Promise from native fetch (Firefox compartment-safe).
+    /**
+     * Must stay non-async and must return the page-compartment Promise from native
+     * fetch unmodified. Calling `.then()` / using `async` here creates a sandbox
+     * Promise; Firefox then throws "Permission denied to access object" when page
+     * code (Statsig, analytics, Next.js) touches it.
+     * @see https://aweirdimagination.net/2024/05/19/monkey-patching-async-functions-in-user-scripts/
+     * @see https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Sharing_objects_with_page_scripts#promise_cloning
+     */
     function cursorUsageFetchInterceptor(input, init) {
-      const shouldCapture = hooks.isUsageRequest(input);
-      const bodyPromise = shouldCapture
-        ? Promise.resolve(hooks.readRequestBody(input, init)).catch(() => "")
-        : null;
+      if (hooks.isUsageRequest(input)) {
+        void Promise.resolve(hooks.readRequestBody(input, init))
+          .then(hooks.captureRequestContext)
+          .catch(() => {});
+      }
 
-      return nativeFetch(input, init).then((response) => {
-        if (shouldCapture && bodyPromise) {
-          void bodyPromise.then(hooks.captureRequestContext);
-        }
-        return response;
-      });
+      return nativeFetch(input, init);
     }
 
     const exportFn = typeof options.exportFunction === "function"
@@ -95,9 +98,14 @@
         ? exportFunction
         : null;
 
-    const installed = exportFn
-      ? exportFn(cursorUsageFetchInterceptor, pageWindow)
-      : cursorUsageFetchInterceptor;
+    let installed = cursorUsageFetchInterceptor;
+    if (exportFn) {
+      try {
+        installed = exportFn(cursorUsageFetchInterceptor, pageWindow);
+      } catch {
+        installed = cursorUsageFetchInterceptor;
+      }
+    }
 
     try {
       pageWindow.fetch = installed;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.32
+// @version      1.33
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -461,8 +461,19 @@
     return messageId ? `${window.location.origin}${getMessageApiBaseUri()}/message/get?id=${messageId}` : null;
   }
 
+  // Duck-type Request: `instanceof Request` fails across sandbox/page compartments.
+  function isRequestLike(input) {
+    return Boolean(
+      input &&
+        typeof input === "object" &&
+        typeof input.url === "string" &&
+        typeof input.clone === "function" &&
+        typeof input.text === "function",
+    );
+  }
+
   function getReusableRequestHeaders(input, init) {
-    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    const headers = new Headers(isRequestLike(input) ? input.headers : undefined);
     if (init?.headers) {
       new Headers(init.headers).forEach((value, key) => {
         headers.set(key, value);
@@ -485,8 +496,8 @@
 
     lastMessageSourceRequestContext = {
       headers: getReusableRequestHeaders(input, init),
-      credentials: init?.credentials || (input instanceof Request ? input.credentials : undefined) || "same-origin",
-      mode: init?.mode || (input instanceof Request ? input.mode : undefined) || "same-origin",
+      credentials: init?.credentials || (isRequestLike(input) ? input.credentials : undefined) || "same-origin",
+      mode: init?.mode || (isRequestLike(input) ? input.mode : undefined) || "same-origin",
     };
   }
 
@@ -2435,33 +2446,51 @@
   }
 
   function patchFetch() {
-    const originalFetch = window.fetch.bind(window);
+    const nativeFetch = window.fetch.bind(window);
 
-    window.fetch = async function patchedFetch(input, init) {
+    /**
+     * Must stay non-async and must return the page-compartment Promise from native
+     * fetch unmodified. Calling `.then()` / using `async` on the return path creates
+     * a sandbox Promise; Firefox then throws "Permission denied to access object"
+     * when page code touches it.
+     * @see https://aweirdimagination.net/2024/05/19/monkey-patching-async-functions-in-user-scripts/
+     */
+    function patchedFetch(input, init) {
       const requestUrl = typeof input === "string" ? input : input?.url;
       rememberMessageSourceRequest(requestUrl, input, init);
       const previewInfo = hasPendingPreview() && requestUrl && shouldInspectUrl(requestUrl) ? consumePreview() : null;
 
       if (!previewInfo) {
-        const response = await originalFetch(input, init);
-        void rememberMessageSourceResponse(requestUrl, response);
-        return response;
+        const pending = nativeFetch(input, init);
+        void pending
+          .then((response) => {
+            void rememberMessageSourceResponse(requestUrl, response);
+          })
+          .catch(() => {});
+        return pending;
       }
 
       const adjustedUrl = previewInfo.kind === "payload" ? adjustDownloadUrl(requestUrl) : requestUrl;
-      const actualInput = typeof input === "string" ? adjustedUrl : input instanceof Request ? new Request(adjustedUrl, input) : input;
+      const actualInput =
+        typeof input === "string" ? adjustedUrl : isRequestLike(input) ? new Request(adjustedUrl, input) : input;
 
-      try {
-        const response = await originalFetch(actualInput, init);
-        void rememberMessageSourceResponse(typeof actualInput === "string" ? actualInput : actualInput?.url, response);
-        activateDownloadSuppression();
-        await showResponsePreview(response, adjustedUrl, previewInfo);
-        return response;
-      } catch (error) {
-        await showErrorPreview(error, adjustedUrl, previewInfo);
-        throw error;
-      }
-    };
+      const pending = nativeFetch(actualInput, init);
+      void pending
+        .then((response) => {
+          void rememberMessageSourceResponse(
+            typeof actualInput === "string" ? actualInput : actualInput?.url,
+            response,
+          );
+          activateDownloadSuppression();
+          void showResponsePreview(response, adjustedUrl, previewInfo);
+        })
+        .catch((error) => {
+          void showErrorPreview(error, adjustedUrl, previewInfo);
+        });
+      return pending;
+    }
+
+    window.fetch = patchedFetch;
   }
 
   function patchBlobDownloads() {
