@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cursor Usage Statistics
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3.1
+// @version      1.3.2
 // @description  Adds daily spend, token charts, and per-model statistics to the Cursor usage dashboard.
 // @author       Lukáš Sedláček
 // @match        https://cursor.com/dashboard/usage*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.3.1";
+  const VERSION = "1.3.2";
   const PANEL_ID = "gm-cursor-usage-statistics";
   const STYLE_ID = `${PANEL_ID}-style`;
   const USAGE_ENDPOINT = "/api/dashboard/get-filtered-usage-events";
@@ -536,13 +536,15 @@
         text-align: left;
         text-overflow: ellipsis;
       }
-      #${PANEL_ID} .gm-cus-model-cell {
+      #${PANEL_ID} .gm-cus-model-cell,
+      #${PANEL_ID} .gm-cus-model-head {
         display: flex;
         align-items: center;
         min-width: 0;
         gap: 7px;
       }
-      #${PANEL_ID} .gm-cus-model-toggle {
+      #${PANEL_ID} .gm-cus-model-toggle,
+      #${PANEL_ID} .gm-cus-models-toggle-all {
         position: relative;
         width: 13px;
         height: 13px;
@@ -554,7 +556,9 @@
         flex: 0 0 auto;
       }
       #${PANEL_ID} .gm-cus-model-toggle:hover,
-      #${PANEL_ID} .gm-cus-model-toggle:focus-visible {
+      #${PANEL_ID} .gm-cus-model-toggle:focus-visible,
+      #${PANEL_ID} .gm-cus-models-toggle-all:hover,
+      #${PANEL_ID} .gm-cus-models-toggle-all:focus-visible {
         outline: 2px solid color-mix(in srgb, var(--gm-accent), transparent 45%);
         outline-offset: 2px;
       }
@@ -565,10 +569,16 @@
         border-radius: inherit;
         transition: opacity .12s ease;
       }
-      #${PANEL_ID} .gm-cus-model-toggle[data-active="false"] .gm-cus-model-dot {
+      #${PANEL_ID} .gm-cus-models-toggle-all .gm-cus-model-dot {
+        background:
+          linear-gradient(90deg, ${MODEL_COLORS[0]} 0 25%, ${MODEL_COLORS[1]} 25% 50%, ${MODEL_COLORS[2]} 50% 75%, ${MODEL_COLORS[3]} 75% 100%);
+      }
+      #${PANEL_ID} .gm-cus-model-toggle[data-active="false"] .gm-cus-model-dot,
+      #${PANEL_ID} .gm-cus-models-toggle-all[data-active="false"] .gm-cus-model-dot {
         opacity: .2;
       }
-      #${PANEL_ID} .gm-cus-model-toggle[data-active="false"]::after {
+      #${PANEL_ID} .gm-cus-model-toggle[data-active="false"]::after,
+      #${PANEL_ID} .gm-cus-models-toggle-all[data-active="false"]::after {
         position: absolute;
         top: 5px;
         left: -1px;
@@ -670,6 +680,23 @@
         if (table) table.scrollTop = tableScrollTop;
       });
     });
+    panel.querySelector(".gm-cus-models-toggle-all")?.addEventListener("click", () => {
+      if (!currentData?.models?.length) return;
+
+      const tableScrollTop = panel.querySelector(".gm-cus-table-wrap")?.scrollTop || 0;
+      if (areAllChartModelsHidden(currentData.models)) {
+        for (const model of currentData.models) hiddenChartModels.delete(model.name);
+      } else {
+        for (const model of currentData.models) hiddenChartModels.add(model.name);
+      }
+      renderStatistics(currentData);
+      const table = document.getElementById(PANEL_ID)?.querySelector(".gm-cus-table-wrap");
+      if (table) table.scrollTop = tableScrollTop;
+    });
+  }
+
+  function areAllChartModelsHidden(models) {
+    return models.length > 0 && models.every((model) => hiddenChartModels.has(model.name));
   }
 
   function renderLoading() {
@@ -837,6 +864,7 @@
     if (!panel) return;
     const chartDays = data.days.slice(-chartRangeDays);
     const chartSeries = getChartSeries(chartDays, data.models);
+    const allModelsHidden = areAllChartModelsHidden(data.models);
 
     const monthLabel = new Intl.DateTimeFormat("cs-CZ", {
       month: "long",
@@ -891,7 +919,18 @@
         <table>
           <thead>
             <tr>
-              <th>Model</th>
+              <th>
+                <span class="gm-cus-model-head">
+                  <button
+                    class="gm-cus-models-toggle-all"
+                    type="button"
+                    data-active="${!allModelsHidden}"
+                    aria-pressed="${!allModelsHidden}"
+                    title="${allModelsHidden ? "Zobrazit všechny modely v grafu" : "Skrýt všechny modely v grafu"}"
+                  ><span class="gm-cus-model-dot"></span></button>
+                  <span>Model</span>
+                </span>
+              </th>
               <th>Volání</th>
               <th>Tokeny</th>
               <th>Útrata</th>
