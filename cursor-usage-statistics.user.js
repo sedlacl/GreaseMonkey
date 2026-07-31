@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Cursor Usage Statistics
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3.2
+// @version      1.3.3
 // @description  Adds daily spend, token charts, and per-model statistics to the Cursor usage dashboard.
 // @author       Lukáš Sedláček
 // @match        https://cursor.com/dashboard/usage*
-// @grant        none
+// @grant        unsafeWindow
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/cursor-usage-statistics.user.js
 // @downloadURL  https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/cursor-usage-statistics.user.js
@@ -14,30 +14,40 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.3.2";
-  const PANEL_ID = "gm-cursor-usage-statistics";
-  const STYLE_ID = `${PANEL_ID}-style`;
+  const VERSION = "1.3.3";
   const USAGE_ENDPOINT = "/api/dashboard/get-filtered-usage-events";
-  const PAGE_SIZE = 1000;
-  const DAY_MS = 24 * 60 * 60 * 1000;
-  const MODEL_COLORS = ["#7c3aed", "#2563eb", "#0891b2", "#16a34a", "#f59e0b"];
-  const OTHER_MODEL_COLOR = "#9ca3af";
-  const nativeFetch = window.fetch.bind(window);
 
-  let requestContext = null;
-  let currentData = null;
-  let chartRangeDays = 7;
-  let chartMetric = "tokens";
-  const hiddenChartModels = new Set();
-  let loading = false;
-  let reloadTimer = null;
+  /**
+   * Greasemonkey/Firefox sandbox `window.fetch` is often read-only.
+   * Page requests use the page window (`unsafeWindow`); install the interceptor there.
+   */
+  function resolvePageWindow(scopeWindow, grantedUnsafeWindow) {
+    try {
+      if (grantedUnsafeWindow != null) {
+        return grantedUnsafeWindow;
+      }
+    } catch {
+      // unsafeWindow can throw in locked-down environments
+    }
+    return scopeWindow;
+  }
 
-  function isUsageRequest(input) {
+  function isRequestLike(input) {
+    return Boolean(
+      input &&
+        typeof input === "object" &&
+        typeof input.url === "string" &&
+        typeof input.clone === "function" &&
+        typeof input.text === "function",
+    );
+  }
+
+  function isUsageRequest(input, baseOrigin) {
     const url = typeof input === "string" ? input : input?.url;
     if (!url) return false;
 
     try {
-      return new URL(url, location.origin).pathname === USAGE_ENDPOINT;
+      return new URL(url, baseOrigin || "https://cursor.com").pathname === USAGE_ENDPOINT;
     } catch {
       return false;
     }
@@ -48,24 +58,103 @@
       return init.body;
     }
 
-    if (input instanceof Request) {
+    // Duck-type Request: `instanceof Request` fails across sandbox/page compartments.
+    if (isRequestLike(input)) {
       return input.clone().text();
     }
 
     return "";
   }
 
-  window.fetch = async function cursorUsageFetchInterceptor(input, init) {
-    const shouldCapture = isUsageRequest(input);
-    const bodyPromise = shouldCapture ? readRequestBody(input, init).catch(() => "") : null;
-    const response = await nativeFetch(input, init);
-
-    if (shouldCapture && bodyPromise) {
-      void bodyPromise.then(captureRequestContext);
+  function installPageFetchInterceptor(pageWindow, hooks, options = {}) {
+    if (typeof pageWindow?.fetch !== "function") {
+      throw new Error("Cursor Usage Statistics: page fetch is unavailable.");
     }
 
-    return response;
-  };
+    const originalFetch = pageWindow.fetch;
+    const nativeFetch = originalFetch.bind(pageWindow);
+
+    // Non-async wrapper returns the page Promise from native fetch (Firefox compartment-safe).
+    function cursorUsageFetchInterceptor(input, init) {
+      const shouldCapture = hooks.isUsageRequest(input);
+      const bodyPromise = shouldCapture
+        ? Promise.resolve(hooks.readRequestBody(input, init)).catch(() => "")
+        : null;
+
+      return nativeFetch(input, init).then((response) => {
+        if (shouldCapture && bodyPromise) {
+          void bodyPromise.then(hooks.captureRequestContext);
+        }
+        return response;
+      });
+    }
+
+    const exportFn = typeof options.exportFunction === "function"
+      ? options.exportFunction
+      : typeof exportFunction === "function"
+        ? exportFunction
+        : null;
+
+    const installed = exportFn
+      ? exportFn(cursorUsageFetchInterceptor, pageWindow)
+      : cursorUsageFetchInterceptor;
+
+    try {
+      pageWindow.fetch = installed;
+    } catch {
+      try {
+        Object.defineProperty(pageWindow, "fetch", {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: installed,
+        });
+      } catch {
+        // Final equality check below surfaces a clear error.
+      }
+    }
+
+    if (pageWindow.fetch === originalFetch) {
+      throw new Error(
+        "Cursor Usage Statistics: unable to install fetch interceptor on the page window (fetch is not patchable).",
+      );
+    }
+
+    return { nativeFetch, interceptor: installed, pageWindow };
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      VERSION,
+      USAGE_ENDPOINT,
+      resolvePageWindow,
+      isUsageRequest,
+      readRequestBody,
+      isRequestLike,
+      installPageFetchInterceptor,
+    };
+    return;
+  }
+
+  const PANEL_ID = "gm-cursor-usage-statistics";
+  const STYLE_ID = `${PANEL_ID}-style`;
+  const PAGE_SIZE = 1000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const MODEL_COLORS = ["#7c3aed", "#2563eb", "#0891b2", "#16a34a", "#f59e0b"];
+  const OTHER_MODEL_COLOR = "#9ca3af";
+
+  const pageWindow = resolvePageWindow(
+    window,
+    typeof unsafeWindow !== "undefined" ? unsafeWindow : undefined,
+  );
+
+  let requestContext = null;
+  let currentData = null;
+  let chartRangeDays = 7;
+  let chartMetric = "tokens";
+  const hiddenChartModels = new Set();
+  let loading = false;
+  let reloadTimer = null;
 
   function captureRequestContext(bodyText) {
     if (!bodyText) return;
@@ -88,6 +177,12 @@
       // Ignore unrelated or malformed requests.
     }
   }
+
+  const { nativeFetch } = installPageFetchInterceptor(pageWindow, {
+    isUsageRequest: (input) => isUsageRequest(input, location.origin),
+    readRequestBody,
+    captureRequestContext,
+  });
 
   function scheduleLoad(delay = 0) {
     clearTimeout(reloadTimer);
@@ -961,7 +1056,7 @@
     setTimeout(renderWaiting, 1500);
   }
 
-  window.__cursorUsageStats = {
+  pageWindow.__cursorUsageStats = {
     version: VERSION,
     refresh: () => scheduleLoad(),
     getData: () => currentData,
