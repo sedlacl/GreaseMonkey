@@ -21,7 +21,13 @@
   }
 
   function teardown() {
+    try {
+      window.__gmBookKitFulltextState?.db?.close();
+    } catch {
+      // Ignore already closed database connections.
+    }
     delete window.__gmBookKitFulltextSearch;
+    delete window.__gmBookKitFulltextState;
     document.getElementById("gm-bookkit-fulltext-triggers")?.remove();
     document.getElementById("gm-bookkit-fulltext-modal")?.remove();
     document.getElementById("gm-bookkit-fulltext-style")?.remove();

@@ -37,10 +37,16 @@
   const NAV_TRIGGER_ID = "gm-bookkit-fulltext-nav-trigger";
   const NAV_MENU_ID = "gm-bookkit-fulltext-nav-menu";
   const DB_NAME = "gm-bookkit-fulltext";
-  const DB_VERSION = 1;
+  const SEARCH_CACHE_DB_NAME = "gm-bookkit-fulltext-search-cache";
   const BOOKS_STORE = "books";
   const INDEXES_STORE = "indexes";
+  const SEARCH_CACHE_STORE = "caches";
+  const ALL_SEARCH_CACHE_KEY = "__gm_all_search_cache__";
+  const SEARCH_CACHE_FORMAT_VERSION = 1;
   const DISMISSED_BOOKS_KEY = "gm-bookkit-fulltext-dismissed";
+  const BOOK_REGISTRY_BACKUP_KEY = "gm-bookkit-fulltext-book-registry";
+  const SEARCH_HISTORY_KEY = "gm-bookkit-fulltext-search-history";
+  const SEARCH_HISTORY_LIMIT = 100;
   const INDEX_STALE_MS = 24 * 60 * 60 * 1000;
   const FRESHNESS_PROBE_MS = 5 * 60 * 1000;
   const INDEX_CONCURRENCY = 4;
@@ -462,6 +468,94 @@
     }
   }
 
+  function normalizeSearchHistory(history, limit = SEARCH_HISTORY_LIMIT) {
+    const normalized = [];
+    const seen = new Set();
+    for (const item of history || []) {
+      const query = normalizeWhitespace(item);
+      const key = query.toLocaleLowerCase("cs");
+      if (!query || seen.has(key)) continue;
+      seen.add(key);
+      normalized.push(query);
+      if (normalized.length >= limit) break;
+    }
+    return normalized;
+  }
+
+  function promoteSearchHistory(history, query, limit = SEARCH_HISTORY_LIMIT) {
+    return normalizeSearchHistory([query, ...(history || [])], limit);
+  }
+
+  function loadSearchHistory() {
+    if (typeof localStorage === "undefined") return [];
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || "[]");
+      return Array.isArray(parsed) ? normalizeSearchHistory(parsed) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveSearchHistory(history) {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(normalizeSearchHistory(history)));
+    } catch {
+      // Ignore storage quota / privacy mode errors.
+    }
+  }
+
+  function loadBookRegistryBackup() {
+    if (typeof localStorage === "undefined") return [];
+    try {
+      const parsed = JSON.parse(localStorage.getItem(BOOK_REGISTRY_BACKUP_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed.filter((book) => book?.bookId && book?.baseUri) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveBookRegistryBackup(books) {
+    if (typeof localStorage === "undefined") return;
+    const metadata = (books || []).map((book) => ({
+      bookId: book.bookId,
+      baseUri: book.baseUri || book.bookId,
+      awid: book.awid || "",
+      title: book.title || "",
+      lastVisitedAt: book.lastVisitedAt || 0,
+      lastIndexedAt: book.lastIndexedAt || 0,
+      pageCount: book.pageCount || 0,
+      structureSignature: book.structureSignature || "",
+      known: Boolean(book.known),
+      seed: Boolean(book.seed),
+    }));
+    try {
+      localStorage.setItem(BOOK_REGISTRY_BACKUP_KEY, JSON.stringify(metadata));
+    } catch {
+      // Ignore storage quota / privacy mode errors.
+    }
+  }
+
+  function createBooksFromIndexRecords(indexRecords) {
+    return (indexRecords || [])
+      .filter((record) => record?.bookId && record.bookId !== ALL_SEARCH_CACHE_KEY && record.documents?.length)
+      .map((record) => {
+        const baseUri = record.baseUri || record.documents?.[0]?.baseUri || record.bookId;
+        const context = parseBookContextFromUrl(baseUri);
+        return {
+          bookId: record.bookId,
+          baseUri,
+          title: record.title || "",
+          awid: record.awid || context?.awid || "",
+          lastIndexedAt: record.indexedAt || 0,
+          lastVisitedAt: record.lastVisitedAt || record.indexedAt || 0,
+          pageCount: record.pageCount,
+          structureSignature: record.structureSignature,
+          recoveredFromIndex: true,
+        };
+      });
+  }
+
   function mergeBookRegistries(seedBooks, runtimeBooks, options = {}) {
     const dismissedBookIds = new Set(options.dismissedBookIds || []);
     const merged = new Map();
@@ -780,7 +874,9 @@
 
   function openDatabase() {
     const deferred = createDeferred();
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    // Open the existing version instead of forcing an upgrade. Search cache
+    // lives in INDEXES_STORE, so no schema migration is needed.
+    const request = indexedDB.open(DB_NAME);
 
     request.onupgradeneeded = () => {
       const db = request.result;
@@ -789,6 +885,22 @@
       }
       if (!db.objectStoreNames.contains(INDEXES_STORE)) {
         db.createObjectStore(INDEXES_STORE, { keyPath: "bookId" });
+      }
+    };
+    request.onsuccess = () => deferred.resolve(request.result);
+    request.onerror = () => deferred.reject(request.error);
+
+    return deferred.promise;
+  }
+
+  function openSearchCacheDatabase() {
+    const deferred = createDeferred();
+    const request = indexedDB.open(SEARCH_CACHE_DB_NAME, 1);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SEARCH_CACHE_STORE)) {
+        db.createObjectStore(SEARCH_CACHE_STORE, { keyPath: "key" });
       }
     };
     request.onsuccess = () => deferred.resolve(request.result);
@@ -872,13 +984,12 @@
     return score;
   }
 
-  function buildSearchEngine(documents) {
-    const MiniSearchCtor = getMiniSearchCtor();
-    if (!MiniSearchCtor) return null;
-
-    const engine = new MiniSearchCtor({
+  function createSearchEngineOptions() {
+    return {
       fields: ["pageTitle", "path", "sectionTitle", "text"],
-      storeFields: ["id", "url", "pageTitle", "path", "sectionTitle", "excerpt", "pageCode", "bookId", "text"],
+      // Full documents already live in IndexedDB and results are joined by id.
+      // Storing them in MiniSearch would duplicate the whole corpus.
+      storeFields: [],
       tokenize: tokenizeSearchText,
       searchOptions: {
         boost: {
@@ -891,9 +1002,34 @@
         fuzzy: 0.15,
         combineWith: "AND",
       },
-    });
+    };
+  }
+
+  function buildSearchEngine(documents) {
+    const MiniSearchCtor = getMiniSearchCtor();
+    if (!MiniSearchCtor) return null;
+
+    const engine = new MiniSearchCtor(createSearchEngineOptions());
     engine.addAll(documents);
     return engine;
+  }
+
+  function loadSearchEngine(indexJson) {
+    const MiniSearchCtor = getMiniSearchCtor();
+    if (!MiniSearchCtor || !indexJson || typeof MiniSearchCtor.loadJSON !== "function") return null;
+    return MiniSearchCtor.loadJSON(indexJson, createSearchEngineOptions());
+  }
+
+  function buildSearchCorpusSignature(indexRecords) {
+    return (indexRecords || [])
+      .filter((record) => record?.documents?.length)
+      .map((record) => `${record.bookId}|${record.indexedAt || 0}|${record.structureSignature || ""}|${record.documents.length}`)
+      .sort()
+      .join("\n");
+  }
+
+  function isSearchCacheReusable(cacheRecord, signature) {
+    return Boolean(cacheRecord && cacheRecord.formatVersion === SEARCH_CACHE_FORMAT_VERSION && cacheRecord.signature === signature && cacheRecord.indexJson);
   }
 
   function fallbackSearch(documents, query) {
@@ -921,15 +1057,57 @@
       .slice(0, 100);
   }
 
+  function searchExactDocuments(documents, query) {
+    const normalizedQuery = normalizeWhitespace(query);
+    if (!normalizedQuery) return [];
+    const queryLower = normalizedQuery.toLocaleLowerCase("cs");
+
+    return documents
+      .filter((document) => buildDocumentHaystack(document).toLocaleLowerCase("cs").includes(queryLower))
+      .map((document) => ({ ...document, score: scoreExactMatch(document, queryLower) }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 100);
+  }
+
+  async function yieldSearchWork() {
+    if (typeof scheduler !== "undefined" && typeof scheduler.yield === "function") {
+      await scheduler.yield();
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  async function searchExactDocumentsAsync(documents, query, options = {}) {
+    const normalizedQuery = normalizeWhitespace(query);
+    if (!normalizedQuery) return [];
+    const queryLower = normalizedQuery.toLocaleLowerCase("cs");
+    const chunkSize = Math.max(1, Number(options.chunkSize) || 500);
+    const shouldCancel = typeof options.shouldCancel === "function" ? options.shouldCancel : () => false;
+    const results = [];
+
+    for (let start = 0; start < documents.length; start += chunkSize) {
+      if (shouldCancel()) return null;
+      const end = Math.min(start + chunkSize, documents.length);
+      for (let index = start; index < end; index += 1) {
+        const document = documents[index];
+        if (buildDocumentHaystack(document).toLocaleLowerCase("cs").includes(queryLower)) {
+          results.push({ ...document, score: scoreExactMatch(document, queryLower) });
+        }
+      }
+      if (end < documents.length) {
+        await yieldSearchWork();
+      }
+    }
+
+    if (shouldCancel()) return null;
+    return results.sort((left, right) => right.score - left.score).slice(0, 100);
+  }
+
   function searchDocuments(engine, documents, query) {
     const normalizedQuery = normalizeWhitespace(query);
     if (!normalizedQuery) return [];
 
-    const queryLower = normalizedQuery.toLocaleLowerCase("cs");
-    const exactMatches = documents
-      .filter((document) => buildDocumentHaystack(document).toLocaleLowerCase("cs").includes(queryLower))
-      .map((document) => ({ ...document, score: scoreExactMatch(document, queryLower) }))
-      .sort((left, right) => right.score - left.score);
+    const exactMatches = searchExactDocuments(documents, normalizedQuery);
 
     let results = exactMatches;
     let mode = "exact";
@@ -1275,7 +1453,7 @@
       }
 
       .gm-bookkit-fulltext__toolbar--manage {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr) auto;
       }
 
       .gm-bookkit-fulltext__search-input {
@@ -1285,6 +1463,77 @@
         border-radius: 10px;
         padding: 10px 12px;
         font-size: 14px;
+      }
+
+      .gm-bookkit-fulltext__search-box {
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+      }
+
+      .gm-bookkit-fulltext__search-box .gm-bookkit-fulltext__search-input {
+        border-radius: 10px 0 0 10px;
+      }
+
+      .gm-bookkit-fulltext__history-toggle {
+        width: 38px;
+        border: 1px solid #cbd5e1;
+        border-left: 0;
+        border-radius: 0 10px 10px 0;
+        background: #f8fafc;
+        color: #475569;
+        cursor: pointer;
+      }
+
+      .gm-bookkit-fulltext__history-toggle:hover,
+      .gm-bookkit-fulltext__history-toggle[aria-expanded="true"] {
+        background: #eff6ff;
+        color: #1d4ed8;
+      }
+
+      .gm-bookkit-fulltext__history-toggle svg {
+        width: 18px;
+        height: 18px;
+        vertical-align: middle;
+      }
+
+      .gm-bookkit-fulltext__history-menu {
+        position: absolute;
+        z-index: 3;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        max-height: 320px;
+        overflow: auto;
+        padding: 6px;
+        border: 1px solid #cbd5e1;
+        border-radius: 10px;
+        background: #fff;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18);
+      }
+
+      .gm-bookkit-fulltext__history-menu[hidden] {
+        display: none;
+      }
+
+      .gm-bookkit-fulltext__history-item {
+        display: block;
+        width: 100%;
+        padding: 8px 10px;
+        overflow: hidden;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: #0f172a;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+
+      .gm-bookkit-fulltext__history-item:hover,
+      .gm-bookkit-fulltext__history-item:focus-visible {
+        background: #eff6ff;
       }
 
       .gm-bookkit-fulltext__action,
@@ -1532,6 +1781,7 @@
       manageFilter: "",
       manageStatusMessage: "",
       allSearchCache: null,
+      allSearchEnginePromise: null,
       searchScope: "current",
       searchActivityMessage: "",
       searchActivityGeneration: 0,
@@ -1543,6 +1793,11 @@
       searchEngineBuildPromise: null,
       ui: null,
       searchQuery: "",
+      searchHistory: loadSearchHistory(),
+      searchHistoryOpen: false,
+      searchHistoryShowAll: false,
+      searchRenderGeneration: 0,
+      searchDebounceTimer: 0,
       statusMessage: "",
       freshnessMessage: "",
       isBusy: false,
@@ -1619,6 +1874,9 @@
   function setBusy(state, busy) {
     state.isBusy = busy;
     updateSearchUiInteractivity(state);
+    if (state.manageUi?.rebuildAllButton) {
+      state.manageUi.rebuildAllButton.disabled = busy;
+    }
     if (state.manageUi) {
       renderManageList(state);
     }
@@ -1631,6 +1889,7 @@
   function getSearchActivityMessage(activity) {
     if (activity === "open") return "Připravuji vyhledávání…";
     if (activity === "scope-all") return "Načítám indexy pro hledání všude…";
+    if (activity === "search-all-index") return "Připravuji fulltextové hledání všude…";
     if (activity === "scope-current") return "Načítám aktuální BookKit…";
     return "Načítám…";
   }
@@ -1746,6 +2005,68 @@
     await new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
   }
 
+  function scheduleSearchRender(state, delay = 180) {
+    state.searchRenderGeneration = (state.searchRenderGeneration || 0) + 1;
+    const generation = state.searchRenderGeneration;
+    clearTimeout(state.searchDebounceTimer);
+    state.searchDebounceTimer = setTimeout(() => {
+      renderResults(state, { generation }).catch((error) => {
+        console.error("gm-bookkit-fulltext-search render failed", error);
+      });
+    }, delay);
+  }
+
+  function renderSearchHistoryMenu(state) {
+    const ui = state.ui;
+    if (!ui?.historyMenu) return;
+    const filter = state.searchHistoryShowAll ? "" : normalizeWhitespace(ui.searchInput.value).toLocaleLowerCase("cs");
+    const history = state.searchHistory.filter((query) => !filter || query.toLocaleLowerCase("cs").includes(filter));
+    ui.historyMenu.replaceChildren();
+
+    if (!history.length) {
+      const empty = document.createElement("div");
+      empty.className = "gm-bookkit-fulltext__empty";
+      empty.textContent = state.searchHistory.length ? "Žádné dřívější hledání neodpovídá." : "Historie hledání je zatím prázdná.";
+      ui.historyMenu.appendChild(empty);
+    } else {
+      for (const query of history) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "gm-bookkit-fulltext__history-item";
+        button.textContent = query;
+        button.title = query;
+        button.addEventListener("click", () => {
+          ui.searchInput.value = query;
+          state.searchQuery = query;
+          commitSearchHistory(state, query);
+          ui.searchInput.focus();
+          setSearchHistoryOpen(state, false);
+          scheduleSearchRender(state, 0);
+        });
+        ui.historyMenu.appendChild(button);
+      }
+    }
+  }
+
+  function setSearchHistoryOpen(state, open, options = {}) {
+    const ui = state.ui;
+    if (!ui?.historyMenu) return;
+    state.searchHistoryOpen = Boolean(open);
+    state.searchHistoryShowAll = state.searchHistoryOpen && options.showAll === true;
+    ui.historyMenu.hidden = !state.searchHistoryOpen;
+    ui.historyToggle.setAttribute("aria-expanded", String(state.searchHistoryOpen));
+    ui.searchInput.setAttribute("aria-expanded", String(state.searchHistoryOpen));
+    if (state.searchHistoryOpen) renderSearchHistoryMenu(state);
+  }
+
+  function commitSearchHistory(state, query = state.searchQuery) {
+    const normalizedQuery = normalizeWhitespace(query);
+    if (!normalizedQuery) return;
+    state.searchHistory = promoteSearchHistory(state.searchHistory, normalizedQuery);
+    saveSearchHistory(state.searchHistory);
+    if (state.searchHistoryOpen) renderSearchHistoryMenu(state);
+  }
+
   function createModal(state) {
     if (state.ui?.modal) return state.ui;
 
@@ -1769,7 +2090,17 @@
               <span>Hledat všude</span>
             </label>
           </div>
-          <input type="search" class="gm-bookkit-fulltext__search-input" placeholder="Hledej napříč stránkami a sekcemi..." />
+          <div class="gm-bookkit-fulltext__search-box">
+            <input type="search" class="gm-bookkit-fulltext__search-input" placeholder="Hledej napříč stránkami a sekcemi..." aria-autocomplete="list" aria-expanded="false" />
+            <button type="button" class="gm-bookkit-fulltext__history-toggle" title="Historie hledání" aria-label="Historie hledání" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+                <path d="M3 4v5h5"></path>
+                <path d="M12 7v5l3 2"></path>
+              </svg>
+            </button>
+            <div class="gm-bookkit-fulltext__history-menu" role="listbox" hidden></div>
+          </div>
           <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__action--primary">Sestavit / aktualizovat index</button>
         </div>
         <div class="gm-bookkit-fulltext__status">
@@ -1789,7 +2120,10 @@
       panel: modal.firstElementChild,
       closeButton: modal.querySelector(".gm-bookkit-fulltext__close"),
       scopeInputs: Array.from(modal.querySelectorAll('input[name="gm-bookkit-fulltext-scope"]')),
+      searchBox: modal.querySelector(".gm-bookkit-fulltext__search-box"),
       searchInput: modal.querySelector(".gm-bookkit-fulltext__search-input"),
+      historyToggle: modal.querySelector(".gm-bookkit-fulltext__history-toggle"),
+      historyMenu: modal.querySelector(".gm-bookkit-fulltext__history-menu"),
       buildButton: modal.querySelector(".gm-bookkit-fulltext__action"),
       statusLeft: modal.querySelector(".gm-bookkit-fulltext__status > div:first-child"),
       statusRight: modal.querySelector(".gm-bookkit-fulltext__status > div:last-child"),
@@ -1797,10 +2131,14 @@
     };
 
     ui.closeButton.addEventListener("click", () => {
+      commitSearchHistory(state);
+      setSearchHistoryOpen(state, false);
       modal.hidden = true;
     });
     modal.addEventListener("click", (event) => {
       if (event.target === modal) {
+        commitSearchHistory(state);
+        setSearchHistoryOpen(state, false);
         modal.hidden = true;
       }
     });
@@ -1809,6 +2147,7 @@
         if (!input.checked) return;
         state.searchScope = input.value === "all" ? "all" : "current";
         state.searchActivityGeneration = (state.searchActivityGeneration || 0) + 1;
+        state.searchRenderGeneration = (state.searchRenderGeneration || 0) + 1;
         try {
           if (needsSearchContextPrepare(state)) {
             await prepareSearchContextIfNeeded(state);
@@ -1824,9 +2163,33 @@
     });
     ui.searchInput.addEventListener("input", () => {
       state.searchQuery = ui.searchInput.value;
-      renderResults(state).catch((error) => {
-        console.error("gm-bookkit-fulltext-search render failed", error);
-      });
+      state.searchHistoryShowAll = false;
+      if (state.searchHistoryOpen) renderSearchHistoryMenu(state);
+      scheduleSearchRender(state, state.searchQuery ? 180 : 0);
+    });
+    ui.searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        commitSearchHistory(state);
+        setSearchHistoryOpen(state, false);
+        scheduleSearchRender(state, 0);
+      } else if (event.key === "Escape") {
+        setSearchHistoryOpen(state, false);
+      }
+    });
+    ui.historyToggle.addEventListener("click", () => {
+      setSearchHistoryOpen(state, !state.searchHistoryOpen, { showAll: true });
+    });
+    ui.searchBox.addEventListener("focusout", () => {
+      setTimeout(() => {
+        if (!ui.searchBox.contains(document.activeElement)) {
+          setSearchHistoryOpen(state, false);
+        }
+      }, 0);
+    });
+    ui.results.addEventListener("click", (event) => {
+      if (event.target.closest(".gm-bookkit-fulltext__result")) {
+        commitSearchHistory(state);
+      }
     });
     ui.buildButton.addEventListener("click", () => {
       buildIndexForBook(state, state.selectedBook).catch((error) => {
@@ -1836,6 +2199,8 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !modal.hidden) {
+        commitSearchHistory(state);
+        setSearchHistoryOpen(state, false);
         modal.hidden = true;
       }
     });
@@ -1858,6 +2223,7 @@
         </div>
         <div class="gm-bookkit-fulltext__toolbar gm-bookkit-fulltext__toolbar--manage">
           <input type="search" class="gm-bookkit-fulltext__search-input" placeholder="Filtrovat BookKity..." />
+          <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__rebuild-all">Rebuild all</button>
         </div>
         <div class="gm-bookkit-fulltext__status">
           <div></div>
@@ -1875,6 +2241,7 @@
       modal,
       closeButton: modal.querySelector(".gm-bookkit-fulltext__close"),
       filterInput: modal.querySelector(".gm-bookkit-fulltext__search-input"),
+      rebuildAllButton: modal.querySelector(".gm-bookkit-fulltext__rebuild-all"),
       statusLeft: modal.querySelector(".gm-bookkit-fulltext__status > div:first-child"),
       statusRight: modal.querySelector(".gm-bookkit-fulltext__status > div:last-child"),
       list: modal.querySelector(".gm-bookkit-fulltext__manage-list"),
@@ -1891,6 +2258,12 @@
     ui.filterInput.addEventListener("input", () => {
       state.manageFilter = ui.filterInput.value;
       renderManageList(state);
+    });
+    ui.rebuildAllButton.addEventListener("click", () => {
+      rebuildAllIndexes(state).catch((error) => {
+        setBusy(state, false);
+        setManageStatus(state, `Rebuild all selhal: ${error.message}`);
+      });
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !modal.hidden) {
@@ -1914,7 +2287,7 @@
 
   async function loadManageIndexCache(state) {
     if (!state.db) return {};
-    const indexes = await idbGetAll(state.db, INDEXES_STORE);
+    const indexes = (await idbGetAll(state.db, INDEXES_STORE)).filter((indexRecord) => indexRecord?.bookId !== ALL_SEARCH_CACHE_KEY);
     state.manageIndexByBookId = Object.fromEntries(indexes.map((indexRecord) => [indexRecord.bookId, indexRecord]));
     return state.manageIndexByBookId;
   }
@@ -2130,23 +2503,79 @@
     return html;
   }
 
+  function getResultHighlightTerms(result, query) {
+    const matchedTerms = Object.keys(result?.match || {});
+    const queryTerms = Array.isArray(result?.queryTerms) ? result.queryTerms : tokenizeSearchText(query);
+    return Array.from(new Set([...matchedTerms, ...queryTerms].map((term) => normalizeWhitespace(term)).filter((term) => term.length >= 2))).sort(
+      (left, right) => right.length - left.length,
+    );
+  }
+
+  function findFirstTermMatch(text, terms) {
+    const lowerText = text.toLocaleLowerCase("cs");
+    let best = null;
+    for (const term of terms) {
+      const index = lowerText.indexOf(term.toLocaleLowerCase("cs"));
+      if (index < 0) continue;
+      if (!best || index < best.index || (index === best.index && term.length > best.term.length)) {
+        best = { index, term };
+      }
+    }
+    return best;
+  }
+
+  function highlightSearchTerms(text, terms) {
+    if (!terms.length) return escapeHtml(text);
+    const lowerText = text.toLocaleLowerCase("cs");
+    const lowerTerms = terms.map((term) => ({ original: term, lower: term.toLocaleLowerCase("cs") }));
+    let html = "";
+    let position = 0;
+
+    while (position < text.length) {
+      let best = null;
+      for (const term of lowerTerms) {
+        const index = lowerText.indexOf(term.lower, position);
+        if (index < 0) continue;
+        if (!best || index < best.index || (index === best.index && term.lower.length > best.length)) {
+          best = { index, length: term.lower.length };
+        }
+      }
+
+      if (!best) {
+        html += escapeHtml(text.slice(position));
+        break;
+      }
+
+      html += escapeHtml(text.slice(position, best.index));
+      html += `<mark class="gm-bookkit-fulltext__hit">${escapeHtml(text.slice(best.index, best.index + best.length))}</mark>`;
+      position = best.index + best.length;
+    }
+
+    return html;
+  }
+
   function buildResultSnippet(result, query, maxLength = 220) {
     const normalizedQuery = normalizeWhitespace(query);
     const queryLower = normalizedQuery.toLocaleLowerCase("cs");
     const sources = [result.text, result.sectionTitle, result.pageTitle, result.path, result.excerpt].map(flattenResultText).filter(Boolean);
-
-    const matchedSource = sources.find((source) => source.toLocaleLowerCase("cs").includes(queryLower)) || sources[0] || "";
+    const phraseSource = sources.find((source) => source.toLocaleLowerCase("cs").includes(queryLower));
+    const highlightTerms = phraseSource ? [normalizedQuery] : getResultHighlightTerms(result, normalizedQuery);
+    const matchedSource = phraseSource || sources.find((source) => findFirstTermMatch(source, highlightTerms)) || sources[0] || "";
     if (!matchedSource) return "";
 
-    const matchIndex = matchedSource.toLocaleLowerCase("cs").indexOf(queryLower);
+    const termMatch = phraseSource
+      ? { index: matchedSource.toLocaleLowerCase("cs").indexOf(queryLower), term: normalizedQuery }
+      : findFirstTermMatch(matchedSource, highlightTerms);
+    const matchIndex = termMatch?.index ?? -1;
     if (matchIndex < 0) {
       const fallback = matchedSource.slice(0, maxLength);
       return escapeHtml(fallback) + (matchedSource.length > maxLength ? "…" : "");
     }
 
-    const padding = Math.max(40, Math.floor((maxLength - normalizedQuery.length) / 2));
+    const matchedLength = termMatch?.term?.length || normalizedQuery.length;
+    const padding = Math.max(40, Math.floor((maxLength - matchedLength) / 2));
     let start = Math.max(0, matchIndex - padding);
-    let end = Math.min(matchedSource.length, matchIndex + normalizedQuery.length + padding);
+    let end = Math.min(matchedSource.length, matchIndex + matchedLength + padding);
 
     if (end - start > maxLength) {
       end = start + maxLength;
@@ -2156,14 +2585,14 @@
     if (start > 0) snippet = `… ${snippet}`;
     if (end < matchedSource.length) snippet = `${snippet} …`;
 
-    return highlightAllMatches(snippet, normalizedQuery);
+    return highlightSearchTerms(snippet, highlightTerms);
   }
 
   function resolveSearchResults(results, documents) {
     const byId = new Map(documents.map((document) => [document.id, document]));
     return results.map((result) => {
       const full = byId.get(result.id);
-      return full ? { ...full, score: result.score } : result;
+      return full ? { ...full, ...result } : result;
     });
   }
 
@@ -2218,6 +2647,58 @@
     return Object.fromEntries((state.books || []).map((book) => [book.bookId, book]));
   }
 
+  async function ensureAllSearchEngine(state, corpus) {
+    if (corpus.engine) return corpus.engine;
+    if (state.allSearchEnginePromise) return state.allSearchEnginePromise;
+
+    state.allSearchEnginePromise = (async () => {
+      const cacheDb = await openSearchCacheDatabase();
+      const cacheRecord = await idbGet(cacheDb, SEARCH_CACHE_STORE, ALL_SEARCH_CACHE_KEY);
+      let engine = null;
+
+      if (isSearchCacheReusable(cacheRecord, corpus.signature)) {
+        try {
+          engine = loadSearchEngine(cacheRecord.indexJson);
+        } catch (error) {
+          console.warn("[gm-bookkit-fulltext] cached all-books index could not be loaded", error);
+        }
+      }
+
+      if (!engine) {
+        engine = buildSearchEngine(corpus.documents);
+        if (engine) {
+          const indexJson = JSON.stringify(engine);
+          idbPut(cacheDb, SEARCH_CACHE_STORE, {
+            key: ALL_SEARCH_CACHE_KEY,
+            formatVersion: SEARCH_CACHE_FORMAT_VERSION,
+            signature: corpus.signature,
+            indexJson,
+            createdAt: Date.now(),
+          })
+            .catch((error) => {
+              console.warn("[gm-bookkit-fulltext] all-books index cache could not be saved", error);
+            })
+            .finally(() => cacheDb.close());
+        } else {
+          cacheDb.close();
+        }
+      } else {
+        cacheDb.close();
+      }
+
+      if (state.allSearchCache === corpus) {
+        corpus.engine = engine;
+      }
+      return engine;
+    })();
+
+    try {
+      return await state.allSearchEnginePromise;
+    } finally {
+      state.allSearchEnginePromise = null;
+    }
+  }
+
   async function resolveSearchCorpus(state) {
     if (!state.db) {
       return { documents: [], engine: null, indexedBookCount: 0, totalSections: 0 };
@@ -2228,14 +2709,15 @@
         return state.allSearchCache;
       }
 
-      const indexRecords = await idbGetAll(state.db, INDEXES_STORE);
+      const indexRecords = (await idbGetAll(state.db, INDEXES_STORE)).filter((record) => record?.bookId !== ALL_SEARCH_CACHE_KEY);
       const documents = enrichDocumentsWithBookTitle(
         indexRecords.flatMap((indexRecord) => indexRecord.documents || []),
         getBooksById(state),
       );
       state.allSearchCache = {
         documents,
-        engine: documents.length ? buildSearchEngine(documents) : null,
+        engine: null,
+        signature: buildSearchCorpusSignature(indexRecords),
         indexedBookCount: indexRecords.filter((indexRecord) => indexRecord?.documents?.length).length,
         totalSections: documents.length,
       };
@@ -2250,13 +2732,15 @@
     };
   }
 
-  async function renderResults(state) {
+  async function renderResults(state, options = {}) {
     const ui = state.ui;
     if (!ui) return;
 
-    const scopeLabel =
-      state.searchScope === "all" ? "Všechny indexované BookKity" : state.selectedBook?.title || state.selectedBook?.baseUri || "Aktuální BookKit";
+    const generation = options.generation ?? state.searchRenderGeneration;
+    const searchScope = state.searchScope;
+    const scopeLabel = searchScope === "all" ? "Všechny indexované BookKity" : state.selectedBook?.title || state.selectedBook?.baseUri || "Aktuální BookKit";
     const query = normalizeWhitespace(state.searchQuery);
+    const isStale = () => generation !== state.searchRenderGeneration || query !== normalizeWhitespace(state.searchQuery) || searchScope !== state.searchScope;
 
     if (hasSearchActivity(state)) {
       const activityStatus = getSearchActivityStatus(query);
@@ -2266,15 +2750,30 @@
     }
 
     const corpus = await resolveSearchCorpus(state);
+    if (isStale()) return;
     const documents = corpus.documents || [];
     let engine = corpus.engine;
+    let exactResults = null;
 
-    if (query && !engine && state.searchScope === "current" && state.searchEngineBuildPromise) {
+    if (query && searchScope === "all") {
+      ui.statusRight.textContent = `Hledám v ${corpus.totalSections} sekcích…`;
+      exactResults = await searchExactDocumentsAsync(documents, query, { shouldCancel: isStale });
+      if (exactResults === null || isStale()) return;
+      if (!exactResults.length && !engine) {
+        await runSearchActivity(state, getSearchActivityMessage("search-all-index"), async () => {
+          await ensureAllSearchEngine(state, corpus);
+        });
+        return;
+      }
+    }
+
+    if (query && !engine && searchScope === "current" && state.searchEngineBuildPromise) {
       await state.searchEngineBuildPromise;
+      if (isStale()) return;
       engine = state.searchEngine;
     }
 
-    if (state.searchScope === "all") {
+    if (searchScope === "all") {
       ui.statusRight.textContent = `${corpus.indexedBookCount} indexovaných BookKitů · ${corpus.totalSections} sekcí`;
     } else {
       const detail = state.freshnessMessage || (documents.length ? `${documents.length} sekcí` : "bez indexu");
@@ -2283,7 +2782,7 @@
 
     if (!documents.length) {
       ui.results.innerHTML =
-        state.searchScope === "all"
+        searchScope === "all"
           ? '<div class="gm-bookkit-fulltext__empty">Zatím nemáš žádný lokální index. Otevři konkrétní BookKit a klikni na "Sestavit / aktualizovat index".</div>'
           : '<div class="gm-bookkit-fulltext__empty">Pro aktuální BookKit zatím není lokální index. Klikni na "Sestavit / aktualizovat index".</div>';
       return;
@@ -2294,7 +2793,9 @@
       return;
     }
 
-    const results = resolveSearchResults(searchDocuments(engine, documents, query), documents);
+    const searchableDocuments = searchScope === "all" && exactResults ? [] : documents;
+    const results = resolveSearchResults(exactResults?.length ? exactResults : searchDocuments(engine, searchableDocuments, query), documents);
+    if (isStale()) return;
     if (!results.length) {
       ui.results.innerHTML = '<div class="gm-bookkit-fulltext__empty">Nic jsem nenašel. Zkus kratší nebo obecnější dotaz.</div>';
       return;
@@ -2304,7 +2805,7 @@
 
     ui.results.innerHTML = groupedResults
       .map((group) => {
-        const title = state.searchScope === "all" && group.bookTitle ? `${group.bookTitle}\\${group.pageTitle || ""}` : group.pageTitle || "";
+        const title = searchScope === "all" && group.bookTitle ? `${group.bookTitle}\\${group.pageTitle || ""}` : group.pageTitle || "";
         return `
           <a class="gm-bookkit-fulltext__result" href="${escapeHtml(group.url)}">
             <div class="gm-bookkit-fulltext__result-title">${escapeHtml(title)}</div>
@@ -2371,6 +2872,7 @@
   }
 
   async function persistRegistryBooks(state) {
+    saveBookRegistryBackup(state.books);
     if (!state.db) return;
 
     for (const book of state.books) {
@@ -2379,20 +2881,41 @@
   }
 
   async function loadRegistry(state) {
-    state.db = await openDatabase();
-    invalidateSearchCaches(state);
-    const storedBooks = await idbGetAll(state.db, BOOKS_STORE);
     const currentBook = state.context
       ? {
           ...state.context,
           lastVisitedAt: Date.now(),
         }
       : null;
+    const backedUpBooks = loadBookRegistryBackup();
 
     state.titleRefreshAttempt = 0;
     state.books = mergeBookRegistries(
       KNOWN_BOOKS.map((book) => ({ ...book, seed: true })),
-      currentBook ? [...storedBooks, currentBook] : storedBooks,
+      currentBook ? [...backedUpBooks, currentBook] : backedUpBooks,
+      { dismissedBookIds: state.dismissedBookIds },
+    );
+    syncSelectedBookToContext(state);
+    renderNavMenu(state);
+    saveBookRegistryBackup(state.books);
+
+    try {
+      state.db = await openDatabase();
+    } catch (error) {
+      setStatus(state, `Lokální databázi se nepodařilo otevřít: ${error.message}`);
+      saveBookRegistryBackup(state.books);
+      return;
+    }
+
+    invalidateSearchCaches(state);
+    // Remove the legacy combined cache before getAll(), otherwise IndexedDB
+    // has to clone a large serialized payload together with every book index.
+    await idbDelete(state.db, INDEXES_STORE, ALL_SEARCH_CACHE_KEY);
+    const [storedBooks, indexRecords] = await Promise.all([idbGetAll(state.db, BOOKS_STORE), idbGetAll(state.db, INDEXES_STORE)]);
+    const indexedBooks = createBooksFromIndexRecords(indexRecords);
+    state.books = mergeBookRegistries(
+      KNOWN_BOOKS.map((book) => ({ ...book, seed: true })),
+      currentBook ? [...backedUpBooks, ...indexedBooks, ...storedBooks, currentBook] : [...backedUpBooks, ...indexedBooks, ...storedBooks],
       { dismissedBookIds: state.dismissedBookIds },
     );
 
@@ -2649,12 +3172,15 @@
       [...(state.books.filter((entry) => entry.bookId !== nextBook.bookId) || []), nextBook],
       { dismissedBookIds: state.dismissedBookIds },
     );
+    saveBookRegistryBackup(state.books);
   }
 
   async function buildIndexForBook(state, targetBook, options = {}) {
     if (!targetBook?.baseUri || !state.db) return;
 
-    setBusy(state, true);
+    if (!options.keepBusy) {
+      setBusy(state, true);
+    }
     setStatus(state, `Načítám strukturu knihy ${targetBook.title || targetBook.baseUri}…`);
     if (options.source === "manage") {
       setManageStatus(state, `Indexuji ${targetBook.title || targetBook.baseUri}…`);
@@ -2712,6 +3238,10 @@
       const indexRecord = {
         bookId: targetBook.bookId,
         baseUri: targetBook.baseUri,
+        awid: nextBook.awid || "",
+        title: nextBook.title || "",
+        pageCount: pages.length,
+        lastVisitedAt: nextBook.lastVisitedAt || now,
         createdAt: existingIndexRecord?.createdAt || now,
         indexedAt: now,
         structureSignature,
@@ -2768,6 +3298,47 @@
         setNavProgress(state, `Indexace selhala: ${error.message}`, 100);
       }
       throw error;
+    } finally {
+      if (!options.keepBusy) {
+        setBusy(state, false);
+      }
+    }
+  }
+
+  async function rebuildAllIndexes(state) {
+    if (!state.db || state.isBusy) return;
+    const books = getManageBooks(state).filter((book) => book?.baseUri);
+    if (!books.length) return;
+    if (!window.confirm(`Opravdu znovu sestavit index pro všech ${books.length} BookKitů? Operace může trvat delší dobu.`)) return;
+
+    const failed = [];
+    let completed = 0;
+    setBusy(state, true);
+    try {
+      for (const book of books) {
+        setManageStatus(state, `Rebuild all ${completed + 1}/${books.length}: ${book.title || book.baseUri}`, failed.length ? `${failed.length} selhalo` : "");
+        try {
+          await buildIndexForBook(state, book, { source: "manage-all", keepBusy: true });
+        } catch (error) {
+          failed.push({ book, error });
+        }
+        completed += 1;
+      }
+
+      await loadManageIndexCache(state);
+      const summary = failed.length
+        ? `Rebuild all dokončen: ${completed - failed.length}/${completed} úspěšně, ${failed.length} selhalo.`
+        : `Rebuild all dokončen: ${completed}/${completed} úspěšně.`;
+      setManageStatus(state, summary);
+      sendDiag("index.rebuildAllFinished", {
+        total: completed,
+        succeeded: completed - failed.length,
+        failed: failed.map(({ book, error }) => ({
+          awid: book.awid,
+          title: book.title,
+          error: String(error?.message || error),
+        })),
+      });
     } finally {
       setBusy(state, false);
     }
@@ -2828,6 +3399,7 @@
       }
 
       state.books = state.books.filter((entry) => entry.bookId !== bookId);
+      saveBookRegistryBackup(state.books);
       delete state.manageIndexByBookId[bookId];
       invalidateSearchCaches(state);
       delete state.freshnessCache[bookId];
@@ -3194,6 +3766,7 @@
     extractSearchText,
     createSearchDocuments,
     searchDocuments,
+    searchExactDocumentsAsync,
     fallbackSearch,
     buildResultSnippet,
     highlightAllMatches,
@@ -3208,6 +3781,11 @@
     shouldSendDiag,
     shouldPrepareAllScopeLoad,
     getSearchActivityMessage,
+    buildSearchCorpusSignature,
+    isSearchCacheReusable,
+    createBooksFromIndexRecords,
+    normalizeSearchHistory,
+    promoteSearchHistory,
     loadDismissedBookIds,
     saveDismissedBookIds,
     run,

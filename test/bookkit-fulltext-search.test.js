@@ -210,6 +210,45 @@ test("buildResultSnippet centers excerpt around query and highlights match", () 
   assert.doesNotMatch(html, /^GIT:/);
 });
 
+test("buildResultSnippet highlights matched MiniSearch terms when the full phrase is absent", () => {
+  const { buildResultSnippet } = require("../bookkit-fulltext-search.user.js");
+  const html = buildResultSnippet(
+    {
+      pageTitle: "uu5Lib",
+      path: "/Getting Started/uu5Lib",
+      sectionTitle: "Installation",
+      text: "Installation of environment using a published library NPM scripts and registry publication.",
+      match: {
+        npm: ["text"],
+        registry: ["text"],
+        publication: ["text"],
+      },
+      queryTerms: ["npm", "registry", "publi"],
+    },
+    "npm registry publi",
+  );
+
+  assert.match(html, /<mark class="gm-bookkit-fulltext__hit">NPM<\/mark>/);
+  assert.match(html, /<mark class="gm-bookkit-fulltext__hit">registry<\/mark>/);
+  assert.match(html, /<mark class="gm-bookkit-fulltext__hit">publication<\/mark>/);
+});
+
+test("searchExactDocumentsAsync yields the same results as synchronous exact search", async () => {
+  const { searchDocuments, searchExactDocumentsAsync } = require("../bookkit-fulltext-search.user.js");
+  const documents = Array.from({ length: 20 }, (_, index) => ({
+    id: String(index),
+    pageTitle: `Page ${index}`,
+    path: "/Docs",
+    sectionTitle: "",
+    text: index % 3 === 0 ? `Contains npm registry ${index}` : "Other content",
+  }));
+
+  const expected = searchDocuments(null, documents, "npm registry");
+  const actual = await searchExactDocumentsAsync(documents, "npm registry", { chunkSize: 4 });
+
+  assert.deepEqual(actual, expected);
+});
+
 test("groupSearchResultsByPage merges hits from the same page", () => {
   const { groupSearchResultsByPage } = require("../bookkit-fulltext-search.user.js");
   const grouped = groupSearchResultsByPage([
@@ -500,4 +539,69 @@ test("getSearchActivityMessage returns labels for search transitions", () => {
   assert.equal(getSearchActivityMessage("scope-all"), "Načítám indexy pro hledání všude…");
   assert.equal(getSearchActivityMessage("scope-current"), "Načítám aktuální BookKit…");
   assert.equal(getSearchActivityMessage("other"), "Načítám…");
+});
+
+test("buildSearchCorpusSignature changes only when indexed corpus changes", () => {
+  const { buildSearchCorpusSignature } = require("../bookkit-fulltext-search.user.js");
+  const records = [
+    { bookId: "book-b", indexedAt: 20, documents: [{ id: "2" }] },
+    { bookId: "book-a", indexedAt: 10, documents: [{ id: "1" }, { id: "1b" }] },
+  ];
+
+  assert.equal(buildSearchCorpusSignature(records), buildSearchCorpusSignature([...records].reverse()));
+  assert.notEqual(buildSearchCorpusSignature(records), buildSearchCorpusSignature([{ ...records[0], indexedAt: 21 }, records[1]]));
+});
+
+test("isSearchCacheReusable validates cache format and corpus signature", () => {
+  const { isSearchCacheReusable } = require("../bookkit-fulltext-search.user.js");
+  const cache = { formatVersion: 1, signature: "abc", indexJson: "{}" };
+
+  assert.equal(isSearchCacheReusable(cache, "abc"), true);
+  assert.equal(isSearchCacheReusable(cache, "changed"), false);
+  assert.equal(isSearchCacheReusable({ ...cache, formatVersion: 0 }, "abc"), false);
+  assert.equal(isSearchCacheReusable({ ...cache, indexJson: "" }, "abc"), false);
+});
+
+test("createBooksFromIndexRecords recovers indexed book metadata", () => {
+  const { createBooksFromIndexRecords } = require("../bookkit-fulltext-search.user.js");
+  const books = createBooksFromIndexRecords([
+    {
+      bookId: "https://example.com/uu-bookkit-maing01/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      baseUri: "https://example.com/uu-bookkit-maing01/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      title: "Recovered Book",
+      awid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      indexedAt: 123,
+      pageCount: 7,
+      documents: [{ id: "doc" }],
+    },
+    { bookId: "__gm_all_search_cache__", indexJson: "{}" },
+  ]);
+
+  assert.deepEqual(books, [
+    {
+      bookId: "https://example.com/uu-bookkit-maing01/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      baseUri: "https://example.com/uu-bookkit-maing01/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      title: "Recovered Book",
+      awid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      lastIndexedAt: 123,
+      lastVisitedAt: 123,
+      pageCount: 7,
+      structureSignature: undefined,
+      recoveredFromIndex: true,
+    },
+  ]);
+});
+
+test("normalizeSearchHistory trims, deduplicates and limits recent queries", () => {
+  const { normalizeSearchHistory } = require("../bookkit-fulltext-search.user.js");
+  const history = normalizeSearchHistory([" npm registry ", "BookKit", "NPM REGISTRY", "", "table"], 2);
+
+  assert.deepEqual(history, ["npm registry", "BookKit"]);
+});
+
+test("promoteSearchHistory moves a repeated query to the beginning", () => {
+  const { promoteSearchHistory } = require("../bookkit-fulltext-search.user.js");
+  const history = promoteSearchHistory(["first", "NPM Registry", "third"], " npm registry ");
+
+  assert.deepEqual(history, ["npm registry", "first", "third"]);
 });
