@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cursor Usage Statistics
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3.4
-// @description  Adds daily spend, token charts, and per-model statistics to the Cursor usage dashboard.
+// @version      1.3.10
+// @description  Adds on-demand spend, usage-value charts, catalog price estimates, and per-model statistics to the Cursor usage dashboard.
 // @author       Lukáš Sedláček
 // @match        https://cursor.com/dashboard/usage*
 // @grant        unsafeWindow
@@ -14,8 +14,599 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.3.4";
+  const VERSION = "1.3.10";
   const USAGE_ENDPOINT = "/api/dashboard/get-filtered-usage-events";
+  const AGG_ENDPOINT = "/api/dashboard/get-aggregated-usage-events";
+  const SUMMARY_ENDPOINT = "/api/usage-summary";
+  const UNAVAILABLE = null;
+
+  /** Native event `kind` for usage billed on-demand (dashboard column "Type" = On-Demand). */
+  const ON_DEMAND_KIND = "USAGE_EVENT_KIND_USAGE_BASED";
+  const INCLUDED_KIND = "USAGE_EVENT_KIND_INCLUDED_IN_BUSINESS";
+  const ERRORED_KIND = "USAGE_EVENT_KIND_ERRORED_NOT_CHARGED";
+
+  /**
+   * Public catalog rates from https://cursor.com/docs/models-and-pricing (2026-07-31).
+   * JSON-compatible, editable data only — no invented rates.
+   * Prices are USD per 1M tokens. `cacheWrite: null` = no separate cache-write fee in docs.
+   */
+  const MODEL_PRICING = {
+    currency: "USD",
+    unit: "per 1M tokens",
+    source: "https://cursor.com/docs/models-and-pricing",
+    effectiveDate: "2026-07-31",
+    cursorTokenRatePerMillion: 0.25,
+    models: {
+      "claude-4-sonnet": { provider: "Anthropic", input: 3, cacheWrite: 3.75, cacheRead: 0.3, output: 15, thirdParty: true, notes: "Hidden by default; Thinking = 2 requests on legacy plans" },
+      "claude-4-sonnet-1m": { provider: "Anthropic", input: 6, cacheWrite: 7.5, cacheRead: 0.6, output: 22.5, thirdParty: true, notes: "2x when input exceeds 200k tokens" },
+      "claude-4.5-haiku": { provider: "Anthropic", input: 1, cacheWrite: 1.25, cacheRead: 0.1, output: 5, thirdParty: true },
+      "claude-4.5-opus": { provider: "Anthropic", input: 5, cacheWrite: 6.25, cacheRead: 0.5, output: 25, thirdParty: true },
+      "claude-4.5-sonnet": { provider: "Anthropic", input: 3, cacheWrite: 3.75, cacheRead: 0.3, output: 15, thirdParty: true },
+      "claude-4.6-opus": { provider: "Anthropic", input: 5, cacheWrite: 6.25, cacheRead: 0.5, output: 25, thirdParty: true },
+      "claude-4.6-sonnet": { provider: "Anthropic", input: 3, cacheWrite: 3.75, cacheRead: 0.3, output: 15, thirdParty: true },
+      "claude-4.7-opus": { provider: "Anthropic", input: 5, cacheWrite: 6.25, cacheRead: 0.5, output: 25, thirdParty: true },
+      "claude-fable-5": { provider: "Anthropic", input: 10, cacheWrite: 12.5, cacheRead: 1, output: 50, thirdParty: true },
+      "claude-opus-4.7-fast": { provider: "Anthropic", input: 30, cacheWrite: 37.5, cacheRead: 3, output: 150, thirdParty: true, notes: "Claude Opus 4.7 (fast mode) table row" },
+      "claude-opus-4.8": { provider: "Anthropic", input: 5, cacheWrite: 6.25, cacheRead: 0.5, output: 25, thirdParty: true, notes: "Fast mode rates not listed as absolute — unpriced when -fast" },
+      "claude-opus-5": { provider: "Anthropic", input: 5, cacheWrite: 6.25, cacheRead: 0.5, output: 25, thirdParty: true, notes: "Fast mode mentioned without absolute rates — unpriced when -fast" },
+      "claude-sonnet-5": { provider: "Anthropic", input: 3, cacheWrite: 3.75, cacheRead: 0.3, output: 15, thirdParty: true, notes: "Launch promo $2/$10 input/output through 2026-08-31 not applied; table columns used" },
+      "gemini-2.5-flash": { provider: "Google", input: 0.3, cacheWrite: null, cacheRead: 0.03, output: 2.5, thirdParty: true },
+      "gemini-3-flash": { provider: "Google", input: 0.5, cacheWrite: null, cacheRead: 0.05, output: 3, thirdParty: true },
+      "gemini-3-pro": { provider: "Google", input: 2, cacheWrite: null, cacheRead: 0.2, output: 12, thirdParty: true },
+      "gemini-3-pro-image-preview": { provider: "Google", input: 2, cacheWrite: null, cacheRead: 0.2, output: 12, thirdParty: true },
+      "gemini-3.1-pro": { provider: "Google", input: 2, cacheWrite: null, cacheRead: 0.2, output: 12, thirdParty: true },
+      "gemini-3.5-flash": { provider: "Google", input: 1.5, cacheWrite: null, cacheRead: 0.15, output: 9, thirdParty: true },
+      "gemini-3.6-flash": { provider: "Google", input: 1.5, cacheWrite: null, cacheRead: 0.15, output: 7.5, thirdParty: true },
+      "glm-5.2": { provider: "Z.ai", input: 1.4, cacheWrite: null, cacheRead: 0.26, output: 4.4, thirdParty: true },
+      "gpt-5": { provider: "OpenAI", input: 1.25, cacheWrite: null, cacheRead: 0.125, output: 10, thirdParty: true },
+      "gpt-5-fast": { provider: "OpenAI", input: 2.5, cacheWrite: null, cacheRead: 0.25, output: 20, thirdParty: true, notes: "Dedicated fast row (2x GPT-5)" },
+      "gpt-5-mini": { provider: "OpenAI", input: 0.25, cacheWrite: null, cacheRead: 0.025, output: 2, thirdParty: true },
+      "gpt-5-codex": { provider: "OpenAI", input: 1.25, cacheWrite: null, cacheRead: 0.125, output: 10, thirdParty: true },
+      "gpt-5.1-codex": { provider: "OpenAI", input: 1.25, cacheWrite: null, cacheRead: 0.125, output: 10, thirdParty: true },
+      "gpt-5.1-codex-max": { provider: "OpenAI", input: 1.25, cacheWrite: null, cacheRead: 0.125, output: 10, thirdParty: true },
+      "gpt-5.1-codex-mini": { provider: "OpenAI", input: 0.25, cacheWrite: null, cacheRead: 0.025, output: 2, thirdParty: true },
+      "gpt-5.2": { provider: "OpenAI", input: 1.75, cacheWrite: null, cacheRead: 0.175, output: 14, thirdParty: true },
+      "gpt-5.2-codex": { provider: "OpenAI", input: 1.75, cacheWrite: null, cacheRead: 0.175, output: 14, thirdParty: true },
+      "gpt-5.3-codex": { provider: "OpenAI", input: 1.75, cacheWrite: null, cacheRead: 0.175, output: 14, thirdParty: true },
+      "gpt-5.4": { provider: "OpenAI", input: 2.5, cacheWrite: null, cacheRead: 0.25, output: 15, thirdParty: true, fastMultiplier: 2, notes: "Fast mode 2x; long-context 2x input not auto-applied" },
+      "gpt-5.4-mini": { provider: "OpenAI", input: 0.75, cacheWrite: null, cacheRead: 0.075, output: 4.5, thirdParty: true },
+      "gpt-5.4-nano": { provider: "OpenAI", input: 0.2, cacheWrite: null, cacheRead: 0.02, output: 1.25, thirdParty: true },
+      "gpt-5.5": { provider: "OpenAI", input: 5, cacheWrite: null, cacheRead: 0.5, output: 30, thirdParty: true, notes: "Fast mode at higher rates — no exact multiplier; -fast stays unpriced" },
+      "gpt-5.6-luna": { provider: "OpenAI", input: 0.2, cacheWrite: 0.25, cacheRead: 0.02, output: 1.2, thirdParty: true, fastMultiplier: 2 },
+      "gpt-5.6-sol": { provider: "OpenAI", input: 5, cacheWrite: 6.25, cacheRead: 0.5, output: 30, thirdParty: true, fastMultiplier: 2 },
+      "gpt-5.6-terra": { provider: "OpenAI", input: 2, cacheWrite: 2.5, cacheRead: 0.2, output: 12, thirdParty: true, fastMultiplier: 2 },
+      "kimi-k2.7-code": { provider: "Moonshot", input: 0.95, cacheWrite: null, cacheRead: 0.19, output: 4, thirdParty: true },
+      "kimi-k3": { provider: "Moonshot", input: 3, cacheWrite: null, cacheRead: 0.3, output: 15, thirdParty: true },
+      "cursor-grok-4.5": { provider: "Cursor", input: null, cacheWrite: null, cacheRead: null, output: null, thirdParty: false, unpriced: true, notes: "Cursor Models pool — no public per-token API rates" },
+      "composer-2.5": { provider: "Cursor", input: null, cacheWrite: null, cacheRead: null, output: null, thirdParty: false, unpriced: true, notes: "Cursor Models pool — no public per-token API rates" },
+    },
+    aliases: {
+      "claude 4 sonnet": "claude-4-sonnet",
+      "claude 4 sonnet 1m": "claude-4-sonnet-1m",
+      "claude 4.5 haiku": "claude-4.5-haiku",
+      "claude 4.5 opus": "claude-4.5-opus",
+      "claude 4.5 sonnet": "claude-4.5-sonnet",
+      "claude 4.6 opus": "claude-4.6-opus",
+      "claude 4.6 sonnet": "claude-4.6-sonnet",
+      "claude 4.7 opus": "claude-4.7-opus",
+      "claude fable 5": "claude-fable-5",
+      "claude opus 4.7 (fast mode)": "claude-opus-4.7-fast",
+      "claude-opus-4-7-fast": "claude-opus-4.7-fast",
+      "claude opus 4.8": "claude-opus-4.8",
+      "claude opus 5": "claude-opus-5",
+      "opus 5": "claude-opus-5",
+      "claude sonnet 5": "claude-sonnet-5",
+      "gemini 2.5 flash": "gemini-2.5-flash",
+      "gemini 3 flash": "gemini-3-flash",
+      "gemini 3 pro": "gemini-3-pro",
+      "gemini 3 pro image preview": "gemini-3-pro-image-preview",
+      "gemini 3.1 pro": "gemini-3.1-pro",
+      "gemini 3.5 flash": "gemini-3.5-flash",
+      "gemini 3.6 flash": "gemini-3.6-flash",
+      "glm 5.2": "glm-5.2",
+      "gpt-5 fast": "gpt-5-fast",
+      "gpt 5": "gpt-5",
+      "gpt 5 fast": "gpt-5-fast",
+      "gpt 5 mini": "gpt-5-mini",
+      "gpt-5-codex": "gpt-5-codex",
+      "gpt 5.1 codex": "gpt-5.1-codex",
+      "gpt 5.1 codex max": "gpt-5.1-codex-max",
+      "gpt 5.1 codex mini": "gpt-5.1-codex-mini",
+      "gpt 5.2": "gpt-5.2",
+      "gpt 5.2 codex": "gpt-5.2-codex",
+      "gpt 5.3 codex": "gpt-5.3-codex",
+      "gpt 5.4": "gpt-5.4",
+      "gpt 5.4 mini": "gpt-5.4-mini",
+      "gpt 5.4 nano": "gpt-5.4-nano",
+      "gpt 5.5": "gpt-5.5",
+      "gpt 5.6 luna": "gpt-5.6-luna",
+      "gpt 5.6 sol": "gpt-5.6-sol",
+      "gpt 5.6 terra": "gpt-5.6-terra",
+      "kimi k2.7 code": "kimi-k2.7-code",
+      "kimi k3": "kimi-k3",
+      "cursor grok 4.5": "cursor-grok-4.5",
+      "composer 2.5": "composer-2.5",
+      "opus 5 (auto balanced)": { model: "claude-opus-5", autoRouted: true },
+      "opus 5 (auto intelligence)": { model: "claude-opus-5", autoRouted: true },
+      "gpt-5.6 sol (auto balanced)": { model: "gpt-5.6-sol", autoRouted: true },
+      "gpt-5.6 sol (auto intelligence)": { model: "gpt-5.6-sol", autoRouted: true },
+      "gpt-5.4 nano (auto balanced)": { model: "gpt-5.4-nano", autoRouted: true },
+      "cursor grok 4.5 (auto balanced)": { model: "cursor-grok-4.5", autoRouted: true },
+      "cursor grok 4.5 (auto intelligence)": { model: "cursor-grok-4.5", autoRouted: true },
+      "cursor grok 4.5 fast? (auto balanced)": { model: "cursor-grok-4.5", wantsFast: true, autoRouted: true },
+      "cursor grok 4.5 fast? (auto intelligence)": { model: "cursor-grok-4.5", wantsFast: true, autoRouted: true },
+      "composer 2.5 (auto balanced)": { model: "composer-2.5", autoRouted: true },
+      "composer 2.5 fast (auto balanced)": { model: "composer-2.5", wantsFast: true, autoRouted: true },
+      "auto": { unpriced: true, reason: "auto-unresolved" },
+      "auto-smart": { unpriced: true, reason: "auto-unresolved" },
+      "default": { unpriced: true, reason: "unknown-model" },
+      "agent_review": { unpriced: true, reason: "unknown-model" },
+    },
+  };
+
+  const PRICE_DISCLAIMER_CS =
+    "Odhad podle veřejného ceníku Cursor, nikoli faktura. Skutečný billing se může lišit kvůli routování, slevám, příplatkům a změnám ceníku. Included = $0 paid.";
+
+  const SHORT_NOTICE_CS =
+    "Denní částky jsou odhad z tokenů podle veřejného ceníku; cyklická útrata je skutečný on-demand údaj. Included usage = $0.";
+
+  const CHANGELOG = [
+    {
+      version: "1.3.10",
+      text: "Zjednodušené UI podle původního panelu.",
+    },
+    {
+      version: "1.3.9",
+      text: "Odhad denní/modelové on-demand ceny z tokenů dle veřejného ceníku, coverage, disclaimer a nápověda (?).",
+    },
+    {
+      version: "1.3.8",
+      text: "Autoritativní cyklická útrata z usage-summary.onDemand.used (centy); aggregate jen Included.",
+    },
+    {
+      version: "1.3.7",
+      text: "Oddělení zaplacené útraty od hodnoty zahrnuté spotřeby; KPI N/A místo dohadů z chargedCents.",
+    },
+    {
+      version: "1.3.4",
+      text: "Promise-safe fetch interceptor (bez .then na návratové hodnotě) pro GM/Firefox Xray.",
+    },
+  ];
+
+  function centsToDollars(value) {
+    return (Number(value) || 0) / 100;
+  }
+
+  function isFiniteNumber(value) {
+    return Number.isFinite(Number(value));
+  }
+
+  /**
+   * Legacy per-event field. Semantics are ambiguous (historically looked like
+   * on-demand/request-units; currently often 0). Never treat as authoritative
+   * paid spend or as usage value — those come from usage-summary / aggregate.
+   */
+  function getChargedDollars(event) {
+    if (event?.kind !== "USAGE_EVENT_KIND_USAGE_BASED") return 0;
+    return centsToDollars(event.chargedCents);
+  }
+
+  function sumEventChargedDollars(events) {
+    let sum = 0;
+    for (const event of events || []) {
+      sum += getChargedDollars(event);
+    }
+    return sum;
+  }
+
+  /**
+   * Units verified against the native team-admin endpoint `/api/dashboard/get-team-spend`,
+   * fetched in the same snapshot as `/api/usage-summary`:
+   *
+   *   individualUsage.onDemand.used      === teamMemberSpend[].spendCents          (cents)
+   *   individualUsage.plan.breakdown.total === teamMemberSpend[].includedSpendCents (cents)
+   *   subscriptionCycleStart / nextCycleStart === billingCycleStart / billingCycleEnd
+   *
+   * So both values are cents and cover exactly the same billing cycle. They are
+   * complementary, not alternative: `onDemand.used` is the paid overage, while
+   * `plan.breakdown.total` is the usage consumed from the included pool.
+   *
+   * The aggregate endpoint prices *included* events only — on-demand events come
+   * back as 0 cents — which is why `aggregate.totalCostCents` tracks
+   * `plan.breakdown.total` and is far below the on-demand spend.
+   *
+   * Daily / per-model paid breakdown is not provided by any of these payloads.
+   */
+  function parseUsageSummary(summary) {
+    const individual = summary?.individualUsage && typeof summary.individualUsage === "object"
+      ? summary.individualUsage
+      : summary;
+    const onDemandUsed = individual?.onDemand?.used ?? summary?.onDemand?.used;
+    const planTotal = individual?.plan?.breakdown?.total ?? summary?.plan?.breakdown?.total;
+    const cycleStartRaw = summary?.billingCycleStart ?? individual?.billingCycleStart;
+    const cycleEndRaw = summary?.billingCycleEnd ?? individual?.billingCycleEnd;
+    const cycleStart = cycleStartRaw != null ? Date.parse(cycleStartRaw) : NaN;
+    const cycleEnd = cycleEndRaw != null ? Date.parse(cycleEndRaw) : NaN;
+
+    const paidSpendCycle = isFiniteNumber(onDemandUsed) ? centsToDollars(onDemandUsed) : UNAVAILABLE;
+    const includedUsageCycle = isFiniteNumber(planTotal) ? centsToDollars(planTotal) : UNAVAILABLE;
+
+    return {
+      paidSpendCycle,
+      includedUsageCycle,
+      totalUsageCycle:
+        paidSpendCycle == null || includedUsageCycle == null
+          ? UNAVAILABLE
+          : paidSpendCycle + includedUsageCycle,
+      // Back-compat alias: older callers/tests read the included pool under this name.
+      planUsageValueCycle: includedUsageCycle,
+      billingCycleStart: Number.isFinite(cycleStart) ? cycleStart : UNAVAILABLE,
+      billingCycleEnd: Number.isFinite(cycleEnd) ? cycleEnd : UNAVAILABLE,
+      // API gives cycle totals only — do not invent daily/model paid spend.
+      paidSpendDailyAvailable: false,
+      paidSpendPerModelAvailable: false,
+    };
+  }
+
+  /** Mirrors the dashboard "Type" column: On-Demand vs Included. */
+  function isOnDemandEvent(event) {
+    const kind = event?.kind;
+    return kind === ON_DEMAND_KIND || kind === "On-Demand";
+  }
+
+  function isIncludedEvent(event) {
+    const kind = event?.kind;
+    return kind === INCLUDED_KIND || kind === "Included";
+  }
+
+  function isErroredNoChargeEvent(event) {
+    const kind = event?.kind;
+    return kind === ERRORED_KIND || kind === "Errored, No Charge";
+  }
+
+  /**
+   * Live filtered API `tokenUsage` fields (verified 2026-07-31):
+   *   inputTokens       ↔ CSV "Input (w/o Cache Write)"  → uncached input rate
+   *   cacheWriteTokens  ↔ CSV "Input (w/ Cache Write)"   → cache-write rate
+   *   cacheReadTokens   ↔ CSV "Cache Read"
+   *   outputTokens      ↔ CSV "Output Tokens"
+   */
+  function getEventTokenBreakdown(event) {
+    const usage = event?.tokenUsage && typeof event.tokenUsage === "object" ? event.tokenUsage : event || {};
+    const uncachedInputTokens = Number(
+      usage.uncachedInputTokens ?? usage.inputTokens ?? event?.uncachedInputTokens,
+    ) || 0;
+    const cacheWriteTokens = Number(usage.cacheWriteTokens ?? event?.cacheWriteTokens) || 0;
+    const cacheReadTokens = Number(usage.cacheReadTokens ?? event?.cacheReadTokens) || 0;
+    const outputTokens = Number(usage.outputTokens ?? event?.outputTokens) || 0;
+    return {
+      uncachedInputTokens,
+      cacheWriteTokens,
+      cacheReadTokens,
+      outputTokens,
+      totalTokens: uncachedInputTokens + cacheWriteTokens + cacheReadTokens + outputTokens,
+    };
+  }
+
+  function normalizePricingKey(name) {
+    return String(name || "")
+      .replace(/[\u200B-\u200D\uFEFF]/g, "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+  }
+
+  function lookupAlias(key, pricing) {
+    const aliases = pricing?.aliases || {};
+    if (Object.prototype.hasOwnProperty.call(aliases, key)) return aliases[key];
+    return undefined;
+  }
+
+  function materializeResolved(catalogKey, entry, options, pricing) {
+    if (!entry || entry.unpriced || entry.input == null) {
+      return {
+        catalogKey: catalogKey || null,
+        unpriced: true,
+        reason: entry?.reason || entry?.notes || "unknown-model",
+        thirdParty: Boolean(entry?.thirdParty),
+        wantsFast: Boolean(options.wantsFast),
+        autoRouted: Boolean(options.autoRouted),
+        modelName: options.modelName,
+      };
+    }
+
+    let ratesEntry = entry;
+    let appliedFastMultiplier = 1;
+    const wantsFast = Boolean(options.wantsFast);
+
+    if (wantsFast) {
+      const fastKey = `${catalogKey}-fast`;
+      if (pricing.models[fastKey] && pricing.models[fastKey].input != null) {
+        ratesEntry = pricing.models[fastKey];
+        catalogKey = fastKey;
+      } else if (Number.isFinite(Number(entry.fastMultiplier)) && Number(entry.fastMultiplier) > 0) {
+        appliedFastMultiplier = Number(entry.fastMultiplier);
+      } else {
+        return {
+          catalogKey,
+          unpriced: true,
+          reason: "unknown-fast-rate",
+          thirdParty: Boolean(entry.thirdParty),
+          wantsFast: true,
+          autoRouted: Boolean(options.autoRouted),
+          modelName: options.modelName,
+        };
+      }
+    }
+
+    return {
+      catalogKey,
+      unpriced: false,
+      reason: null,
+      thirdParty: Boolean(ratesEntry.thirdParty),
+      wantsFast,
+      autoRouted: Boolean(options.autoRouted),
+      appliedFastMultiplier,
+      input: Number(ratesEntry.input),
+      cacheWrite: ratesEntry.cacheWrite == null ? null : Number(ratesEntry.cacheWrite),
+      cacheRead: Number(ratesEntry.cacheRead),
+      output: Number(ratesEntry.output),
+      modelName: options.modelName,
+    };
+  }
+
+  function resolveModelPricing(modelName, pricing = MODEL_PRICING) {
+    const original = String(modelName || "").trim();
+    if (!original) {
+      return { unpriced: true, reason: "empty-model", modelName: original };
+    }
+
+    const lower = normalizePricingKey(original);
+    const aliasHit = lookupAlias(lower, pricing);
+    if (aliasHit != null) {
+      if (typeof aliasHit === "string") {
+        return materializeResolved(aliasHit, pricing.models[aliasHit], { modelName: original }, pricing);
+      }
+      if (aliasHit.unpriced) {
+        return {
+          catalogKey: null,
+          unpriced: true,
+          reason: aliasHit.reason || "unpriced-alias",
+          thirdParty: false,
+          wantsFast: Boolean(aliasHit.wantsFast),
+          autoRouted: Boolean(aliasHit.autoRouted),
+          modelName: original,
+        };
+      }
+      return materializeResolved(
+        aliasHit.model,
+        pricing.models[aliasHit.model],
+        {
+          modelName: original,
+          wantsFast: Boolean(aliasHit.wantsFast),
+          autoRouted: Boolean(aliasHit.autoRouted),
+        },
+        pricing,
+      );
+    }
+
+    const autoMatch = lower.match(/^(.*?)\s*\(auto(?:\s+(balanced|intelligence|cost))?\)$/);
+    if (autoMatch) {
+      const mode = autoMatch[2] || "";
+      if (!mode || mode === "cost") {
+        return {
+          catalogKey: null,
+          unpriced: true,
+          reason: mode === "cost" ? "auto-cost-no-public-rates" : "auto-unresolved",
+          thirdParty: false,
+          autoRouted: true,
+          modelName: original,
+        };
+      }
+      const inner = autoMatch[1].trim();
+      const innerResolved = resolveModelPricing(inner, pricing);
+      return {
+        ...innerResolved,
+        autoRouted: true,
+        modelName: original,
+        reason: innerResolved.unpriced
+          ? innerResolved.reason || "auto-unresolved-third-party"
+          : innerResolved.reason,
+      };
+    }
+
+    if (pricing.models[lower]) {
+      return materializeResolved(lower, pricing.models[lower], { modelName: original }, pricing);
+    }
+
+    let key = lower.replace(/_/g, "-");
+    let wantsFast = false;
+    if (/(?:^|[\s-])fast\??$/.test(key) || key.endsWith("-fast") || key.includes("-fast-")) {
+      wantsFast = true;
+      key = key
+        .replace(/-fast(?=-|$)/g, "")
+        .replace(/\s*fast\??$/g, "")
+        .replace(/--+/g, "-")
+        .replace(/^-|-$/g, "")
+        .trim();
+    }
+
+    const stripped = key
+      .replace(/-thinking(?:-(?:high|medium|low))?/g, "")
+      .replace(/-(?:high|medium|low)$/g, "")
+      .replace(/--+/g, "-")
+      .replace(/^-|-$/g, "");
+
+    const candidates = [key, stripped, stripped.replace(/\s+/g, "-")];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const candidateAlias = lookupAlias(candidate, pricing);
+      if (typeof candidateAlias === "string" && pricing.models[candidateAlias]) {
+        return materializeResolved(
+          candidateAlias,
+          pricing.models[candidateAlias],
+          { modelName: original, wantsFast },
+          pricing,
+        );
+      }
+      if (pricing.models[candidate]) {
+        return materializeResolved(
+          candidate,
+          pricing.models[candidate],
+          { modelName: original, wantsFast },
+          pricing,
+        );
+      }
+    }
+
+    return {
+      catalogKey: null,
+      unpriced: true,
+      reason: "unknown-model",
+      thirdParty: false,
+      wantsFast,
+      modelName: original,
+    };
+  }
+
+  /**
+   * Catalog estimate for a single usage event.
+   * Paid estimate only for On-Demand / USAGE_BASED. Included & Errored → $0 paid.
+   * Max Mode +20 % is legacy-only and is never applied here (new pricing).
+   */
+  function estimateEventOnDemandPrice(event, pricing = MODEL_PRICING) {
+    if (isIncludedEvent(event)) {
+      return { status: "included", dollars: 0, paidEstimate: 0, model: event?.model || null };
+    }
+    if (isErroredNoChargeEvent(event)) {
+      return { status: "errored", dollars: 0, paidEstimate: 0, model: event?.model || null };
+    }
+    if (!isOnDemandEvent(event)) {
+      return {
+        status: "unpriced",
+        dollars: null,
+        paidEstimate: null,
+        reason: "not-on-demand",
+        model: event?.model || null,
+      };
+    }
+
+    const resolved = resolveModelPricing(event?.model, pricing);
+    if (resolved.unpriced) {
+      return {
+        status: "unpriced",
+        dollars: null,
+        paidEstimate: null,
+        reason: resolved.reason || "unknown-model",
+        model: event?.model || null,
+        catalogKey: resolved.catalogKey,
+      };
+    }
+
+    const tokens = getEventTokenBreakdown(event);
+    const mult = resolved.appliedFastMultiplier || 1;
+    const cacheWriteRate = resolved.cacheWrite == null ? resolved.input : resolved.cacheWrite;
+    let dollars =
+      (tokens.cacheWriteTokens * cacheWriteRate * mult +
+        tokens.uncachedInputTokens * resolved.input * mult +
+        tokens.cacheReadTokens * resolved.cacheRead * mult +
+        tokens.outputTokens * resolved.output * mult) /
+      1_000_000;
+
+    let cursorTokenFee = 0;
+    if (resolved.thirdParty) {
+      cursorTokenFee = (tokens.totalTokens * Number(pricing.cursorTokenRatePerMillion || 0)) / 1_000_000;
+      dollars += cursorTokenFee;
+    }
+
+    return {
+      status: "priced",
+      dollars,
+      paidEstimate: dollars,
+      reason: null,
+      model: event?.model || null,
+      catalogKey: resolved.catalogKey,
+      appliedFastMultiplier: mult,
+      appliedCursorTokenRate: Boolean(resolved.thirdParty),
+      cursorTokenFee,
+      autoRouted: Boolean(resolved.autoRouted),
+      tokens,
+    };
+  }
+
+  function summarizeOnDemandEstimates(events, pricing = MODEL_PRICING) {
+    let pricedCount = 0;
+    let unpricedCount = 0;
+    let onDemandCount = 0;
+    let estimatedDollars = 0;
+    const unpricedModels = new Set();
+
+    for (const event of events || []) {
+      if (!isOnDemandEvent(event)) continue;
+      onDemandCount += 1;
+      const estimate = estimateEventOnDemandPrice(event, pricing);
+      if (estimate.status === "priced") {
+        pricedCount += 1;
+        estimatedDollars += estimate.dollars;
+      } else {
+        unpricedCount += 1;
+        if (event?.model) unpricedModels.add(String(event.model));
+      }
+    }
+
+    return {
+      onDemandCount,
+      pricedCount,
+      unpricedCount,
+      estimatedDollars,
+      coverageRatio: onDemandCount ? pricedCount / onDemandCount : null,
+      unpricedModels: [...unpricedModels].sort(),
+    };
+  }
+
+  /** Token API-rate value (not invoice). Sum duplicate modelIntent across tiers. */
+  function accumulateModelUsageValue(aggregations) {
+    const modelUsageValue = {};
+    for (const row of aggregations || []) {
+      const name = String(row.modelIntent || "").trim();
+      if (!name) continue;
+      modelUsageValue[name] = (modelUsageValue[name] || 0) + centsToDollars(row.totalCents);
+    }
+    return modelUsageValue;
+  }
+
+  // Back-compat alias for tests / callers that still say "spend" meaning usage value.
+  function accumulateModelSpend(aggregations) {
+    return accumulateModelUsageValue(aggregations);
+  }
+
+  function parseAggregatedDay(aggResponse) {
+    return {
+      usageValue: centsToDollars(aggResponse?.totalCostCents),
+      modelUsageValue: accumulateModelUsageValue(aggResponse?.aggregations),
+      // Legacy keys kept so older tests / overlays keep working if referenced.
+      spend: centsToDollars(aggResponse?.totalCostCents),
+      modelSpend: accumulateModelUsageValue(aggResponse?.aggregations),
+    };
+  }
+
+  function monthModelSpendFromAggregated(aggResponse) {
+    return accumulateModelUsageValue(aggResponse?.aggregations);
+  }
+
+  function formatDollars(value) {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(Number(value) || 0);
+  }
+
+  function formatMoneyOrUnavailable(value) {
+    if (value == null || !Number.isFinite(Number(value))) return "N/A";
+    return formatDollars(Number(value));
+  }
 
   /**
    * Greasemonkey/Firefox sandbox `window.fetch` is often read-only.
@@ -135,6 +726,33 @@
     module.exports = {
       VERSION,
       USAGE_ENDPOINT,
+      AGG_ENDPOINT,
+      SUMMARY_ENDPOINT,
+      UNAVAILABLE,
+      ON_DEMAND_KIND,
+      INCLUDED_KIND,
+      ERRORED_KIND,
+      MODEL_PRICING,
+      PRICE_DISCLAIMER_CS,
+      SHORT_NOTICE_CS,
+      CHANGELOG,
+      centsToDollars,
+      getChargedDollars,
+      sumEventChargedDollars,
+      parseUsageSummary,
+      isOnDemandEvent,
+      isIncludedEvent,
+      isErroredNoChargeEvent,
+      getEventTokenBreakdown,
+      resolveModelPricing,
+      estimateEventOnDemandPrice,
+      summarizeOnDemandEstimates,
+      accumulateModelUsageValue,
+      accumulateModelSpend,
+      parseAggregatedDay,
+      monthModelSpendFromAggregated,
+      formatDollars,
+      formatMoneyOrUnavailable,
       resolvePageWindow,
       isUsageRequest,
       readRequestBody,
@@ -232,6 +850,134 @@
     return response.json();
   }
 
+  async function fetchAggregatedUsage(startDate, endDate) {
+    const response = await nativeFetch(AGG_ENDPOINT, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        ...requestContext,
+        startDate: String(startDate),
+        endDate: String(endDate),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Cursor aggregate API vrátilo HTTP ${response.status}.`);
+    }
+
+    return response.json();
+  }
+
+  async function fetchUsageSummary() {
+    const response = await nativeFetch(SUMMARY_ENDPOINT, {
+      method: "GET",
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      throw new Error(`Cursor usage-summary API vrátilo HTTP ${response.status}.`);
+    }
+    return response.json();
+  }
+
+  function applyUsageValueOverlay(data, dailyByKey, cycleModelUsageValue) {
+    for (const day of data.days) {
+      const agg = dailyByKey[day.key];
+      if (!agg) continue;
+      day.usageValue = agg.usageValue;
+      day.modelUsageValue = { ...agg.modelUsageValue };
+      // Keep day.spend / modelSpend as catalog on-demand estimates (not aggregate).
+      if (day.estimatedOnDemandSpend == null) day.estimatedOnDemandSpend = 0;
+      day.spend = day.estimatedOnDemandSpend;
+      day.modelSpend = { ...(day.modelEstimatedOnDemandSpend || {}) };
+    }
+
+    const seen = new Set();
+    for (const model of data.models) {
+      seen.add(model.name);
+      if (!Object.prototype.hasOwnProperty.call(cycleModelUsageValue, model.name)) continue;
+      model.usageValue = cycleModelUsageValue[model.name];
+      if (model.usageValue > 0 && model.valuedCalls === 0) {
+        model.valuedCalls = model.calls;
+      }
+      model.paidCalls = model.valuedCalls;
+      // model.spend stays as estimated on-demand catalog dollars when present.
+      if (model.estimatedOnDemandSpend == null) model.estimatedOnDemandSpend = 0;
+      model.spend = model.estimatedOnDemandSpend;
+    }
+
+    for (const [name, usageValue] of Object.entries(cycleModelUsageValue)) {
+      if (usageValue <= 0 || seen.has(name)) continue;
+      data.models.push({
+        name,
+        calls: 0,
+        onDemandCalls: 0,
+        pricedOnDemandCalls: 0,
+        unpricedOnDemandCalls: 0,
+        valuedCalls: 0,
+        paidCalls: 0,
+        tokens: 0,
+        usageValue,
+        estimatedOnDemandSpend: 0,
+        spend: 0,
+      });
+    }
+
+    data.models.sort(
+      (left, right) =>
+        (right.estimatedOnDemandSpend || 0) - (left.estimatedOnDemandSpend || 0) ||
+        (right.usageValue || 0) - (left.usageValue || 0) ||
+        right.tokens - left.tokens,
+    );
+
+    const todayStart = utcDayStart(new Date(data.updatedAt));
+    const sevenDayStart = todayStart - 6 * DAY_MS;
+    const cycleDays = data.days.filter((day) => day.timestamp >= data.billingCycleStart);
+    const sevenDays = data.days.filter((day) => day.timestamp >= sevenDayStart);
+    const today = data.days.find((day) => day.key === utcDayKey(todayStart));
+    const sumUsageValue = (days) => days.reduce((sum, day) => sum + (day.usageValue || 0), 0);
+    const elapsedDays = Math.max(1, Math.floor((todayStart - data.billingCycleStart) / DAY_MS) + 1);
+
+    data.todayUsageValue = today ? today.usageValue || 0 : 0;
+    data.sevenDayUsageValue = sumUsageValue(sevenDays);
+    data.cycleUsageValue = sumUsageValue(cycleDays);
+    data.dailyAverageUsageValue = data.cycleUsageValue / elapsedDays;
+    // Compatibility aliases used by older probes — always usage value, never paid.
+    data.todaySpend = data.todayUsageValue;
+    data.sevenDaySpend = data.sevenDayUsageValue;
+    data.monthSpend = data.cycleUsageValue;
+    data.dailyAverage = data.dailyAverageUsageValue;
+    data.sevenDays = sevenDays;
+    data.usageValueSource = "aggregated";
+    data.costSource = "aggregated-usage-value";
+    return data;
+  }
+
+  async function loadUsageValueOverlay(dataStart, todayStart, cycleStart, now) {
+    const dayStarts = [];
+    for (let timestamp = dataStart; timestamp <= todayStart; timestamp += DAY_MS) {
+      dayStarts.push(timestamp);
+    }
+
+    const [cycleAgg, ...dayAggs] = await Promise.all([
+      fetchAggregatedUsage(cycleStart, now),
+      ...dayStarts.map((timestamp) => fetchAggregatedUsage(timestamp, Math.min(timestamp + DAY_MS - 1, now))),
+    ]);
+
+    const dailyByKey = {};
+    dayStarts.forEach((timestamp, index) => {
+      dailyByKey[utcDayKey(timestamp)] = parseAggregatedDay(dayAggs[index]);
+    });
+
+    return {
+      dailyByKey,
+      cycleModelUsageValue: monthModelSpendFromAggregated(cycleAgg),
+      cycleUsageValueTotal: centsToDollars(cycleAgg?.totalCostCents),
+    };
+  }
+
   async function loadStatistics() {
     if (!requestContext || loading) return;
 
@@ -241,14 +987,56 @@
     try {
       const now = Date.now();
       const todayStart = utcDayStart(new Date(now));
-      const startDate = Math.min(utcMonthStart(new Date(now)), todayStart - 29 * DAY_MS);
+      const calendarMonthStart = utcMonthStart(new Date(now));
+
+      let summaryInfo = parseUsageSummary(null);
+      try {
+        summaryInfo = parseUsageSummary(await fetchUsageSummary());
+      } catch {
+        // Paid KPIs stay N/A; usage-value path can still work from aggregate.
+      }
+
+      const billingCycleStart = summaryInfo.billingCycleStart ?? calendarMonthStart;
+      const startDate = Math.min(billingCycleStart, todayStart - 29 * DAY_MS);
       const firstPage = await fetchUsagePage(1, startDate, now);
       const total = Number(firstPage.totalUsageEventsCount) || 0;
       const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
-      const remainingPages = await Promise.all(Array.from({ length: pageCount - 1 }, (_, index) => fetchUsagePage(index + 2, startDate, now)));
-      const events = [...(firstPage.usageEventsDisplay || []), ...remainingPages.flatMap((page) => page.usageEventsDisplay || [])];
+      const remainingPages = await Promise.all(
+        Array.from({ length: pageCount - 1 }, (_, index) => fetchUsagePage(index + 2, startDate, now)),
+      );
+      const events = [
+        ...(firstPage.usageEventsDisplay || []),
+        ...remainingPages.flatMap((page) => page.usageEventsDisplay || []),
+      ];
 
-      currentData = buildStatistics(events, now);
+      let statistics = buildStatistics(events, now, {
+        billingCycleStart,
+        billingCycleEnd: summaryInfo.billingCycleEnd,
+        paidSpendCycle: summaryInfo.paidSpendCycle,
+        includedUsageCycle: summaryInfo.includedUsageCycle,
+        totalUsageCycle: summaryInfo.totalUsageCycle,
+        paidSpendDailyAvailable: summaryInfo.paidSpendDailyAvailable,
+        paidSpendPerModelAvailable: summaryInfo.paidSpendPerModelAvailable,
+      });
+
+      // Aggregate totalCostCents prices *included* events only (on-demand events
+      // return 0 cents), so it tracks plan.breakdown.total, not the invoice.
+      // Never promote it to “Útrata” / paid spend.
+      try {
+        const overlay = await loadUsageValueOverlay(startDate, todayStart, billingCycleStart, now);
+        statistics = applyUsageValueOverlay(statistics, overlay.dailyByKey, overlay.cycleModelUsageValue);
+        if (statistics.includedUsageCycle == null && overlay.cycleUsageValueTotal != null) {
+          statistics.includedUsageCycle = overlay.cycleUsageValueTotal;
+          statistics.planUsageValueCycle = overlay.cycleUsageValueTotal;
+        }
+      } catch (aggregateError) {
+        // Do not fall back to chargedCents — its paid/usage semantics are unproven.
+        statistics.usageValueSource = null;
+        statistics.costSource = null;
+        statistics.usageValueError = String(aggregateError?.message || aggregateError);
+      }
+
+      currentData = statistics;
       renderStatistics(currentData);
     } catch (error) {
       renderError(error);
@@ -265,32 +1053,38 @@
     return ["inputTokens", "outputTokens", "cacheWriteTokens", "cacheReadTokens"].reduce((sum, field) => sum + (Number(usage[field]) || 0), 0);
   }
 
-  function getChargedDollars(event) {
-    if (event?.kind !== "USAGE_EVENT_KIND_USAGE_BASED") return 0;
-    return (Number(event.chargedCents) || 0) / 100;
-  }
-
   function createEmptyDay(timestamp) {
     return {
       key: utcDayKey(timestamp),
       timestamp,
       tokens: 0,
+      usageValue: 0,
+      estimatedOnDemandSpend: 0,
       spend: 0,
       calls: 0,
       modelTokens: {},
+      modelUsageValue: {},
+      modelEstimatedOnDemandSpend: {},
       modelSpend: {},
     };
   }
 
-  function buildStatistics(events, now) {
+  function buildStatistics(events, now, summaryMeta = {}) {
     const todayStart = utcDayStart(new Date(now));
     const sevenDayStart = todayStart - 6 * DAY_MS;
     const thirtyDayStart = todayStart - 29 * DAY_MS;
-    const monthStart = utcMonthStart(new Date(now));
-    const dataStart = Math.min(monthStart, thirtyDayStart);
+    const billingCycleStart = summaryMeta.billingCycleStart ?? utcMonthStart(new Date(now));
+    const dataStart = Math.min(billingCycleStart, thirtyDayStart);
     const daily = new Map();
     const models = new Map();
-    let monthEventCount = 0;
+    let cycleEventCount = 0;
+    let cycleOnDemandCalls = 0;
+    let cyclePricedOnDemandCalls = 0;
+    let cycleUnpricedOnDemandCalls = 0;
+    let estimatedOnDemandCycle = 0;
+    let estimatedOnDemandToday = 0;
+    let estimatedOnDemandSevenDay = 0;
+    const unpricedModels = new Set();
 
     for (let timestamp = dataStart; timestamp <= todayStart; timestamp += DAY_MS) {
       const day = createEmptyDay(timestamp);
@@ -302,61 +1096,112 @@
       if (!Number.isFinite(timestamp) || timestamp < dataStart || timestamp > now) continue;
 
       const tokens = getTokenCount(event);
-      const spend = getChargedDollars(event);
       const modelName = String(event.model || "Neznámý model");
+      const estimate = estimateEventOnDemandPrice(event);
       const day = daily.get(utcDayKey(timestamp));
       if (day) {
         day.tokens += tokens;
-        day.spend += spend;
         day.calls += 1;
         day.modelTokens[modelName] = (day.modelTokens[modelName] || 0) + tokens;
-        day.modelSpend[modelName] = (day.modelSpend[modelName] || 0) + spend;
+        if (estimate.status === "priced") {
+          day.estimatedOnDemandSpend += estimate.dollars;
+          day.modelEstimatedOnDemandSpend[modelName] =
+            (day.modelEstimatedOnDemandSpend[modelName] || 0) + estimate.dollars;
+          // Chart "Odhad ceny" metric reads spend / modelSpend.
+          day.spend = day.estimatedOnDemandSpend;
+          day.modelSpend[modelName] = day.modelEstimatedOnDemandSpend[modelName];
+        }
       }
 
-      if (timestamp < monthStart) continue;
-      monthEventCount += 1;
+      if (estimate.status === "priced") {
+        if (timestamp >= todayStart) estimatedOnDemandToday += estimate.dollars;
+        if (timestamp >= sevenDayStart) estimatedOnDemandSevenDay += estimate.dollars;
+      }
+
+      if (timestamp < billingCycleStart) continue;
+      cycleEventCount += 1;
       const model = models.get(modelName) || {
         name: modelName,
         calls: 0,
+        onDemandCalls: 0,
+        pricedOnDemandCalls: 0,
+        unpricedOnDemandCalls: 0,
+        valuedCalls: 0,
         paidCalls: 0,
         tokens: 0,
+        usageValue: 0,
+        estimatedOnDemandSpend: 0,
         spend: 0,
       };
       model.calls += 1;
       model.tokens += tokens;
-      model.spend += spend;
-      if (spend > 0) model.paidCalls += 1;
+
+      if (isOnDemandEvent(event)) {
+        cycleOnDemandCalls += 1;
+        model.onDemandCalls += 1;
+        if (estimate.status === "priced") {
+          cyclePricedOnDemandCalls += 1;
+          model.pricedOnDemandCalls += 1;
+          model.estimatedOnDemandSpend += estimate.dollars;
+          estimatedOnDemandCycle += estimate.dollars;
+        } else {
+          cycleUnpricedOnDemandCalls += 1;
+          model.unpricedOnDemandCalls += 1;
+          unpricedModels.add(modelName);
+        }
+      }
+
       models.set(modelName, model);
     }
 
     const allDays = [...daily.values()];
-    const monthDays = allDays.filter((day) => day.timestamp >= monthStart);
     const sevenDays = allDays.filter((day) => day.timestamp >= sevenDayStart);
-    const today = daily.get(utcDayKey(todayStart)) || createEmptyDay(todayStart);
-    const sumSpend = (days) => days.reduce((sum, day) => sum + day.spend, 0);
-    const elapsedDays = Math.max(1, Math.floor((todayStart - monthStart) / DAY_MS) + 1);
+    const coverageRatio = cycleOnDemandCalls ? cyclePricedOnDemandCalls / cycleOnDemandCalls : null;
 
     return {
       updatedAt: now,
-      monthStart,
-      todaySpend: today.spend,
-      sevenDaySpend: sumSpend(sevenDays),
-      monthSpend: sumSpend(monthDays),
-      dailyAverage: sumSpend(monthDays) / elapsedDays,
+      billingCycleStart,
+      billingCycleEnd: summaryMeta.billingCycleEnd ?? UNAVAILABLE,
+      monthStart: billingCycleStart,
+      paidSpendCycle: summaryMeta.paidSpendCycle ?? UNAVAILABLE,
+      // Exact daily/model invoice spend is not in API — catalog estimates only.
+      paidSpendToday: UNAVAILABLE,
+      paidSpendSevenDay: UNAVAILABLE,
+      paidSpendDailyAvailable: false,
+      paidSpendPerModelAvailable: false,
+      estimatedOnDemandToday,
+      estimatedOnDemandSevenDay,
+      estimatedOnDemandCycle,
+      estimateCoverage: {
+        onDemandCount: cycleOnDemandCalls,
+        pricedCount: cyclePricedOnDemandCalls,
+        unpricedCount: cycleUnpricedOnDemandCalls,
+        coverageRatio,
+        unpricedModels: [...unpricedModels].sort(),
+      },
+      includedUsageCycle: summaryMeta.includedUsageCycle ?? UNAVAILABLE,
+      totalUsageCycle: summaryMeta.totalUsageCycle ?? UNAVAILABLE,
+      planUsageValueCycle: summaryMeta.includedUsageCycle ?? UNAVAILABLE,
+      todayUsageValue: 0,
+      sevenDayUsageValue: 0,
+      cycleUsageValue: 0,
+      dailyAverageUsageValue: 0,
+      todaySpend: estimatedOnDemandToday,
+      sevenDaySpend: estimatedOnDemandSevenDay,
+      monthSpend: 0,
+      dailyAverage: 0,
       sevenDays,
       days: allDays,
-      models: [...models.values()].sort((left, right) => right.spend - left.spend || right.tokens - left.tokens),
-      eventCount: monthEventCount,
+      models: [...models.values()].sort(
+        (left, right) =>
+          (right.estimatedOnDemandSpend || 0) - (left.estimatedOnDemandSpend || 0) ||
+          right.tokens - left.tokens,
+      ),
+      eventCount: cycleEventCount,
+      onDemandCallCount: cycleOnDemandCalls,
+      usageValueSource: null,
+      costSource: null,
     };
-  }
-
-  function formatDollars(value) {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(value || 0);
   }
 
   function formatTokens(value) {
@@ -383,25 +1228,29 @@
   }
 
   function ensureStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-
-    const style = document.createElement("style");
-    style.id = STYLE_ID;
+    let style = document.getElementById(STYLE_ID);
+    if (style?.dataset?.gmVersion === VERSION) return;
+    if (!style) {
+      style = document.createElement("style");
+      style.id = STYLE_ID;
+      (document.head || document.documentElement).appendChild(style);
+    }
+    style.dataset.gmVersion = VERSION;
     style.textContent = `
       #${PANEL_ID} {
-        --gm-bg: #fcfcfc;
+        --gm-bg: #ffffff;
         --gm-bg-subtle: #f5f5f5;
         --gm-text: #141414;
         --gm-muted: #6b7280;
         --gm-border: #e5e7eb;
         --gm-accent: #7c3aed;
         --gm-accent-soft: #ede9fe;
-        margin-bottom: 24px;
-        padding: 24px;
+        margin-bottom: 20px;
+        padding: 18px 20px 16px;
         border-radius: 12px;
         background: var(--gm-bg);
         color: var(--gm-text);
-        box-shadow: 0 0 0 1px var(--gm-border);
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 0 0 1px var(--gm-border);
         font: inherit;
       }
       html.dark #${PANEL_ID} {
@@ -416,26 +1265,106 @@
       #${PANEL_ID} * { box-sizing: border-box; }
       #${PANEL_ID} .gm-cus-header {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: space-between;
-        gap: 16px;
-        margin-bottom: 18px;
+        gap: 12px;
+        margin-bottom: 14px;
       }
       #${PANEL_ID} .gm-cus-title {
         margin: 0;
         font-size: 16px;
-        font-weight: 600;
-        line-height: 1.3;
+        font-weight: 650;
+        line-height: 1.25;
       }
       #${PANEL_ID} .gm-cus-subtitle {
-        margin-top: 3px;
+        margin-top: 2px;
         color: var(--gm-muted);
         font-size: 12px;
+        line-height: 1.35;
       }
-      #${PANEL_ID} .gm-cus-refresh {
-        min-width: 34px;
-        height: 32px;
-        padding: 0 11px;
+      #${PANEL_ID} .gm-cus-header-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex: 0 0 auto;
+      }
+      #${PANEL_ID} .gm-cus-refresh,
+      #${PANEL_ID} .gm-cus-help-button {
+        min-width: 30px;
+        height: 28px;
+        padding: 0 8px;
+        border: 1px solid var(--gm-border);
+        border-radius: 7px;
+        background: var(--gm-bg-subtle);
+        color: var(--gm-text);
+        cursor: pointer;
+        font: inherit;
+        line-height: 1;
+      }
+      #${PANEL_ID} .gm-cus-help-button {
+        font-weight: 700;
+      }
+      #${PANEL_ID} .gm-cus-refresh:hover,
+      #${PANEL_ID} .gm-cus-help-button:hover { border-color: var(--gm-accent); }
+      #${PANEL_ID} .gm-cus-notice {
+        margin: 0 0 12px;
+        color: var(--gm-muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+      #${PANEL_ID} .gm-cus-disclaimer {
+        margin: 8px 2px 12px;
+        color: var(--gm-muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+      #${PANEL_ID} .gm-cus-disclaimer a {
+        color: var(--gm-accent);
+      }
+      #${PANEL_ID} .gm-cus-disclaimer .gm-cus-help-button {
+        min-width: 22px;
+        height: 20px;
+        margin-left: 4px;
+        padding: 0 6px;
+        vertical-align: middle;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .gm-cus-help-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: rgba(15, 23, 42, 0.45);
+      }
+      #${PANEL_ID} .gm-cus-help-modal {
+        width: min(560px, 100%);
+        max-height: min(80vh, 720px);
+        overflow: auto;
+        padding: 18px 18px 16px;
+        border-radius: 12px;
+        background: var(--gm-bg);
+        color: var(--gm-text);
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+        border: 1px solid var(--gm-border);
+      }
+      #${PANEL_ID} .gm-cus-help-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      #${PANEL_ID} .gm-cus-help-title {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 650;
+      }
+      #${PANEL_ID} .gm-cus-help-close {
+        min-width: 32px;
+        height: 30px;
         border: 1px solid var(--gm-border);
         border-radius: 7px;
         background: var(--gm-bg-subtle);
@@ -443,16 +1372,41 @@
         cursor: pointer;
         font: inherit;
       }
-      #${PANEL_ID} .gm-cus-refresh:hover { border-color: var(--gm-accent); }
+      #${PANEL_ID} .gm-cus-help-section {
+        margin: 0 0 12px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--gm-text);
+      }
+      #${PANEL_ID} .gm-cus-help-section h4 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        font-weight: 650;
+      }
+      #${PANEL_ID} .gm-cus-help-section p,
+      #${PANEL_ID} .gm-cus-help-section ul {
+        margin: 0 0 6px;
+        color: var(--gm-muted);
+      }
+      #${PANEL_ID} .gm-cus-help-section ul {
+        padding-left: 18px;
+      }
+      #${PANEL_ID} .gm-cus-help-section a {
+        color: var(--gm-accent);
+      }
+      #${PANEL_ID} .gm-cus-help-code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+      }
       #${PANEL_ID} .gm-cus-kpis {
         display: grid;
         grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 10px;
-        margin-bottom: 20px;
+        margin-bottom: 10px;
       }
       #${PANEL_ID} .gm-cus-kpi {
         min-width: 0;
-        padding: 13px 14px;
+        padding: 12px 13px;
         border: 1px solid var(--gm-border);
         border-radius: 9px;
         background: var(--gm-bg-subtle);
@@ -468,6 +1422,17 @@
         font-size: 22px;
         font-variant-numeric: tabular-nums;
         font-weight: 650;
+      }
+      #${PANEL_ID} .gm-cus-kpi-value[data-na="true"] {
+        color: var(--gm-muted);
+        font-size: 18px;
+        font-weight: 600;
+      }
+      #${PANEL_ID} .gm-cus-kpi-hint {
+        margin-top: 3px;
+        color: var(--gm-muted);
+        font-size: 10px;
+        line-height: 1.3;
       }
       #${PANEL_ID} .gm-cus-section-title {
         margin: 0;
@@ -577,7 +1542,7 @@
         display: flex;
         flex-wrap: wrap;
         gap: 7px 14px;
-        margin: 9px 2px 22px;
+        margin: 8px 2px 0;
         color: var(--gm-muted);
         font-size: 10px;
       }
@@ -604,7 +1569,7 @@
         white-space: nowrap;
       }
       #${PANEL_ID} .gm-cus-table-wrap {
-        max-height: 330px;
+        max-height: 280px;
         overflow: auto;
         border: 1px solid var(--gm-border);
         border-radius: 9px;
@@ -616,7 +1581,7 @@
       }
       #${PANEL_ID} th,
       #${PANEL_ID} td {
-        padding: 9px 11px;
+        padding: 7px 10px;
         border-bottom: 1px solid var(--gm-border);
         text-align: right;
         white-space: nowrap;
@@ -705,15 +1670,15 @@
       }
       #${PANEL_ID} .gm-cus-error { color: #dc2626; }
       @media (max-width: 820px) {
-        #${PANEL_ID} { padding: 16px; }
+        #${PANEL_ID} { padding: 14px; }
         #${PANEL_ID} .gm-cus-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         #${PANEL_ID} .gm-cus-section-head { align-items: flex-start; flex-direction: column; }
         #${PANEL_ID} .gm-cus-chart { gap: 3px; padding-inline: 5px; }
         #${PANEL_ID} .gm-cus-day { grid-template-rows: 18px 100px 18px 16px; }
         #${PANEL_ID} .gm-cus-bar-slot { height: 100px; }
+        #${PANEL_ID} .gm-cus-table-wrap { overflow-x: auto; }
       }
     `;
-    (document.head || document.documentElement).appendChild(style);
   }
 
   function findMountAnchor() {
@@ -743,13 +1708,143 @@
           <h2 class="gm-cus-title">Moje usage statistiky</h2>
           <div class="gm-cus-subtitle">${escapeHtml(subtitle)}</div>
         </div>
-        <button class="gm-cus-refresh" type="button" title="Obnovit statistiky" aria-label="Obnovit statistiky">↻</button>
+        <div class="gm-cus-header-actions">
+          <button class="gm-cus-help-button" type="button" title="Nápověda a changelog" aria-label="Nápověda a changelog">?</button>
+          <button class="gm-cus-refresh" type="button" title="Obnovit statistiky" aria-label="Obnovit statistiky">↻</button>
+        </div>
       </div>
     `;
   }
 
-  function bindPanelActions(panel) {
+  function closeHelpModal(panel) {
+    panel?.querySelector(".gm-cus-help-backdrop")?.remove();
+    if (panel?._gmHelpEscape) {
+      document.removeEventListener("keydown", panel._gmHelpEscape);
+      panel._gmHelpEscape = null;
+    }
+  }
+
+  function openHelpModal(panel, data) {
+    if (!panel) return;
+    closeHelpModal(panel);
+
+    const coverage = data?.estimateCoverage || {};
+    const priced = coverage.pricedCount || 0;
+    const total = coverage.onDemandCount || 0;
+    const pct = total ? Math.round((priced / total) * 1000) / 10 : null;
+    const unpriced = coverage.unpricedModels || [];
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "gm-cus-help-backdrop";
+    backdrop.setAttribute("role", "presentation");
+
+    const modal = document.createElement("div");
+    modal.className = "gm-cus-help-modal";
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-label", "Nápověda k odhadu ceny");
+
+    const head = document.createElement("div");
+    head.className = "gm-cus-help-head";
+    const title = document.createElement("h3");
+    title.className = "gm-cus-help-title";
+    title.textContent = `Nápověda · v${VERSION}`;
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "gm-cus-help-close";
+    closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", "Zavřít nápovědu");
+    closeBtn.textContent = "×";
+    head.append(title, closeBtn);
+
+    function addSection(heading, build) {
+      const section = document.createElement("section");
+      section.className = "gm-cus-help-section";
+      const h = document.createElement("h4");
+      h.textContent = heading;
+      section.appendChild(h);
+      build(section);
+      modal.appendChild(section);
+    }
+
+    modal.appendChild(head);
+
+    addSection("Exact vs odhad", (section) => {
+      const p1 = document.createElement("p");
+      p1.textContent =
+        "Skutečná útrata · cyklus pochází z usage-summary.onDemand.used (centy; ověřeno proti get-team-spend.spendCents).";
+      const p2 = document.createElement("p");
+      p2.textContent =
+        "Odhad on-demand ceny se počítá jen z ocenitelných On-Demand eventů podle veřejného ceníku. Included a Errored/No Charge = $0 paid.";
+      const p3 = document.createElement("p");
+      p3.textContent =
+        "Zahrnutá spotřeba (v tarifu · bez on-demand) = plan.breakdown.total / aggregate totalCostCents (jen Included), $0 paid — není fakturovaná útrata.";
+      const p4 = document.createElement("p");
+      p4.className = "gm-cus-help-code";
+      p4.textContent =
+        "odhad = (cacheWrite·cacheWriteRate + uncachedInput·input + cacheRead·cacheRead + output·output) / 1e6 (+ Cursor Token Rate $0.25/M u third-party na Teams)";
+      section.append(p1, p2, p3, p4);
+    });
+
+    addSection("Ceník", (section) => {
+      const p = document.createElement("p");
+      const link = document.createElement("a");
+      link.href = MODEL_PRICING.source;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = MODEL_PRICING.source;
+      p.append("Zdroj: ", link, ` · platnost snapshotu ${MODEL_PRICING.effectiveDate}.`);
+      section.appendChild(p);
+    });
+
+    addSection("Coverage odhadu", (section) => {
+      const p = document.createElement("p");
+      p.textContent = total
+        ? `Oceněno ${priced} / ${total} on-demand eventů${pct == null ? "" : ` (${pct} %).`}`
+        : "V cyklu zatím nejsou on-demand eventy k ocenění.";
+      section.appendChild(p);
+      if (unpriced.length) {
+        const label = document.createElement("p");
+        label.textContent = "Neoceněné modely:";
+        const ul = document.createElement("ul");
+        for (const name of unpriced) {
+          const li = document.createElement("li");
+          li.textContent = name;
+          ul.appendChild(li);
+        }
+        section.append(label, ul);
+      }
+    });
+
+    addSection("Changelog", (section) => {
+      const ul = document.createElement("ul");
+      for (const entry of CHANGELOG) {
+        const li = document.createElement("li");
+        li.textContent = `${entry.version}: ${entry.text}`;
+        ul.appendChild(li);
+      }
+      section.appendChild(ul);
+    });
+
+    backdrop.appendChild(modal);
+    panel.appendChild(backdrop);
+
+    const close = () => closeHelpModal(panel);
+    closeBtn.addEventListener("click", close);
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) close();
+    });
+    panel._gmHelpEscape = (event) => {
+      if (event.key === "Escape") close();
+    };
+    document.addEventListener("keydown", panel._gmHelpEscape);
+    closeBtn.focus();
+  }
+
+  function bindPanelActions(panel, data) {
     panel.querySelector(".gm-cus-refresh")?.addEventListener("click", () => scheduleLoad());
+    panel.querySelectorAll(".gm-cus-help-button").forEach((button) => {
+      button.addEventListener("click", () => openHelpModal(panel, data || currentData));
+    });
     panel.querySelectorAll(".gm-cus-range-button").forEach((button) => {
       button.addEventListener("click", () => {
         const nextRange = Number(button.dataset.range);
@@ -805,7 +1900,28 @@
   function renderLoading() {
     const panel = ensurePanel();
     if (!panel) return;
-    panel.innerHTML = `${headerHtml("Načítám kalendářní měsíc…")}<div class="gm-cus-status">Počítám usage události…</div>`;
+    panel.innerHTML = `${headerHtml("Načítám billing cyklus…")}<div class="gm-cus-status">Počítám usage události…</div>`;
+  }
+
+  function renderKpi(label, value, hint, title, options = {}) {
+    const textValue = options.textValue;
+    const incomplete = Boolean(options.incomplete);
+    const available = textValue != null
+      ? true
+      : value != null && Number.isFinite(Number(value));
+    let display = textValue != null
+      ? String(textValue)
+      : available
+        ? formatDollars(Number(value))
+        : "N/A";
+    if (available && incomplete && textValue == null) display = `${display}*`;
+    return `
+      <div class="gm-cus-kpi" title="${escapeHtml(title || hint || label)}">
+        <div class="gm-cus-kpi-label">${escapeHtml(label)}</div>
+        <div class="gm-cus-kpi-value" data-na="${available ? "false" : "true"}">${escapeHtml(display)}</div>
+        ${hint ? `<div class="gm-cus-kpi-hint">${escapeHtml(hint)}</div>` : ""}
+      </div>
+    `;
   }
 
   function renderWaiting() {
@@ -821,7 +1937,15 @@
       ${headerHtml("Statistiky se nepodařilo načíst")}
       <div class="gm-cus-status gm-cus-error">${escapeHtml(error?.message || error)}</div>
     `;
-    bindPanelActions(panel);
+    bindPanelActions(panel, null);
+  }
+
+  function formatCoverageLabel(coverage) {
+    if (!coverage || !coverage.onDemandCount) return "žádné on-demand eventy v cyklu";
+    const pct = coverage.coverageRatio == null
+      ? ""
+      : ` (${Math.round(coverage.coverageRatio * 1000) / 10} %)`;
+    return `${formatInteger(coverage.pricedCount)} / ${formatInteger(coverage.onDemandCount)} oceněných on-demand${pct}`;
   }
 
   function getChartSeries(days, models) {
@@ -858,11 +1982,12 @@
   }
 
   function getVisibleDayMetrics(day) {
+    const estimateByModel = day.modelEstimatedOnDemandSpend || day.modelSpend || {};
     return Object.entries(day.modelTokens).reduce(
       (result, [name, tokens]) => {
         if (!hiddenChartModels.has(name)) {
           result.tokens += tokens;
-          result.spend += day.modelSpend[name] || 0;
+          result.spend += estimateByModel[name] || 0;
         }
         return result;
       },
@@ -880,7 +2005,8 @@
         const visible = visibleMetrics.get(day.key);
         const visibleValue = visible[chartMetric];
         const height = visibleValue > 0 ? Math.max(2, Math.round((visibleValue / maxValue) * 100)) : 2;
-        const title = `${formatDay(day.timestamp, true)}: ${formatTokens(visible.tokens)} tokenů, ${formatDollars(visible.spend)}`;
+        const estimateByModel = day.modelEstimatedOnDemandSpend || day.modelSpend || {};
+        const title = `${formatDay(day.timestamp, true)}: ${formatTokens(visible.tokens)} tokenů, odhad on-demand ${formatDollars(visible.spend)}`;
         const segments = series
           .map((item) => {
             let tokens = 0;
@@ -889,24 +2015,27 @@
               for (const [name, value] of Object.entries(day.modelTokens)) {
                 if (topNames.has(name) || hiddenChartModels.has(name)) continue;
                 tokens += value;
-                spend += day.modelSpend[name] || 0;
+                spend += estimateByModel[name] || 0;
               }
             } else if (!hiddenChartModels.has(item.name)) {
               tokens = day.modelTokens[item.name] || 0;
-              spend = day.modelSpend[item.name] || 0;
+              spend = estimateByModel[item.name] || 0;
             }
             const segmentValue = chartMetric === "spend" ? spend : tokens;
             if (!segmentValue || !visibleValue) return "";
 
-            const segmentTitle = `${item.name}: ${formatTokens(tokens)} tokenů, ${formatDollars(spend)}`;
+            const segmentTitle = `${item.name}: ${formatTokens(tokens)} tokenů, odhad on-demand ${formatDollars(spend)}`;
             return `<div class="gm-cus-segment" style="height:${(segmentValue / visibleValue) * 100}%;background:${item.color}" title="${escapeHtml(segmentTitle)}"></div>`;
           })
           .join("");
+        const topLabel = chartMetric === "spend"
+          ? formatDollars(visible.spend)
+          : formatTokens(visible.tokens);
         return `
           <div class="gm-cus-day" title="${escapeHtml(title)}">
-            <div class="gm-cus-day-cost">${formatDollars(visible.spend)}</div>
+            <div class="gm-cus-day-cost">${escapeHtml(String(topLabel))}</div>
             <div class="gm-cus-bar-slot"><div class="gm-cus-bar" style="height:${height}%">${segments}</div></div>
-            <div class="gm-cus-day-tokens">${formatTokens(visible.tokens)} tok.</div>
+            <div class="gm-cus-day-tokens">${chartMetric === "spend" ? `${formatTokens(visible.tokens)} tok.` : formatDollars(visible.spend)}</div>
             <div class="gm-cus-day-label">${escapeHtml(formatDay(day.timestamp, true))}</div>
           </div>
         `;
@@ -932,10 +2061,35 @@
 
     return models
       .map((model) => {
-        const averageCall = model.paidCalls ? model.spend / model.paidCalls : 0;
-        const pricePerMillion = model.tokens ? (model.spend / model.tokens) * 1_000_000 : 0;
+        const estimated = model.estimatedOnDemandSpend || 0;
+        const pricedOnDemand = model.pricedOnDemandCalls || 0;
+        const unpricedOnDemand = model.unpricedOnDemandCalls || 0;
         const color = colorByModel.get(model.name) || OTHER_MODEL_COLOR;
         const active = !hiddenChartModels.has(model.name);
+        const onDemandCalls = model.onDemandCalls || 0;
+        const callsTitle = onDemandCalls
+          ? `${formatInteger(model.calls)} volání · ${formatInteger(onDemandCalls)} on-demand`
+          : `${formatInteger(model.calls)} volání · bez on-demand`;
+        let estimateCell = "—";
+        let estimateTitle = "On-demand volání bez mapovatelného ceníku (unknown/unpriced)";
+        let avgOnDemandCell = "—";
+        let pricePerMillionCell = "—";
+        if (onDemandCalls === 0) {
+          estimateCell = formatDollars(0);
+          estimateTitle = "Included / bez on-demand = $0 paid";
+        } else if (pricedOnDemand > 0 && unpricedOnDemand === 0) {
+          estimateCell = formatDollars(estimated);
+          estimateTitle = "Součet oceněných on-demand eventů dle veřejného ceníku";
+          avgOnDemandCell = formatDollars(estimated / pricedOnDemand);
+          if (model.tokens) pricePerMillionCell = formatDollars((estimated / model.tokens) * 1_000_000);
+        } else if (pricedOnDemand > 0) {
+          estimateCell = `${formatDollars(estimated)}*`;
+          estimateTitle = `Částečný odhad: ${pricedOnDemand}/${onDemandCalls} oceněných on-demand volání`;
+          avgOnDemandCell = `${formatDollars(estimated / pricedOnDemand)}*`;
+          if (model.tokens) {
+            pricePerMillionCell = `${formatDollars((estimated / model.tokens) * 1_000_000)}*`;
+          }
+        }
         return `
           <tr>
             <td title="${escapeHtml(model.name)}">
@@ -951,61 +2105,98 @@
                 <span class="gm-cus-model-name">${escapeHtml(model.name)}</span>
               </span>
             </td>
-            <td>${formatInteger(model.calls)}</td>
+            <td title="${escapeHtml(callsTitle)}">${formatInteger(model.calls)}</td>
             <td>${formatTokens(model.tokens)}</td>
-            <td>${formatDollars(model.spend)}</td>
-            <td>${model.paidCalls ? formatDollars(averageCall) : "—"}</td>
-            <td>${model.spend ? formatDollars(pricePerMillion) : "—"}</td>
+            <td title="${escapeHtml(estimateTitle)}">${escapeHtml(estimateCell)}</td>
+            <td title="Průměrný odhad na oceněné on-demand volání">${escapeHtml(avgOnDemandCell)}</td>
+            <td title="Odhad ceny na 1M tokenů (jen oceněné on-demand)">${escapeHtml(pricePerMillionCell)}</td>
           </tr>
         `;
       })
       .join("");
   }
 
+  function formatCycleRange(start, end) {
+    const opts = { day: "numeric", month: "numeric", year: "numeric", timeZone: "UTC" };
+    const startLabel = new Intl.DateTimeFormat("cs-CZ", opts).format(new Date(start));
+    if (end == null || !Number.isFinite(Number(end))) return startLabel;
+    const endLabel = new Intl.DateTimeFormat("cs-CZ", opts).format(new Date(end));
+    return `${startLabel} – ${endLabel}`;
+  }
+
   function renderStatistics(data) {
     const panel = ensurePanel();
     if (!panel) return;
+    closeHelpModal(panel);
     const chartDays = data.days.slice(-chartRangeDays);
     const chartSeries = getChartSeries(chartDays, data.models);
     const allModelsHidden = areAllChartModelsHidden(data.models);
 
-    const monthLabel = new Intl.DateTimeFormat("cs-CZ", {
-      month: "long",
-      year: "numeric",
-      timeZone: "UTC",
-    }).format(new Date(data.monthStart));
+    const cycleLabel = formatCycleRange(data.billingCycleStart, data.billingCycleEnd);
     const updatedLabel = new Intl.DateTimeFormat("cs-CZ", {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
     }).format(new Date(data.updatedAt));
+    const coverage = data.estimateCoverage || {};
+    const coverageLabel = formatCoverageLabel(coverage);
+    const coverageIncomplete = Boolean(
+      coverage.onDemandCount && coverage.pricedCount < coverage.onDemandCount,
+    );
+    const estimateUnavailable = Boolean(coverage.onDemandCount && !coverage.pricedCount);
+    const todayStart = utcDayStart(new Date(data.updatedAt));
+    const elapsedDays = Math.max(
+      1,
+      Math.floor((todayStart - data.billingCycleStart) / DAY_MS) + 1,
+    );
+    const estimatedDailyAverage = estimateUnavailable
+      ? null
+      : (data.estimatedOnDemandCycle || 0) / elapsedDays;
+    const estimateHint = coverage.onDemandCount
+      ? (coverageIncomplete ? `* coverage ${coverageLabel}` : null)
+      : null;
+    const estimateTitleSuffix = coverage.onDemandCount
+      ? ` Coverage: ${coverageLabel}.`
+      : " V cyklu nejsou on-demand eventy.";
 
     panel.innerHTML = `
-      ${headerHtml(`${monthLabel} · ${formatInteger(data.eventCount)} událostí · aktualizováno ${updatedLabel}`)}
+      ${headerHtml(`Billing cyklus ${cycleLabel} · ${formatInteger(data.eventCount)} událostí · aktualizováno ${updatedLabel}`)}
       <div class="gm-cus-kpis">
-        <div class="gm-cus-kpi">
-          <div class="gm-cus-kpi-label">Dnes (UTC)</div>
-          <div class="gm-cus-kpi-value">${formatDollars(data.todaySpend)}</div>
-        </div>
-        <div class="gm-cus-kpi">
-          <div class="gm-cus-kpi-label">Posledních 7 dní</div>
-          <div class="gm-cus-kpi-value">${formatDollars(data.sevenDaySpend)}</div>
-        </div>
-        <div class="gm-cus-kpi">
-          <div class="gm-cus-kpi-label">Tento měsíc</div>
-          <div class="gm-cus-kpi-value">${formatDollars(data.monthSpend)}</div>
-        </div>
-        <div class="gm-cus-kpi">
-          <div class="gm-cus-kpi-label">Průměr / den</div>
-          <div class="gm-cus-kpi-value">${formatDollars(data.dailyAverage)}</div>
-        </div>
+        ${renderKpi(
+          "Dnes (odhad)",
+          estimateUnavailable ? null : data.estimatedOnDemandToday,
+          estimateHint,
+          `Odhad on-demand ceny dnes (UTC) z tokenů dle veřejného ceníku.${estimateTitleSuffix}`,
+          { incomplete: coverageIncomplete && !estimateUnavailable },
+        )}
+        ${renderKpi(
+          "Posledních 7 dní (odhad)",
+          estimateUnavailable ? null : data.estimatedOnDemandSevenDay,
+          estimateHint,
+          `Odhad on-demand ceny za posledních 7 dní (UTC) dle veřejného ceníku.${estimateTitleSuffix}`,
+          { incomplete: coverageIncomplete && !estimateUnavailable },
+        )}
+        ${renderKpi(
+          "Útrata · cyklus",
+          data.paidSpendCycle,
+          null,
+          "Skutečná on-demand útrata za billing cyklus z usage-summary.onDemand.used. Included usage = $0.",
+        )}
+        ${renderKpi(
+          "Průměr / den (odhad)",
+          estimatedDailyAverage,
+          estimateHint,
+          `Odhad on-demand ceny za cyklus dělený ${elapsedDays} uplynulými dny (ne exact spend).${estimateTitleSuffix}`,
+          { incomplete: coverageIncomplete && !estimateUnavailable },
+        )}
       </div>
+      <p class="gm-cus-notice">${escapeHtml(SHORT_NOTICE_CS)}</p>
       <div class="gm-cus-section-head">
-        <h3 class="gm-cus-section-title">${chartMetric === "tokens" ? "Tokeny" : "Účtovaná cena"} podle modelu · posledních ${chartRangeDays} dní (UTC)</h3>
+        <h3 class="gm-cus-section-title">Tokeny a odhad ceny · posledních ${chartRangeDays} dní (UTC)</h3>
         <div class="gm-cus-chart-controls">
           <div class="gm-cus-range" aria-label="Metrika grafu">
             <button class="gm-cus-metric-button" type="button" data-metric="tokens" data-active="${chartMetric === "tokens"}" aria-pressed="${chartMetric === "tokens"}">Tokeny</button>
-            <button class="gm-cus-metric-button" type="button" data-metric="spend" data-active="${chartMetric === "spend"}" aria-pressed="${chartMetric === "spend"}">Cena</button>
+            <button class="gm-cus-metric-button" type="button" data-metric="spend" data-active="${chartMetric === "spend"}" aria-pressed="${chartMetric === "spend"}" title="Odhad on-demand ceny dle veřejného ceníku (jen oceněné eventy)">Odhad ceny</button>
           </div>
           <div class="gm-cus-range" aria-label="Rozsah grafu">
             <button class="gm-cus-range-button" type="button" data-range="7" data-active="${chartRangeDays === 7}" aria-pressed="${chartRangeDays === 7}">7 dní</button>
@@ -1013,11 +2204,18 @@
           </div>
         </div>
       </div>
-      <div class="gm-cus-chart" data-metric="${chartMetric}" style="--gm-day-count:${chartDays.length}" role="img" aria-label="Skládaný denní graf ${chartMetric === "tokens" ? "tokenů" : "nákladů"} za posledních ${chartRangeDays} dní">
+      <div class="gm-cus-chart" data-metric="${chartMetric}" style="--gm-day-count:${chartDays.length}" role="img" aria-label="Skládaný denní graf ${chartMetric === "tokens" ? "tokenů" : "odhadu on-demand ceny"} za posledních ${chartRangeDays} dní">
         ${renderChart(chartDays, chartSeries)}
       </div>
       <div class="gm-cus-legend">${renderLegend(chartSeries)}</div>
-      <div class="gm-cus-section-head"><h3 class="gm-cus-section-title">Modely · tento kalendářní měsíc</h3></div>
+      <p class="gm-cus-disclaimer">
+        ${escapeHtml(PRICE_DISCLAIMER_CS)}
+        Zdroj:
+        <a href="${escapeHtml(MODEL_PRICING.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(MODEL_PRICING.source)}</a>
+        · ${escapeHtml(MODEL_PRICING.effectiveDate)}.
+        <button class="gm-cus-help-button" type="button" title="Nápověda a changelog" aria-label="Nápověda a changelog">?</button>
+      </p>
+      <div class="gm-cus-section-head"><h3 class="gm-cus-section-title">Modely · billing cyklus</h3></div>
       <div class="gm-cus-table-wrap">
         <table>
           <thead>
@@ -1034,18 +2232,18 @@
                   <span>Model</span>
                 </span>
               </th>
-              <th>Volání</th>
+              <th title="Celková volání; počet on-demand je v tooltipu">Volání</th>
               <th>Tokeny</th>
-              <th>Útrata</th>
-              <th>Ø placené volání</th>
-              <th>Cena / 1M tok.</th>
+              <th title="Odhad ceny ocenitelných On-Demand eventů dle veřejného ceníku; Included = $0 paid; neoceněné = —">Odhad ceny</th>
+              <th title="Průměrný odhad na oceněné on-demand volání">Ø on-demand volání</th>
+              <th title="Odhad ceny na 1M tokenů (jen oceněné on-demand)">Cena / 1M tok.</th>
             </tr>
           </thead>
           <tbody>${renderModelRows(data.models, chartSeries)}</tbody>
         </table>
       </div>
     `;
-    bindPanelActions(panel);
+    bindPanelActions(panel, data);
   }
 
   function startUi() {
