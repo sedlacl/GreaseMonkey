@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Browser Bridge for Cursor Agent
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.2
+// @version      1.3
 // @description  Polls a local bridge server so a Cursor agent can execute JS and read results from your logged-in browser.
 // @author       Lukáš Sedláček
 // @match        *://*/*
@@ -17,6 +17,13 @@
   const FLAG = "__gmBrowserBridge";
   const PANEL_ID = "gm-browser-bridge-panel";
   const LOG_LIMIT = 40;
+
+  // Captcha / third-party iframes also match *://*/* and would steal /pending commands.
+  try {
+    if (window.top !== window) return;
+  } catch {
+    return;
+  }
 
   if (window[FLAG]) return;
   window[FLAG] = true;
@@ -212,12 +219,18 @@
     }
 
     if (command.type === "snapshot") {
+      let text = "";
+      try {
+        text = document.body?.innerText?.slice(0, 12000) || "";
+      } catch {
+        // Cross-origin / opaque frames may deny document.body.
+      }
       return {
         ok: true,
         result: {
           url: location.href,
           title: document.title,
-          text: document.body?.innerText?.slice(0, 12000) || "",
+          text,
         },
       };
     }
@@ -237,7 +250,7 @@
   }
 
   async function pollOnce() {
-    const response = await fetch(`${BRIDGE_URL}/pending`, { cache: "no-store" });
+    const response = await fetch(`${BRIDGE_URL}/pending?top=1`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     ui.setStatus("online", "online");

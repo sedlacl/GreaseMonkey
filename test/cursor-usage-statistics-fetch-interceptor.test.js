@@ -17,6 +17,7 @@ const {
   resolvePageWindow,
   isUsageRequest,
   installPageFetchInterceptor,
+  cloneFetchInitForPage,
   getChargedDollars,
   sumEventChargedDollars,
   parseUsageSummary,
@@ -104,13 +105,15 @@ const SCREENSHOT_GROK_FIXTURE = {
   chargedCents: 133.3092041015625,
 };
 
-test("userscript metadata is 1.3.11 and grants unsafeWindow", () => {
-  assert.equal(VERSION, "1.3.11");
-  assert.match(source, /@version\s+1\.3\.11\b/);
+test("userscript metadata is 1.3.12 and grants unsafeWindow", () => {
+  assert.equal(VERSION, "1.3.12");
+  assert.match(source, /@version\s+1\.3\.12\b/);
   assert.match(source, /@grant\s+unsafeWindow\b/);
   assert.doesNotMatch(source, /@grant\s+none\b/);
   assert.match(source, /installPageFetchInterceptor\s*\(/);
   assert.match(source, /resolvePageWindow\s*\(/);
+  assert.match(source, /cloneFetchInitForPage\s*\(/);
+  assert.match(source, /Permission denied to access property "body"/);
   assert.equal(AGG_ENDPOINT, "/api/dashboard/get-aggregated-usage-events");
   assert.equal(SUMMARY_ENDPOINT, "/api/usage-summary");
   // Paid spend and usage value must stay separated.
@@ -554,8 +557,9 @@ test("UI disclaimer and changelog copy are present for 1.3.11 native Cost", () =
   assert.match(source, /openHelpModal/);
   assert.match(source, /Escape/);
   const versions = CHANGELOG.map((entry) => entry.version);
-  assert.deepEqual(versions.slice(0, 5), ["1.3.11", "1.3.10", "1.3.9", "1.3.8", "1.3.7"]);
-  assert.match(CHANGELOG[0].text, /nativní per-event Cost|chargedCents/i);
+  assert.deepEqual(versions.slice(0, 5), ["1.3.12", "1.3.11", "1.3.10", "1.3.9", "1.3.8"]);
+  assert.match(CHANGELOG[0].text, /Firefox Xray|cloneInto/i);
+  assert.match(CHANGELOG[1].text, /nativní per-event Cost|chargedCents/i);
   assert.match(source, /Exact vs nativní Cost/);
   assert.match(source, /Coverage nativního Cost/);
   assert.match(source, /Ceník \(vypnutý fallback\)/);
@@ -711,6 +715,37 @@ test("resolvePageWindow prefers unsafeWindow over sandbox window", () => {
   assert.equal(resolvePageWindow(sandbox, page), page);
   assert.equal(resolvePageWindow(sandbox, undefined), sandbox);
   assert.equal(resolvePageWindow(sandbox, null), sandbox);
+});
+
+test("cloneFetchInitForPage uses cloneInto when available", () => {
+  const pageWindow = {};
+  const init = { method: "POST", body: "{\"a\":1}" };
+  const cloned = { method: "POST", body: "{\"a\":1}", cloned: true };
+  const previous = global.cloneInto;
+  global.cloneInto = (value, target, opts) => {
+    assert.equal(target, pageWindow);
+    assert.equal(opts.cloneFunctions, true);
+    assert.equal(value, init);
+    return cloned;
+  };
+  try {
+    assert.equal(cloneFetchInitForPage(pageWindow, init), cloned);
+    assert.equal(cloneFetchInitForPage(pageWindow, null), null);
+  } finally {
+    if (previous === undefined) delete global.cloneInto;
+    else global.cloneInto = previous;
+  }
+});
+
+test("cloneFetchInitForPage falls back to init without cloneInto", () => {
+  const init = { method: "GET" };
+  const previous = global.cloneInto;
+  delete global.cloneInto;
+  try {
+    assert.equal(cloneFetchInitForPage({}, init), init);
+  } finally {
+    if (previous !== undefined) global.cloneInto = previous;
+  }
 });
 
 test("installPageFetchInterceptor patches writable page window and keeps native fetch", async () => {
