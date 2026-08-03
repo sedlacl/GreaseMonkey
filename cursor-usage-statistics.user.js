@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cursor Usage Statistics
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3.10
-// @description  Adds on-demand spend, usage-value charts, catalog price estimates, and per-model statistics to the Cursor usage dashboard.
+// @version      1.3.11
+// @description  Adds on-demand spend from native Cursor Cost, usage-value charts, optional catalog fallback, and per-model statistics to the Cursor usage dashboard.
 // @author       Lukáš Sedláček
 // @match        https://cursor.com/dashboard/usage*
 // @grant        unsafeWindow
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.3.10";
+  const VERSION = "1.3.11";
   const USAGE_ENDPOINT = "/api/dashboard/get-filtered-usage-events";
   const AGG_ENDPOINT = "/api/dashboard/get-aggregated-usage-events";
   const SUMMARY_ENDPOINT = "/api/usage-summary";
@@ -29,6 +29,7 @@
    * Public catalog rates from https://cursor.com/docs/models-and-pricing (2026-07-31).
    * JSON-compatible, editable data only — no invented rates.
    * Prices are USD per 1M tokens. `cacheWrite: null` = no separate cache-write fee in docs.
+   * Emergency fallback only — see PRICE_ESTIMATION_FALLBACK_ENABLED.
    */
   const MODEL_PRICING = {
     currency: "USD",
@@ -144,13 +145,24 @@
     },
   };
 
+  /**
+   * Local MODEL_PRICING estimator is suppressed by default.
+   * Daily/model/graph costs use native per-event Cost (`chargedCents`).
+   * Set true only as an emergency fallback when native Cost is missing.
+   */
+  const PRICE_ESTIMATION_FALLBACK_ENABLED = false;
+
   const PRICE_DISCLAIMER_CS =
-    "Odhad podle veřejného ceníku Cursor, nikoli faktura. Skutečný billing se může lišit kvůli routování, slevám, příplatkům a změnám ceníku. Included = $0 paid.";
+    "Denní a modelové částky pocházejí z nativního sloupce Cost (API chargedCents). Included / Errored = $0. Exact cyklus = usage-summary.onDemand.used. Lokální ceníkový odhad je vypnutý.";
 
   const SHORT_NOTICE_CS =
-    "Denní částky jsou odhad z tokenů podle veřejného ceníku; cyklická útrata je skutečný on-demand údaj. Included usage = $0.";
+    "Čísla z nativního Cursor Cost; Included = $0; exact cyklus z billing API; lokální odhad vypnutý.";
 
   const CHANGELOG = [
+    {
+      version: "1.3.11",
+      text: "Nativní per-event Cost (chargedCents) pro denní/modelové sumy; lokální ceníkový odhad vypnutý (opt-in fallback).",
+    },
     {
       version: "1.3.10",
       text: "Zjednodušené UI podle původního panelu.",
@@ -182,9 +194,9 @@
   }
 
   /**
-   * Legacy per-event field. Semantics are ambiguous (historically looked like
-   * on-demand/request-units; currently often 0). Never treat as authoritative
-   * paid spend or as usage value — those come from usage-summary / aggregate.
+   * Legacy helper for On-Demand `chargedCents` only.
+   * Prefer resolveEventPaidCost — Included events may also carry non-zero
+   * chargedCents that must not count as paid Cost.
    */
   function getChargedDollars(event) {
     if (event?.kind !== "USAGE_EVENT_KIND_USAGE_BASED") return 0;
@@ -197,6 +209,22 @@
       sum += getChargedDollars(event);
     }
     return sum;
+  }
+
+  function hasNativeChargedCents(event) {
+    return event != null && isFiniteNumber(event.chargedCents);
+  }
+
+  /**
+   * Live-verified 2026-08-03 on cursor.com/dashboard/usage:
+   * native table Cost (USD) === chargedCents / 100 for On-Demand rows.
+   * usageBasedCosts ("$X.YY") omits cursorTokenFee and does not match Cost
+   * when fee > 0. tokenUsage.totalCents + cursorTokenFee ≈ chargedCents.
+   * No top-level `cost` field. Included may have non-zero chargedCents — not paid.
+   */
+  function parseNativeChargedCostDollars(event) {
+    if (!hasNativeChargedCents(event)) return null;
+    return centsToDollars(event.chargedCents);
   }
 
   /**
@@ -470,16 +498,16 @@
   }
 
   /**
-   * Catalog estimate for a single usage event.
+   * Catalog estimate for a single usage event (emergency fallback only).
    * Paid estimate only for On-Demand / USAGE_BASED. Included & Errored → $0 paid.
    * Max Mode +20 % is legacy-only and is never applied here (new pricing).
    */
   function estimateEventOnDemandPrice(event, pricing = MODEL_PRICING) {
     if (isIncludedEvent(event)) {
-      return { status: "included", dollars: 0, paidEstimate: 0, model: event?.model || null };
+      return { status: "included", dollars: 0, paidEstimate: 0, source: "included", model: event?.model || null };
     }
     if (isErroredNoChargeEvent(event)) {
-      return { status: "errored", dollars: 0, paidEstimate: 0, model: event?.model || null };
+      return { status: "errored", dollars: 0, paidEstimate: 0, source: "errored", model: event?.model || null };
     }
     if (!isOnDemandEvent(event)) {
       return {
@@ -487,6 +515,7 @@
         dollars: null,
         paidEstimate: null,
         reason: "not-on-demand",
+        source: null,
         model: event?.model || null,
       };
     }
@@ -498,6 +527,7 @@
         dollars: null,
         paidEstimate: null,
         reason: resolved.reason || "unknown-model",
+        source: null,
         model: event?.model || null,
         catalogKey: resolved.catalogKey,
       };
@@ -524,6 +554,7 @@
       dollars,
       paidEstimate: dollars,
       reason: null,
+      source: "catalog-estimate",
       model: event?.model || null,
       catalogKey: resolved.catalogKey,
       appliedFastMultiplier: mult,
@@ -534,7 +565,71 @@
     };
   }
 
-  function summarizeOnDemandEstimates(events, pricing = MODEL_PRICING) {
+  /**
+   * Primary paid-cost resolver for UI sums.
+   * 1) Included / Errored → $0
+   * 2) On-Demand native chargedCents → Cost dollars (unknown model still priced)
+   * 3) Missing native Cost → catalog estimator only if PRICE_ESTIMATION_FALLBACK_ENABLED
+   * 4) Otherwise unpriced (`—`), never invent $0
+   */
+  function resolveEventPaidCost(event, pricing = MODEL_PRICING, options = {}) {
+    const fallbackEnabled = options.fallbackEnabled ?? PRICE_ESTIMATION_FALLBACK_ENABLED;
+
+    if (isIncludedEvent(event)) {
+      return {
+        status: "included",
+        dollars: 0,
+        paidEstimate: 0,
+        source: "included",
+        model: event?.model || null,
+      };
+    }
+    if (isErroredNoChargeEvent(event)) {
+      return {
+        status: "errored",
+        dollars: 0,
+        paidEstimate: 0,
+        source: "errored",
+        model: event?.model || null,
+      };
+    }
+    if (!isOnDemandEvent(event)) {
+      return {
+        status: "unpriced",
+        dollars: null,
+        paidEstimate: null,
+        reason: "not-on-demand",
+        source: null,
+        model: event?.model || null,
+      };
+    }
+
+    const nativeDollars = parseNativeChargedCostDollars(event);
+    if (nativeDollars != null) {
+      return {
+        status: "priced",
+        dollars: nativeDollars,
+        paidEstimate: nativeDollars,
+        source: "native-chargedCents",
+        model: event?.model || null,
+      };
+    }
+
+    if (fallbackEnabled) {
+      return estimateEventOnDemandPrice(event, pricing);
+    }
+
+    return {
+      status: "unpriced",
+      dollars: null,
+      paidEstimate: null,
+      reason: "missing-native-cost",
+      source: null,
+      model: event?.model || null,
+    };
+  }
+
+  function summarizeOnDemandEstimates(events, pricing = MODEL_PRICING, options = {}) {
     let pricedCount = 0;
     let unpricedCount = 0;
     let onDemandCount = 0;
@@ -544,7 +639,7 @@
     for (const event of events || []) {
       if (!isOnDemandEvent(event)) continue;
       onDemandCount += 1;
-      const estimate = estimateEventOnDemandPrice(event, pricing);
+      const estimate = resolveEventPaidCost(event, pricing, options);
       if (estimate.status === "priced") {
         pricedCount += 1;
         estimatedDollars += estimate.dollars;
@@ -733,12 +828,15 @@
       INCLUDED_KIND,
       ERRORED_KIND,
       MODEL_PRICING,
+      PRICE_ESTIMATION_FALLBACK_ENABLED,
       PRICE_DISCLAIMER_CS,
       SHORT_NOTICE_CS,
       CHANGELOG,
       centsToDollars,
       getChargedDollars,
       sumEventChargedDollars,
+      hasNativeChargedCents,
+      parseNativeChargedCostDollars,
       parseUsageSummary,
       isOnDemandEvent,
       isIncludedEvent,
@@ -746,6 +844,7 @@
       getEventTokenBreakdown,
       resolveModelPricing,
       estimateEventOnDemandPrice,
+      resolveEventPaidCost,
       summarizeOnDemandEstimates,
       accumulateModelUsageValue,
       accumulateModelSpend,
@@ -888,7 +987,7 @@
       if (!agg) continue;
       day.usageValue = agg.usageValue;
       day.modelUsageValue = { ...agg.modelUsageValue };
-      // Keep day.spend / modelSpend as catalog on-demand estimates (not aggregate).
+      // Keep day.spend / modelSpend as native on-demand Cost sums (not aggregate).
       if (day.estimatedOnDemandSpend == null) day.estimatedOnDemandSpend = 0;
       day.spend = day.estimatedOnDemandSpend;
       day.modelSpend = { ...(day.modelEstimatedOnDemandSpend || {}) };
@@ -903,7 +1002,7 @@
         model.valuedCalls = model.calls;
       }
       model.paidCalls = model.valuedCalls;
-      // model.spend stays as estimated on-demand catalog dollars when present.
+      // model.spend stays as native on-demand Cost dollars when present.
       if (model.estimatedOnDemandSpend == null) model.estimatedOnDemandSpend = 0;
       model.spend = model.estimatedOnDemandSpend;
     }
@@ -951,7 +1050,8 @@
     data.dailyAverage = data.dailyAverageUsageValue;
     data.sevenDays = sevenDays;
     data.usageValueSource = "aggregated";
-    data.costSource = "aggregated-usage-value";
+    // Paid Cost remains native chargedCents; aggregate overlay is included usage value only.
+    if (!data.costSource) data.costSource = "native-chargedCents";
     return data;
   }
 
@@ -1030,9 +1130,9 @@
           statistics.planUsageValueCycle = overlay.cycleUsageValueTotal;
         }
       } catch (aggregateError) {
-        // Do not fall back to chargedCents — its paid/usage semantics are unproven.
+        // Aggregate overlay is optional; native Cost sums from events already apply.
         statistics.usageValueSource = null;
-        statistics.costSource = null;
+        if (!statistics.costSource) statistics.costSource = "native-chargedCents";
         statistics.usageValueError = String(aggregateError?.message || aggregateError);
       }
 
@@ -1097,7 +1197,7 @@
 
       const tokens = getTokenCount(event);
       const modelName = String(event.model || "Neznámý model");
-      const estimate = estimateEventOnDemandPrice(event);
+      const estimate = resolveEventPaidCost(event);
       const day = daily.get(utcDayKey(timestamp));
       if (day) {
         day.tokens += tokens;
@@ -1107,7 +1207,7 @@
           day.estimatedOnDemandSpend += estimate.dollars;
           day.modelEstimatedOnDemandSpend[modelName] =
             (day.modelEstimatedOnDemandSpend[modelName] || 0) + estimate.dollars;
-          // Chart "Odhad ceny" metric reads spend / modelSpend.
+          // Chart "Cena" metric reads spend / modelSpend (native Cost sums).
           day.spend = day.estimatedOnDemandSpend;
           day.modelSpend[modelName] = day.modelEstimatedOnDemandSpend[modelName];
         }
@@ -1163,12 +1263,12 @@
       billingCycleStart,
       billingCycleEnd: summaryMeta.billingCycleEnd ?? UNAVAILABLE,
       monthStart: billingCycleStart,
+      // Exact cycle KPI from billing API — may differ from event-sum below (range/pagination/timing).
       paidSpendCycle: summaryMeta.paidSpendCycle ?? UNAVAILABLE,
-      // Exact daily/model invoice spend is not in API — catalog estimates only.
-      paidSpendToday: UNAVAILABLE,
-      paidSpendSevenDay: UNAVAILABLE,
-      paidSpendDailyAvailable: false,
-      paidSpendPerModelAvailable: false,
+      paidSpendToday: estimatedOnDemandToday,
+      paidSpendSevenDay: estimatedOnDemandSevenDay,
+      paidSpendDailyAvailable: true,
+      paidSpendPerModelAvailable: true,
       estimatedOnDemandToday,
       estimatedOnDemandSevenDay,
       estimatedOnDemandCycle,
@@ -1200,7 +1300,7 @@
       eventCount: cycleEventCount,
       onDemandCallCount: cycleOnDemandCalls,
       usageValueSource: null,
-      costSource: null,
+      costSource: "native-chargedCents",
     };
   }
 
@@ -1742,7 +1842,7 @@
     modal.className = "gm-cus-help-modal";
     modal.setAttribute("role", "dialog");
     modal.setAttribute("aria-modal", "true");
-    modal.setAttribute("aria-label", "Nápověda k odhadu ceny");
+    modal.setAttribute("aria-label", "Nápověda k usage statistikám");
 
     const head = document.createElement("div");
     head.className = "gm-cus-help-head";
@@ -1768,43 +1868,49 @@
 
     modal.appendChild(head);
 
-    addSection("Exact vs odhad", (section) => {
+    addSection("Exact vs nativní Cost", (section) => {
       const p1 = document.createElement("p");
       p1.textContent =
         "Skutečná útrata · cyklus pochází z usage-summary.onDemand.used (centy; ověřeno proti get-team-spend.spendCents).";
       const p2 = document.createElement("p");
       p2.textContent =
-        "Odhad on-demand ceny se počítá jen z ocenitelných On-Demand eventů podle veřejného ceníku. Included a Errored/No Charge = $0 paid.";
+        "Denní, 7denní a modelové sumy = součet nativního sloupce Cost z get-filtered-usage-events (pole chargedCents / 100). Included a Errored/No Charge = $0 paid.";
       const p3 = document.createElement("p");
       p3.textContent =
-        "Zahrnutá spotřeba (v tarifu · bez on-demand) = plan.breakdown.total / aggregate totalCostCents (jen Included), $0 paid — není fakturovaná útrata.";
+        "Součet eventů za cyklus se může lišit od exact KPI kvůli rozsahu stránky, paginaci nebo timingu. Zahrnutá spotřeba (v tarifu · bez on-demand) = plan.breakdown.total / aggregate totalCostCents (jen Included), $0 paid.";
       const p4 = document.createElement("p");
       p4.className = "gm-cus-help-code";
       p4.textContent =
-        "odhad = (cacheWrite·cacheWriteRate + uncachedInput·input + cacheRead·cacheRead + output·output) / 1e6 (+ Cursor Token Rate $0.25/M u third-party na Teams)";
+        "Cost (USD) = chargedCents / 100 · usageBasedCosts („$X.YY“) vynechává cursorTokenFee a nemusí sedět na Cost";
       section.append(p1, p2, p3, p4);
     });
 
-    addSection("Ceník", (section) => {
+    addSection("Ceník (vypnutý fallback)", (section) => {
       const p = document.createElement("p");
       const link = document.createElement("a");
       link.href = MODEL_PRICING.source;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
       link.textContent = MODEL_PRICING.source;
-      p.append("Zdroj: ", link, ` · platnost snapshotu ${MODEL_PRICING.effectiveDate}.`);
+      p.append(
+        "Lokální katalog je nouzový fallback (PRICE_ESTIMATION_FALLBACK_ENABLED = ",
+        String(PRICE_ESTIMATION_FALLBACK_ENABLED),
+        "). Zdroj: ",
+        link,
+        ` · snapshot ${MODEL_PRICING.effectiveDate}.`,
+      );
       section.appendChild(p);
     });
 
-    addSection("Coverage odhadu", (section) => {
+    addSection("Coverage nativního Cost", (section) => {
       const p = document.createElement("p");
       p.textContent = total
-        ? `Oceněno ${priced} / ${total} on-demand eventů${pct == null ? "" : ` (${pct} %).`}`
-        : "V cyklu zatím nejsou on-demand eventy k ocenění.";
+        ? `On-Demand eventy s vyplněným nativním Cost: ${priced} / ${total}${pct == null ? "" : ` (${pct} %).`}`
+        : "V cyklu zatím nejsou on-demand eventy.";
       section.appendChild(p);
       if (unpriced.length) {
         const label = document.createElement("p");
-        label.textContent = "Neoceněné modely:";
+        label.textContent = "Modely s chybějícím nativním Cost:";
         const ul = document.createElement("ul");
         for (const name of unpriced) {
           const li = document.createElement("li");
@@ -1945,7 +2051,7 @@
     const pct = coverage.coverageRatio == null
       ? ""
       : ` (${Math.round(coverage.coverageRatio * 1000) / 10} %)`;
-    return `${formatInteger(coverage.pricedCount)} / ${formatInteger(coverage.onDemandCount)} oceněných on-demand${pct}`;
+    return `${formatInteger(coverage.pricedCount)} / ${formatInteger(coverage.onDemandCount)} on-demand s nativním Cost${pct}`;
   }
 
   function getChartSeries(days, models) {
@@ -2006,7 +2112,7 @@
         const visibleValue = visible[chartMetric];
         const height = visibleValue > 0 ? Math.max(2, Math.round((visibleValue / maxValue) * 100)) : 2;
         const estimateByModel = day.modelEstimatedOnDemandSpend || day.modelSpend || {};
-        const title = `${formatDay(day.timestamp, true)}: ${formatTokens(visible.tokens)} tokenů, odhad on-demand ${formatDollars(visible.spend)}`;
+        const title = `${formatDay(day.timestamp, true)}: ${formatTokens(visible.tokens)} tokenů, účtovaná cena ${formatDollars(visible.spend)}`;
         const segments = series
           .map((item) => {
             let tokens = 0;
@@ -2024,7 +2130,7 @@
             const segmentValue = chartMetric === "spend" ? spend : tokens;
             if (!segmentValue || !visibleValue) return "";
 
-            const segmentTitle = `${item.name}: ${formatTokens(tokens)} tokenů, odhad on-demand ${formatDollars(spend)}`;
+            const segmentTitle = `${item.name}: ${formatTokens(tokens)} tokenů, účtovaná cena ${formatDollars(spend)}`;
             return `<div class="gm-cus-segment" style="height:${(segmentValue / visibleValue) * 100}%;background:${item.color}" title="${escapeHtml(segmentTitle)}"></div>`;
           })
           .join("");
@@ -2071,7 +2177,7 @@
           ? `${formatInteger(model.calls)} volání · ${formatInteger(onDemandCalls)} on-demand`
           : `${formatInteger(model.calls)} volání · bez on-demand`;
         let estimateCell = "—";
-        let estimateTitle = "On-demand volání bez mapovatelného ceníku (unknown/unpriced)";
+        let estimateTitle = "On-demand volání bez nativního Cost (chargedCents chybí)";
         let avgOnDemandCell = "—";
         let pricePerMillionCell = "—";
         if (onDemandCalls === 0) {
@@ -2079,12 +2185,12 @@
           estimateTitle = "Included / bez on-demand = $0 paid";
         } else if (pricedOnDemand > 0 && unpricedOnDemand === 0) {
           estimateCell = formatDollars(estimated);
-          estimateTitle = "Součet oceněných on-demand eventů dle veřejného ceníku";
+          estimateTitle = "Součet nativních On-Demand Cost (chargedCents)";
           avgOnDemandCell = formatDollars(estimated / pricedOnDemand);
           if (model.tokens) pricePerMillionCell = formatDollars((estimated / model.tokens) * 1_000_000);
         } else if (pricedOnDemand > 0) {
           estimateCell = `${formatDollars(estimated)}*`;
-          estimateTitle = `Částečný odhad: ${pricedOnDemand}/${onDemandCalls} oceněných on-demand volání`;
+          estimateTitle = `Částečný nativní Cost: ${pricedOnDemand}/${onDemandCalls} on-demand s vyplněným Cost`;
           avgOnDemandCell = `${formatDollars(estimated / pricedOnDemand)}*`;
           if (model.tokens) {
             pricePerMillionCell = `${formatDollars((estimated / model.tokens) * 1_000_000)}*`;
@@ -2108,8 +2214,8 @@
             <td title="${escapeHtml(callsTitle)}">${formatInteger(model.calls)}</td>
             <td>${formatTokens(model.tokens)}</td>
             <td title="${escapeHtml(estimateTitle)}">${escapeHtml(estimateCell)}</td>
-            <td title="Průměrný odhad na oceněné on-demand volání">${escapeHtml(avgOnDemandCell)}</td>
-            <td title="Odhad ceny na 1M tokenů (jen oceněné on-demand)">${escapeHtml(pricePerMillionCell)}</td>
+            <td title="Průměr nativního Cost na oceněné on-demand volání">${escapeHtml(avgOnDemandCell)}</td>
+            <td title="Účtovaná cena na 1M tokenů (jen on-demand s nativním Cost)">${escapeHtml(pricePerMillionCell)}</td>
           </tr>
         `;
       })
@@ -2163,40 +2269,40 @@
       ${headerHtml(`Billing cyklus ${cycleLabel} · ${formatInteger(data.eventCount)} událostí · aktualizováno ${updatedLabel}`)}
       <div class="gm-cus-kpis">
         ${renderKpi(
-          "Dnes (odhad)",
+          "Dnes (UTC)",
           estimateUnavailable ? null : data.estimatedOnDemandToday,
           estimateHint,
-          `Odhad on-demand ceny dnes (UTC) z tokenů dle veřejného ceníku.${estimateTitleSuffix}`,
+          `Součet nativních On-Demand Cost dnes (UTC).${estimateTitleSuffix}`,
           { incomplete: coverageIncomplete && !estimateUnavailable },
         )}
         ${renderKpi(
-          "Posledních 7 dní (odhad)",
+          "Posledních 7 dní",
           estimateUnavailable ? null : data.estimatedOnDemandSevenDay,
           estimateHint,
-          `Odhad on-demand ceny za posledních 7 dní (UTC) dle veřejného ceníku.${estimateTitleSuffix}`,
+          `Součet nativních On-Demand Cost za posledních 7 dní (UTC).${estimateTitleSuffix}`,
           { incomplete: coverageIncomplete && !estimateUnavailable },
         )}
         ${renderKpi(
           "Útrata · cyklus",
           data.paidSpendCycle,
           null,
-          "Skutečná on-demand útrata za billing cyklus z usage-summary.onDemand.used. Included usage = $0.",
+          "Exact on-demand útrata za billing cyklus z usage-summary.onDemand.used (kontrolní reference vůči get-team-spend.spendCents). Eventový součet se může lišit. Included = $0.",
         )}
         ${renderKpi(
-          "Průměr / den (odhad)",
+          "Průměr / den",
           estimatedDailyAverage,
           estimateHint,
-          `Odhad on-demand ceny za cyklus dělený ${elapsedDays} uplynulými dny (ne exact spend).${estimateTitleSuffix}`,
+          `Součet nativních On-Demand Cost za cyklus dělený ${elapsedDays} uplynulými dny (ne exact billing KPI).${estimateTitleSuffix}`,
           { incomplete: coverageIncomplete && !estimateUnavailable },
         )}
       </div>
       <p class="gm-cus-notice">${escapeHtml(SHORT_NOTICE_CS)}</p>
       <div class="gm-cus-section-head">
-        <h3 class="gm-cus-section-title">Tokeny a odhad ceny · posledních ${chartRangeDays} dní (UTC)</h3>
+        <h3 class="gm-cus-section-title">Tokeny a účtovaná cena · posledních ${chartRangeDays} dní (UTC)</h3>
         <div class="gm-cus-chart-controls">
           <div class="gm-cus-range" aria-label="Metrika grafu">
             <button class="gm-cus-metric-button" type="button" data-metric="tokens" data-active="${chartMetric === "tokens"}" aria-pressed="${chartMetric === "tokens"}">Tokeny</button>
-            <button class="gm-cus-metric-button" type="button" data-metric="spend" data-active="${chartMetric === "spend"}" aria-pressed="${chartMetric === "spend"}" title="Odhad on-demand ceny dle veřejného ceníku (jen oceněné eventy)">Odhad ceny</button>
+            <button class="gm-cus-metric-button" type="button" data-metric="spend" data-active="${chartMetric === "spend"}" aria-pressed="${chartMetric === "spend"}" title="Nativní On-Demand Cost (chargedCents)">Cena</button>
           </div>
           <div class="gm-cus-range" aria-label="Rozsah grafu">
             <button class="gm-cus-range-button" type="button" data-range="7" data-active="${chartRangeDays === 7}" aria-pressed="${chartRangeDays === 7}">7 dní</button>
@@ -2204,15 +2310,12 @@
           </div>
         </div>
       </div>
-      <div class="gm-cus-chart" data-metric="${chartMetric}" style="--gm-day-count:${chartDays.length}" role="img" aria-label="Skládaný denní graf ${chartMetric === "tokens" ? "tokenů" : "odhadu on-demand ceny"} za posledních ${chartRangeDays} dní">
+      <div class="gm-cus-chart" data-metric="${chartMetric}" style="--gm-day-count:${chartDays.length}" role="img" aria-label="Skládaný denní graf ${chartMetric === "tokens" ? "tokenů" : "účtované ceny"} za posledních ${chartRangeDays} dní">
         ${renderChart(chartDays, chartSeries)}
       </div>
       <div class="gm-cus-legend">${renderLegend(chartSeries)}</div>
       <p class="gm-cus-disclaimer">
         ${escapeHtml(PRICE_DISCLAIMER_CS)}
-        Zdroj:
-        <a href="${escapeHtml(MODEL_PRICING.source)}" target="_blank" rel="noopener noreferrer">${escapeHtml(MODEL_PRICING.source)}</a>
-        · ${escapeHtml(MODEL_PRICING.effectiveDate)}.
         <button class="gm-cus-help-button" type="button" title="Nápověda a changelog" aria-label="Nápověda a changelog">?</button>
       </p>
       <div class="gm-cus-section-head"><h3 class="gm-cus-section-title">Modely · billing cyklus</h3></div>
@@ -2234,9 +2337,9 @@
               </th>
               <th title="Celková volání; počet on-demand je v tooltipu">Volání</th>
               <th>Tokeny</th>
-              <th title="Odhad ceny ocenitelných On-Demand eventů dle veřejného ceníku; Included = $0 paid; neoceněné = —">Odhad ceny</th>
-              <th title="Průměrný odhad na oceněné on-demand volání">Ø on-demand volání</th>
-              <th title="Odhad ceny na 1M tokenů (jen oceněné on-demand)">Cena / 1M tok.</th>
+              <th title="Součet nativních On-Demand Cost (chargedCents); Included = $0; chybějící Cost = —">Útrata</th>
+              <th title="Průměr nativního Cost na oceněné on-demand volání">Ø placené volání</th>
+              <th title="Účtovaná cena na 1M tokenů (jen on-demand s nativním Cost)">Cena / 1M tok.</th>
             </tr>
           </thead>
           <tbody>${renderModelRows(data.models, chartSeries)}</tbody>

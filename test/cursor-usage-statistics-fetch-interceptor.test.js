@@ -23,13 +23,18 @@ const {
   isOnDemandEvent,
   ON_DEMAND_KIND,
   INCLUDED_KIND,
+  ERRORED_KIND,
   MODEL_PRICING,
+  PRICE_ESTIMATION_FALLBACK_ENABLED,
   PRICE_DISCLAIMER_CS,
   SHORT_NOTICE_CS,
   CHANGELOG,
   getEventTokenBreakdown,
   resolveModelPricing,
   estimateEventOnDemandPrice,
+  resolveEventPaidCost,
+  parseNativeChargedCostDollars,
+  hasNativeChargedCents,
   summarizeOnDemandEstimates,
   accumulateModelUsageValue,
   accumulateModelSpend,
@@ -56,9 +61,52 @@ function createWritablePageWindow(nativeFetch) {
   return { fetch: nativeFetch };
 }
 
-test("userscript metadata is 1.3.10 and grants unsafeWindow", () => {
-  assert.equal(VERSION, "1.3.10");
-  assert.match(source, /@version\s+1\.3\.10\b/);
+/**
+ * Anonymized live shape from get-filtered-usage-events (2026-08-03).
+ * Native dashboard Cost for this On-Demand row: 0,38 US$.
+ * usageBasedCosts "$0.32" deliberately differs (omits cursorTokenFee).
+ */
+const SCREENSHOT_ON_DEMAND_FIXTURE = {
+  timestamp: "1785768736236",
+  model: "gpt-5.6-sol-high-fast",
+  kind: ON_DEMAND_KIND,
+  requestsCosts: 7.900000095367432,
+  usageBasedCosts: "$0.32",
+  isTokenBasedCall: true,
+  tokenUsage: {
+    inputTokens: 1200,
+    outputTokens: 800,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 252898,
+    totalCents: 31.662700653076172,
+  },
+  cursorTokenFee: 6.37244987487793,
+  isChargeable: true,
+  chargedCents: 38.03514862060547,
+};
+
+const SCREENSHOT_GROK_FIXTURE = {
+  timestamp: "1785768551468",
+  model: "cursor-grok-4.5-high-fast",
+  kind: ON_DEMAND_KIND,
+  requestsCosts: 33.29999923706055,
+  usageBasedCosts: "$1.33",
+  isTokenBasedCall: true,
+  tokenUsage: {
+    inputTokens: 50000,
+    outputTokens: 4000,
+    cacheWriteTokens: 0,
+    cacheReadTokens: 857917,
+    totalCents: 133.3092041015625,
+  },
+  cursorTokenFee: 0,
+  isChargeable: true,
+  chargedCents: 133.3092041015625,
+};
+
+test("userscript metadata is 1.3.11 and grants unsafeWindow", () => {
+  assert.equal(VERSION, "1.3.11");
+  assert.match(source, /@version\s+1\.3\.11\b/);
   assert.match(source, /@grant\s+unsafeWindow\b/);
   assert.doesNotMatch(source, /@grant\s+none\b/);
   assert.match(source, /installPageFetchInterceptor\s*\(/);
@@ -69,16 +117,19 @@ test("userscript metadata is 1.3.10 and grants unsafeWindow", () => {
   assert.match(source, /parseUsageSummary/);
   assert.match(source, /Never promote it to/);
   assert.match(source, /Zahrnutá spotřeba/);
-  assert.match(source, /Skutečná on-demand útrata za billing cyklus/);
+  assert.match(source, /usage-summary\.onDemand\.used/);
   assert.doesNotMatch(source, /Always prefer aggregate token spend/);
-  // Must not fall back chargedCents into Útrata / paid KPIs.
+  // Must not fall back chargedCents into Útrata via aggregate overlay path.
   assert.doesNotMatch(source, /statistics\.costSource = "chargedCents"/);
+  assert.match(source, /costSource: "native-chargedCents"/);
   // Regression: never wrap native fetch Promise with .then() / async (GM/Firefox Xray).
   assert.doesNotMatch(
     source,
     /return nativeFetch\(input, init\)\.then\s*\(/,
   );
   assert.match(source, /Permission denied to access object/);
+  assert.equal(PRICE_ESTIMATION_FALLBACK_ENABLED, false);
+  assert.match(source, /PRICE_ESTIMATION_FALLBACK_ENABLED = false/);
 });
 
 test("getChargedDollars keeps legacy chargedCents path but is not authoritative paid", () => {
@@ -91,7 +142,138 @@ test("getChargedDollars keeps legacy chargedCents path but is not authoritative 
     0,
   );
   assert.equal(centsToDollars(16250.98587), 162.5098587);
-  assert.match(source, /Never treat as authoritative[\s\S]*?paid spend/);
+  assert.match(source, /Prefer resolveEventPaidCost/);
+});
+
+test("native Cost parser matches screenshot On-Demand Cost unit (chargedCents / 100)", () => {
+  assert.equal(hasNativeChargedCents(SCREENSHOT_ON_DEMAND_FIXTURE), true);
+  const dollars = parseNativeChargedCostDollars(SCREENSHOT_ON_DEMAND_FIXTURE);
+  assert.ok(dollars != null);
+  assert.equal(Number(dollars.toFixed(2)), 0.38);
+  assert.equal(Number(parseNativeChargedCostDollars(SCREENSHOT_GROK_FIXTURE).toFixed(2)), 1.33);
+  assert.equal(
+    Number(
+      (
+        parseNativeChargedCostDollars(SCREENSHOT_ON_DEMAND_FIXTURE) +
+        parseNativeChargedCostDollars(SCREENSHOT_GROK_FIXTURE)
+      ).toFixed(2),
+    ),
+    1.71,
+  );
+  // usageBasedCosts string is NOT the Cost column when cursorTokenFee > 0.
+  assert.equal(SCREENSHOT_ON_DEMAND_FIXTURE.usageBasedCosts, "$0.32");
+  assert.notEqual(Number(String(SCREENSHOT_ON_DEMAND_FIXTURE.usageBasedCosts).replace(/[$,]/g, "")), 0.38);
+  assert.equal(parseNativeChargedCostDollars({ kind: ON_DEMAND_KIND }), null);
+  assert.equal(parseNativeChargedCostDollars({ kind: ON_DEMAND_KIND, chargedCents: "x" }), null);
+});
+
+test("resolveEventPaidCost prefers native Cost over catalog estimator", () => {
+  const divergent = {
+    ...SCREENSHOT_ON_DEMAND_FIXTURE,
+    // Force a billed Cost that cannot equal the catalog token estimate.
+    chargedCents: 999,
+  };
+  const native = resolveEventPaidCost(divergent);
+  assert.equal(native.status, "priced");
+  assert.equal(native.source, "native-chargedCents");
+  assert.equal(native.dollars, 9.99);
+
+  const catalog = estimateEventOnDemandPrice(divergent);
+  assert.equal(catalog.status, "priced");
+  assert.equal(catalog.source, "catalog-estimate");
+  assert.notEqual(Number(catalog.dollars.toFixed(2)), 9.99);
+
+  // Screenshot fixture still parses to the native Cost column value.
+  assert.equal(Number(resolveEventPaidCost(SCREENSHOT_ON_DEMAND_FIXTURE).dollars.toFixed(2)), 0.38);
+
+  // Unknown / unpriced catalog model with native Cost is still priced.
+  const unknownNative = resolveEventPaidCost({
+    kind: ON_DEMAND_KIND,
+    model: "totally-unknown-model-xyz",
+    chargedCents: 50,
+    tokenUsage: { inputTokens: 1000, outputTokens: 1000 },
+  });
+  assert.equal(unknownNative.status, "priced");
+  assert.equal(unknownNative.dollars, 0.5);
+  assert.equal(unknownNative.source, "native-chargedCents");
+});
+
+test("default suppression: missing native Cost stays unpriced; Included/Errored = $0", () => {
+  assert.equal(PRICE_ESTIMATION_FALLBACK_ENABLED, false);
+  const missing = resolveEventPaidCost({
+    kind: ON_DEMAND_KIND,
+    model: "gpt-5.6-sol-high-fast",
+    tokenUsage: { inputTokens: 1e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  assert.equal(missing.status, "unpriced");
+  assert.equal(missing.dollars, null);
+  assert.equal(missing.reason, "missing-native-cost");
+
+  const included = resolveEventPaidCost({
+    kind: INCLUDED_KIND,
+    model: "cursor-grok-4.5-high-fast",
+    chargedCents: 214.19119262695312,
+    usageBasedCosts: "-",
+    tokenUsage: { totalCents: 214.19119262695312, inputTokens: 1000, outputTokens: 100 },
+  });
+  assert.equal(included.status, "included");
+  assert.equal(included.dollars, 0);
+
+  const errored = resolveEventPaidCost({
+    kind: ERRORED_KIND,
+    model: "cursor-grok-4.5-high",
+    chargedCents: 0,
+    usageBasedCosts: "$0.00",
+  });
+  assert.equal(errored.status, "errored");
+  assert.equal(errored.dollars, 0);
+
+  const summary = summarizeOnDemandEstimates([
+    SCREENSHOT_ON_DEMAND_FIXTURE,
+    {
+      kind: ON_DEMAND_KIND,
+      model: "gpt-5.6-terra-medium",
+      tokenUsage: { inputTokens: 1e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    },
+  ]);
+  assert.equal(summary.onDemandCount, 2);
+  assert.equal(summary.pricedCount, 1);
+  assert.equal(summary.unpricedCount, 1);
+  assert.equal(Number(summary.estimatedDollars.toFixed(2)), 0.38);
+});
+
+test("opt-in PRICE_ESTIMATION_FALLBACK_ENABLED can still use catalog estimator", () => {
+  const priced = resolveEventPaidCost(
+    {
+      kind: ON_DEMAND_KIND,
+      model: "gpt-5.6-sol-high-fast",
+      tokenUsage: {
+        inputTokens: 834,
+        cacheWriteTokens: 7390,
+        cacheReadTokens: 225091,
+        outputTokens: 2846,
+      },
+    },
+    MODEL_PRICING,
+    { fallbackEnabled: true },
+  );
+  assert.equal(priced.status, "priced");
+  assert.equal(priced.source, "catalog-estimate");
+  assert.ok(priced.dollars > 0);
+
+  const summary = summarizeOnDemandEstimates(
+    [
+      {
+        kind: ON_DEMAND_KIND,
+        model: "gpt-5.6-terra-medium",
+        tokenUsage: { inputTokens: 1e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      },
+    ],
+    MODEL_PRICING,
+    { fallbackEnabled: true },
+  );
+  assert.equal(summary.pricedCount, 1);
+  assert.ok(Math.abs(summary.estimatedDollars - 2.25) < 1e-9);
 });
 
 test("parseUsageSummary separates paid on-demand from included pool usage", () => {
@@ -213,28 +395,28 @@ test("aggregate parsers expose usage value and sum duplicate modelIntent tiers",
   ]));
 });
 
-test("UI copy never labels aggregate totalCostCents as paid Útrata", () => {
-  assert.match(source, /Skutečná útrata · cyklus/);
+test("UI copy uses native Cost labels without ODHAD in main panel", () => {
+  assert.match(source, /Útrata · cyklus/);
   assert.match(source, /usage-summary\.onDemand\.used/);
   assert.match(source, /Zahrnutá spotřeba \(v tarifu · bez on-demand\)/);
   assert.match(source, /aggregate totalCostCents \(jen Included\)/);
-  assert.doesNotMatch(source, /<th>Útrata<\/th>/);
-  // Compact table: odhad instead of aggregate "Hodnota spotřeby" as paid-looking spend.
+  assert.match(source, /<th[^>]*>Útrata<\/th>/);
   assert.doesNotMatch(source, /Hodnota spotřeby<\/th>/);
-  assert.match(source, /Odhad ceny<\/th>/);
-  assert.match(source, />Odhad ceny</);
-  assert.match(source, /Ø on-demand volání<\/th>/);
+  assert.doesNotMatch(source, /Odhad ceny<\/th>/);
+  assert.match(source, />Cena</);
+  assert.match(source, /Ø placené volání<\/th>/);
   assert.match(source, /Cena \/ 1M tok\.<\/th>/);
+  assert.match(source, /Tokeny a účtovaná cena/);
+  assert.doesNotMatch(source, /Tokeny a odhad ceny/);
 });
 
-test("UI explains why aggregate is far below on-demand spend", () => {
-  // The aggregate prices Included events only; on-demand events return 0 cents.
+test("UI explains aggregate vs on-demand and native Cost source", () => {
   assert.match(source, /prices \*included\* events only/);
   assert.match(source, /get-team-spend\.spendCents/);
   assert.match(source, /includedSpendCents/);
-  // On-demand call counts must be surfaced so $0 model rows are explainable.
   assert.match(source, /onDemandCalls/);
-  assert.match(source, /Odhad on-demand ceny/);
+  assert.match(source, /native-chargedCents/);
+  assert.match(source, /chargedCents \/ 100/);
 });
 
 test("price catalog shape matches docs snapshot metadata", () => {
@@ -303,7 +485,7 @@ test("estimateEventOnDemandPrice computes synthetic on-demand event exactly", ()
   assert.ok(Math.abs(priced.dollars - expected) < 1e-9);
 });
 
-test("Included and Errored events have $0 paid estimate; unknown stays unpriced", () => {
+test("catalog estimator: Included/Errored $0; unknown unpriced without native Cost", () => {
   assert.equal(
     estimateEventOnDemandPrice({
       kind: INCLUDED_KIND,
@@ -335,21 +517,9 @@ test("Included and Errored events have $0 paid estimate; unknown stays unpriced"
   });
   assert.equal(unknown.status, "unpriced");
   assert.equal(unknown.dollars, null);
-
-  const summary = summarizeOnDemandEstimates([
-    { kind: ON_DEMAND_KIND, model: "gpt-5.6-terra-medium", tokenUsage: { inputTokens: 1e6, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } },
-    { kind: ON_DEMAND_KIND, model: "agent_review", tokenUsage: { inputTokens: 1e6, outputTokens: 0 } },
-    { kind: INCLUDED_KIND, model: "gpt-5.6-sol", tokenUsage: { inputTokens: 1e6, outputTokens: 0 } },
-  ]);
-  assert.equal(summary.onDemandCount, 2);
-  assert.equal(summary.pricedCount, 1);
-  assert.equal(summary.unpricedCount, 1);
-  assert.deepEqual(summary.unpricedModels, ["agent_review"]);
-  // 1M input * $2/M + Cursor Token Rate $0.25/M
-  assert.ok(Math.abs(summary.estimatedDollars - 2.25) < 1e-9);
 });
 
-test("Cursor Token Rate applies to third-party only; Cursor pool models stay unpriced", () => {
+test("Cursor Token Rate applies to third-party only; Cursor pool models stay unpriced in catalog", () => {
   const thirdParty = estimateEventOnDemandPrice({
     kind: ON_DEMAND_KIND,
     model: "gpt-5.4-medium",
@@ -368,12 +538,14 @@ test("Cursor Token Rate applies to third-party only; Cursor pool models stay unp
   assert.equal(cursor.status, "unpriced");
 });
 
-test("UI disclaimer and changelog copy are present", () => {
-  assert.match(PRICE_DISCLAIMER_CS, /veřejného ceníku/i);
-  assert.match(PRICE_DISCLAIMER_CS, /nikoli faktura/i);
-  assert.match(PRICE_DISCLAIMER_CS, /Included = \$0 paid/);
-  assert.match(SHORT_NOTICE_CS, /Denní částky jsou odhad/i);
-  assert.match(SHORT_NOTICE_CS, /Included usage = \$0/);
+test("UI disclaimer and changelog copy are present for 1.3.11 native Cost", () => {
+  assert.match(PRICE_DISCLAIMER_CS, /nativního sloupce Cost/i);
+  assert.match(PRICE_DISCLAIMER_CS, /chargedCents/);
+  assert.match(PRICE_DISCLAIMER_CS, /Included \/ Errored = \$0/);
+  assert.match(PRICE_DISCLAIMER_CS, /Lokální ceníkový odhad je vypnutý/);
+  assert.match(SHORT_NOTICE_CS, /nativního Cursor Cost/i);
+  assert.match(SHORT_NOTICE_CS, /Included = \$0/);
+  assert.match(SHORT_NOTICE_CS, /lokální odhad vypnutý/i);
   assert.match(source, /PRICE_DISCLAIMER_CS/);
   assert.match(source, /SHORT_NOTICE_CS/);
   assert.match(source, /gm-cus-disclaimer/);
@@ -382,10 +554,11 @@ test("UI disclaimer and changelog copy are present", () => {
   assert.match(source, /openHelpModal/);
   assert.match(source, /Escape/);
   const versions = CHANGELOG.map((entry) => entry.version);
-  assert.deepEqual(versions.slice(0, 5), ["1.3.10", "1.3.9", "1.3.8", "1.3.7", "1.3.4"]);
-  assert.match(CHANGELOG[0].text, /zjednodušené UI podle původního panelu/i);
-  assert.match(CHANGELOG[1].text, /odhad/i);
-  assert.match(CHANGELOG[2].text, /onDemand\.used|cyklick/i);
+  assert.deepEqual(versions.slice(0, 5), ["1.3.11", "1.3.10", "1.3.9", "1.3.8", "1.3.7"]);
+  assert.match(CHANGELOG[0].text, /nativní per-event Cost|chargedCents/i);
+  assert.match(source, /Exact vs nativní Cost/);
+  assert.match(source, /Coverage nativního Cost/);
+  assert.match(source, /Ceník \(vypnutý fallback\)/);
 });
 
 test("compact main UI has exactly four KPIs and no bulky section cards", () => {
@@ -396,22 +569,26 @@ test("compact main UI has exactly four KPIs and no bulky section cards", () => {
 
   const kpiLabels = [...renderBody.matchAll(/renderKpi\(\s*\n?\s*"([^"]+)"/g)].map((match) => match[1]);
   assert.deepEqual(kpiLabels, [
-    "Dnes (odhad)",
-    "Posledních 7 dní (odhad)",
+    "Dnes (UTC)",
+    "Posledních 7 dní",
     "Útrata · cyklus",
-    "Průměr / den (odhad)",
+    "Průměr / den",
   ]);
   assert.equal((renderBody.match(/renderKpi\(/g) || []).length, 4);
 
   assert.match(renderBody, /gm-cus-notice/);
-  assert.match(renderBody, /Tokeny a odhad ceny · posledních/);
+  assert.match(renderBody, /Tokeny a účtovaná cena · posledních/);
   assert.match(renderBody, /data-metric="tokens"/);
   assert.match(renderBody, /data-metric="spend"/);
   assert.match(renderBody, /data-range="7"/);
   assert.match(renderBody, /data-range="30"/);
-  assert.match(renderBody, />Odhad ceny</);
-  assert.match(renderBody, />Ø on-demand volání</);
+  assert.match(renderBody, />Cena</);
+  assert.match(renderBody, />Útrata</);
+  assert.match(renderBody, />Ø placené volání</);
   assert.match(renderBody, />Cena \/ 1M tok\.</);
+  assert.doesNotMatch(renderBody, /\(odhad\)/i);
+  assert.doesNotMatch(renderBody, />Odhad ceny</);
+  assert.doesNotMatch(renderBody, /ODHAD/);
 
   assert.doesNotMatch(renderBody, /gm-cus-kpi-group-title/);
   assert.doesNotMatch(renderBody, /Coverage odhadu/);
@@ -422,9 +599,9 @@ test("compact main UI has exactly four KPIs and no bulky section cards", () => {
   assert.doesNotMatch(renderBody, /gm-cus-coverage/);
 
   // Bulky explainers stay available in the help modal, not as main-panel cards.
-  assert.match(source, /Exact vs odhad/);
-  assert.match(source, /Coverage odhadu/);
-  assert.match(source, /Neoceněné modely/);
+  assert.match(source, /Exact vs nativní Cost/);
+  assert.match(source, /Coverage nativního Cost/);
+  assert.match(source, /Modely s chybějícím nativním Cost/);
 });
 
 test("optional CSV coverage report (skipped when file missing)", (t) => {
@@ -489,7 +666,8 @@ test("optional CSV coverage report (skipped when file missing)", (t) => {
     };
   });
 
-  const summary = summarizeOnDemandEstimates(events);
+  // CSV typically lacks chargedCents — catalog fallback is opt-in for this report.
+  const summary = summarizeOnDemandEstimates(events, MODEL_PRICING, { fallbackEnabled: true });
   assert.ok(summary.onDemandCount > 0);
   assert.ok(summary.pricedCount > 0);
   assert.ok(summary.coverageRatio > 0);
@@ -503,7 +681,7 @@ test("optional CSV coverage report (skipped when file missing)", (t) => {
       coverageRatio: summary.coverageRatio,
       estimatedDollars: Number(summary.estimatedDollars.toFixed(2)),
       unpricedModels: summary.unpricedModels,
-      note: "Compare manually to usage-summary.onDemand.used / get-team-spend.spendCents; CSV is not the invoice.",
+      note: "Catalog fallback opt-in for CSV without chargedCents; compare manually to billing API.",
     }),
   );
 });
