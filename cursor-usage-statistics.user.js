@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cursor Usage Statistics
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3.11
+// @version      1.3.12
 // @description  Adds on-demand spend from native Cursor Cost, usage-value charts, optional catalog fallback, and per-model statistics to the Cursor usage dashboard.
 // @author       Lukáš Sedláček
 // @match        https://cursor.com/dashboard/usage*
@@ -14,7 +14,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.3.11";
+  const VERSION = "1.3.12";
   const USAGE_ENDPOINT = "/api/dashboard/get-filtered-usage-events";
   const AGG_ENDPOINT = "/api/dashboard/get-aggregated-usage-events";
   const SUMMARY_ENDPOINT = "/api/usage-summary";
@@ -159,6 +159,10 @@
     "Čísla z nativního Cursor Cost; Included = $0; exact cyklus z billing API; lokální odhad vypnutý.";
 
   const CHANGELOG = [
+    {
+      version: "1.3.12",
+      text: "Oprava Firefox Xray: bezpečné čtení request body a cloneInto fetch init mezi userscript a page compartmentem.",
+    },
     {
       version: "1.3.11",
       text: "Nativní per-event Cost (chargedCents) pro denní/modelové sumy; lokální ceníkový odhad vypnutý (opt-in fallback).",
@@ -740,16 +744,48 @@
   }
 
   async function readRequestBody(input, init) {
-    if (typeof init?.body === "string") {
-      return init.body;
+    // Firefox Xray may deny reading Request/init `.body` across compartments.
+    try {
+      let body;
+      try {
+        body = init == null ? undefined : init.body;
+      } catch {
+        body = undefined;
+      }
+      if (typeof body === "string") {
+        return body;
+      }
+    } catch {
+      // ignore
     }
 
     // Duck-type Request: `instanceof Request` fails across sandbox/page compartments.
     if (isRequestLike(input)) {
-      return input.clone().text();
+      try {
+        return await input.clone().text();
+      } catch {
+        return "";
+      }
     }
 
     return "";
+  }
+
+  /**
+   * Clone fetch init into the page compartment so Firefox's native fetch can read
+   * `.body` / headers. Sandbox plain objects throw
+   * `Permission denied to access property "body"`.
+   */
+  function cloneFetchInitForPage(pageWindow, init) {
+    if (init == null) return init;
+    if (typeof cloneInto === "function") {
+      try {
+        return cloneInto(init, pageWindow, { cloneFunctions: true });
+      } catch {
+        // fall through
+      }
+    }
+    return init;
   }
 
   function installPageFetchInterceptor(pageWindow, hooks, options = {}) {
@@ -758,7 +794,10 @@
     }
 
     const originalFetch = pageWindow.fetch;
-    const nativeFetch = originalFetch.bind(pageWindow);
+    const boundFetch = originalFetch.bind(pageWindow);
+    function nativeFetch(input, init) {
+      return boundFetch(input, cloneFetchInitForPage(pageWindow, init));
+    }
 
     /**
      * Must stay non-async and must return the page-compartment Promise from native
@@ -857,6 +896,7 @@
       readRequestBody,
       isRequestLike,
       installPageFetchInterceptor,
+      cloneFetchInitForPage,
     };
     return;
   }

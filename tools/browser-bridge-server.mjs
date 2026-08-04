@@ -172,6 +172,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/pending") {
+      // Only the top-frame userscript may claim commands. Match-all userscripts in
+      // captcha/payment iframes otherwise race the real page for the same queue.
+      if (url.searchParams.get("top") !== "1") {
+        sendJson(res, 200, []);
+        return;
+      }
       sendJson(
         res,
         200,
