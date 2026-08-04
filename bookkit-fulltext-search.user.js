@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         uuBookKit Fulltext Search
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.7.0
+// @version      1.8.0
 // @description  Adds a cached fulltext search for uuBookKit pages and sections using BookKit JSON commands.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-bookkit-maing01/*
@@ -26,7 +26,8 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmBookKitFulltextSearch";
-  const SCRIPT_VERSION = "1.7.0";
+  const SCRIPT_VERSION = "1.8.0";
+  const BOOK_REGISTRY_EXPORT_VERSION = 1;
   const BRIDGE_DIAG_URL = "http://127.0.0.1:8766/diagnostics";
   const DIAG_SOURCE = "bookkit-fulltext";
   const STYLE_ID = "gm-bookkit-fulltext-style";
@@ -515,25 +516,137 @@
     }
   }
 
+  function serializeBookRegistryMetadata(books) {
+    return (books || [])
+      .filter((book) => book?.bookId)
+      .map((book) => ({
+        bookId: book.bookId,
+        baseUri: book.baseUri || book.bookId,
+        awid: book.awid || "",
+        title: book.title || "",
+        lastVisitedAt: book.lastVisitedAt || 0,
+        lastIndexedAt: book.lastIndexedAt || 0,
+        pageCount: book.pageCount || 0,
+        structureSignature: book.structureSignature || "",
+        known: Boolean(book.known),
+        seed: Boolean(book.seed),
+      }));
+  }
+
   function saveBookRegistryBackup(books) {
     if (typeof localStorage === "undefined") return;
-    const metadata = (books || []).map((book) => ({
-      bookId: book.bookId,
-      baseUri: book.baseUri || book.bookId,
-      awid: book.awid || "",
-      title: book.title || "",
-      lastVisitedAt: book.lastVisitedAt || 0,
-      lastIndexedAt: book.lastIndexedAt || 0,
-      pageCount: book.pageCount || 0,
-      structureSignature: book.structureSignature || "",
-      known: Boolean(book.known),
-      seed: Boolean(book.seed),
-    }));
     try {
-      localStorage.setItem(BOOK_REGISTRY_BACKUP_KEY, JSON.stringify(metadata));
+      localStorage.setItem(BOOK_REGISTRY_BACKUP_KEY, JSON.stringify(serializeBookRegistryMetadata(books)));
     } catch {
       // Ignore storage quota / privacy mode errors.
     }
+  }
+
+  function buildBookRegistryExportPayload(books) {
+    return {
+      version: BOOK_REGISTRY_EXPORT_VERSION,
+      exportedAt: new Date().toISOString(),
+      books: serializeBookRegistryMetadata(books),
+    };
+  }
+
+  function normalizeImportedBookEntry(entry) {
+    if (typeof entry === "string") {
+      const context = parseBookContextFromUrl(entry);
+      if (!context) return null;
+      return {
+        bookId: context.bookId,
+        baseUri: context.baseUri,
+        awid: context.awid,
+        title: "",
+      };
+    }
+
+    if (!entry || typeof entry !== "object") return null;
+
+    const sourceUrl = entry.baseUri || entry.bookId || entry.url || "";
+    const context = parseBookContextFromUrl(sourceUrl);
+    const bookId = entry.bookId || context?.bookId || "";
+    const baseUri = entry.baseUri || context?.baseUri || bookId;
+    if (!bookId || !baseUri) return null;
+
+    return {
+      bookId,
+      baseUri,
+      awid: entry.awid || context?.awid || "",
+      title: typeof entry.title === "string" ? entry.title : "",
+      lastVisitedAt: Number(entry.lastVisitedAt) || 0,
+      lastIndexedAt: Number(entry.lastIndexedAt) || 0,
+      pageCount: Number(entry.pageCount) || 0,
+      structureSignature: typeof entry.structureSignature === "string" ? entry.structureSignature : "",
+      known: Boolean(entry.known),
+      seed: Boolean(entry.seed),
+    };
+  }
+
+  function parseBookRegistryImport(rawText) {
+    const text = String(rawText || "").trim();
+    if (!text) {
+      throw new Error("Schránka je prázdná.");
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error("Obsah schránky není platný JSON.");
+    }
+
+    let entries = [];
+    if (Array.isArray(parsed)) {
+      entries = parsed;
+    } else if (parsed && typeof parsed === "object" && Array.isArray(parsed.books)) {
+      entries = parsed.books;
+    } else {
+      throw new Error("Očekávám JSON pole BookKitů nebo objekt s polem books.");
+    }
+
+    const books = [];
+    const seen = new Set();
+    for (const entry of entries) {
+      const book = normalizeImportedBookEntry(entry);
+      if (!book || seen.has(book.bookId)) continue;
+      seen.add(book.bookId);
+      books.push(book);
+    }
+
+    if (!books.length) {
+      throw new Error("Ve schránce nebyl žádný platný BookKit.");
+    }
+
+    return books;
+  }
+
+  async function writeTextToClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) {
+      throw new Error("Nepodařilo se zapsat do schránky.");
+    }
+  }
+
+  async function readTextFromClipboard() {
+    if (navigator.clipboard?.readText) {
+      return navigator.clipboard.readText();
+    }
+    throw new Error("Prohlížeč neumožňuje číst schránku. Vlož JSON ručně přes Ctrl+V do promptu.");
   }
 
   function createBooksFromIndexRecords(indexRecords) {
@@ -1456,6 +1569,14 @@
         grid-template-columns: minmax(0, 1fr) auto;
       }
 
+      .gm-bookkit-fulltext__manage-toolbar-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        justify-content: flex-end;
+      }
+
       .gm-bookkit-fulltext__search-input {
         width: 100%;
         box-sizing: border-box;
@@ -1877,6 +1998,12 @@
     if (state.manageUi?.rebuildAllButton) {
       state.manageUi.rebuildAllButton.disabled = busy;
     }
+    if (state.manageUi?.exportButton) {
+      state.manageUi.exportButton.disabled = busy;
+    }
+    if (state.manageUi?.importButton) {
+      state.manageUi.importButton.disabled = busy;
+    }
     if (state.manageUi) {
       renderManageList(state);
     }
@@ -2223,7 +2350,11 @@
         </div>
         <div class="gm-bookkit-fulltext__toolbar gm-bookkit-fulltext__toolbar--manage">
           <input type="search" class="gm-bookkit-fulltext__search-input" placeholder="Filtrovat BookKity..." />
-          <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__rebuild-all">Rebuild all</button>
+          <div class="gm-bookkit-fulltext__manage-toolbar-actions">
+            <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__export-registry">Export</button>
+            <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__import-registry">Import</button>
+            <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__rebuild-all">Rebuild all</button>
+          </div>
         </div>
         <div class="gm-bookkit-fulltext__status">
           <div></div>
@@ -2241,6 +2372,8 @@
       modal,
       closeButton: modal.querySelector(".gm-bookkit-fulltext__close"),
       filterInput: modal.querySelector(".gm-bookkit-fulltext__search-input"),
+      exportButton: modal.querySelector(".gm-bookkit-fulltext__export-registry"),
+      importButton: modal.querySelector(".gm-bookkit-fulltext__import-registry"),
       rebuildAllButton: modal.querySelector(".gm-bookkit-fulltext__rebuild-all"),
       statusLeft: modal.querySelector(".gm-bookkit-fulltext__status > div:first-child"),
       statusRight: modal.querySelector(".gm-bookkit-fulltext__status > div:last-child"),
@@ -2258,6 +2391,17 @@
     ui.filterInput.addEventListener("input", () => {
       state.manageFilter = ui.filterInput.value;
       renderManageList(state);
+    });
+    ui.exportButton.addEventListener("click", () => {
+      exportBookRegistryToClipboard(state).catch((error) => {
+        setManageStatus(state, `Export selhal: ${error.message}`);
+      });
+    });
+    ui.importButton.addEventListener("click", () => {
+      importBookRegistryFromClipboard(state).catch((error) => {
+        setBusy(state, false);
+        setManageStatus(state, `Import selhal: ${error.message}`);
+      });
     });
     ui.rebuildAllButton.addEventListener("click", () => {
       rebuildAllIndexes(state).catch((error) => {
@@ -2387,6 +2531,58 @@
     setManageStatus(state, `Spravuješ ${state.books.length} BookKitů.`, `${indexedBooks.length} indexů · ${totalSections} sekcí`);
     renderManageList(state);
     state.manageUi.filterInput.focus();
+  }
+
+  async function exportBookRegistryToClipboard(state) {
+    const payload = buildBookRegistryExportPayload(state.books);
+    await writeTextToClipboard(`${JSON.stringify(payload, null, 2)}\n`);
+    sendDiag("registry.exported", { count: payload.books.length });
+    setManageStatus(state, `Exportováno ${payload.books.length} BookKitů do schránky.`);
+  }
+
+  async function importBookRegistryFromClipboard(state) {
+    let rawText = "";
+    try {
+      rawText = await readTextFromClipboard();
+    } catch (error) {
+      const fallback = window.prompt("Vlož JSON export BookKitů ze schránky:", "");
+      if (fallback == null) return;
+      rawText = fallback;
+      if (!String(rawText).trim()) {
+        throw error;
+      }
+    }
+
+    const importedBooks = parseBookRegistryImport(rawText);
+    const beforeIds = new Set((state.books || []).map((book) => book.bookId));
+    const importedIds = new Set(importedBooks.map((book) => book.bookId));
+
+    setBusy(state, true);
+    try {
+      if (state.dismissedBookIds?.length) {
+        state.dismissedBookIds = state.dismissedBookIds.filter((bookId) => !importedIds.has(bookId));
+        saveDismissedBookIds(state.dismissedBookIds);
+      }
+
+      state.books = mergeBookRegistries(state.books, importedBooks, {
+        dismissedBookIds: state.dismissedBookIds,
+      });
+      await persistRegistryBooks(state);
+      await loadManageIndexCache(state);
+      renderNavMenu(state);
+      renderManageList(state);
+
+      const addedCount = importedBooks.filter((book) => !beforeIds.has(book.bookId)).length;
+      const updatedCount = importedBooks.length - addedCount;
+      sendDiag("registry.imported", { imported: importedBooks.length, added: addedCount, updated: updatedCount });
+      setManageStatus(
+        state,
+        `Importováno ${importedBooks.length} BookKitů (${addedCount} nových, ${updatedCount} aktualizovaných).`,
+        `Celkem ${state.books.length} BookKitů`,
+      );
+    } finally {
+      setBusy(state, false);
+    }
   }
 
   function formatBookIndexLabel(book) {
@@ -3784,6 +3980,9 @@
     buildSearchCorpusSignature,
     isSearchCacheReusable,
     createBooksFromIndexRecords,
+    serializeBookRegistryMetadata,
+    buildBookRegistryExportPayload,
+    parseBookRegistryImport,
     normalizeSearchHistory,
     promoteSearchHistory,
     loadDismissedBookIds,

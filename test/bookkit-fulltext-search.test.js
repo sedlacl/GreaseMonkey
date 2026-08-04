@@ -605,3 +605,57 @@ test("promoteSearchHistory moves a repeated query to the beginning", () => {
 
   assert.deepEqual(history, ["npm registry", "first", "third"]);
 });
+
+test("buildBookRegistryExportPayload serializes registry metadata", () => {
+  const { buildBookRegistryExportPayload } = require("../bookkit-fulltext-search.user.js");
+  const payload = buildBookRegistryExportPayload([
+    {
+      bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3",
+      baseUri: "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3",
+      awid: "10b5c8ef37b74c11a7a4d7e566ec00b3",
+      title: "IDS Maintenance",
+      lastVisitedAt: 100,
+      known: true,
+      documents: [{ id: "should-not-export" }],
+    },
+  ]);
+
+  assert.equal(payload.version, 1);
+  assert.equal(typeof payload.exportedAt, "string");
+  assert.deepEqual(payload.books, [
+    {
+      bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3",
+      baseUri: "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3",
+      awid: "10b5c8ef37b74c11a7a4d7e566ec00b3",
+      title: "IDS Maintenance",
+      lastVisitedAt: 100,
+      lastIndexedAt: 0,
+      pageCount: 0,
+      structureSignature: "",
+      known: true,
+      seed: false,
+    },
+  ]);
+});
+
+test("parseBookRegistryImport accepts payload object, array and URL strings", () => {
+  const { parseBookRegistryImport } = require("../bookkit-fulltext-search.user.js");
+  const url = "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3/book/intro";
+
+  const fromPayload = parseBookRegistryImport(
+    JSON.stringify({
+      version: 1,
+      books: [{ bookId: url.replace(/\/book\/intro$/u, ""), title: "From payload" }],
+    }),
+  );
+  assert.equal(fromPayload.length, 1);
+  assert.equal(fromPayload[0].title, "From payload");
+  assert.equal(fromPayload[0].awid, "10b5c8ef37b74c11a7a4d7e566ec00b3");
+
+  const fromUrls = parseBookRegistryImport(JSON.stringify([url, url]));
+  assert.equal(fromUrls.length, 1);
+  assert.equal(fromUrls[0].bookId, "https://uuapp.plus4u.net/uu-bookkit-maing01/10b5c8ef37b74c11a7a4d7e566ec00b3");
+
+  assert.throws(() => parseBookRegistryImport("{"), /platný JSON/);
+  assert.throws(() => parseBookRegistryImport("[]"), /žádný platný BookKit/);
+});
