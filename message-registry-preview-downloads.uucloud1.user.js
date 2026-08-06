@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads (UUCloud1)
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.19
+// @version      1.20
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/usy-idsmari-messageregistryg01/*
@@ -866,12 +866,46 @@
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
-    const looksLikeStructuredPrefix = prefixLines.some((line) => /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+|^[A-Za-z0-9-]+\s*:/u.test(line));
+    const looksLikeStructuredPrefix = prefixLines.some((line) => {
+      return (
+        /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+/u.test(line) ||
+        /^HTTP\/\d+(?:\.\d+)?(?:\s|$)/iu.test(line) ||
+        /^[A-Za-z0-9-]+\s*:/u.test(line)
+      );
+    });
     if (!looksLikeStructuredPrefix) {
       return null;
     }
 
     return { prefix, body };
+  }
+
+  function splitHttpStatusPrefix(text) {
+    const normalizedText = text.replace(/\r\n/gu, "\n");
+    const firstLineBreak = normalizedText.indexOf("\n");
+    if (firstLineBreak < 0) {
+      return null;
+    }
+
+    const prefix = normalizedText.slice(0, firstLineBreak).trim();
+    const body = normalizedText.slice(firstLineBreak + 1).trim();
+    if (!prefix || !body) {
+      return null;
+    }
+
+    if (!/^HTTP\/\d+(?:\.\d+)?(?:\s|$)/iu.test(prefix)) {
+      return null;
+    }
+
+    if (!/^(?:<[?!\w]|[\[{])/u.test(body)) {
+      return null;
+    }
+
+    return { prefix, body };
+  }
+
+  function splitPreviewPrefix(text) {
+    return splitStructuredPrefix(text) || splitHttpStatusPrefix(text);
   }
 
   function getFormattedPreviewText(text, contentType) {
@@ -885,7 +919,7 @@
       return formattedWrappedResponse;
     }
 
-    const structuredText = splitStructuredPrefix(text);
+    const structuredText = splitPreviewPrefix(text);
     if (structuredText) {
       const formattedBody = getFormattedPreviewText(structuredText.body, contentType);
       if (formattedBody) {
@@ -920,7 +954,7 @@
       return "wrapped-response";
     }
 
-    const structuredText = splitStructuredPrefix(text);
+    const structuredText = splitPreviewPrefix(text);
     if (structuredText) {
       const bodyMode = detectHighlightMode(structuredText.body, contentType);
       return bodyMode === "plain" ? "structured" : `structured-${bodyMode}`;
@@ -976,7 +1010,7 @@
   }
 
   function highlightStructuredText(text, contentType) {
-    const structuredText = splitStructuredPrefix(text);
+    const structuredText = splitPreviewPrefix(text);
     if (!structuredText) {
       return escapeHtml(text);
     }

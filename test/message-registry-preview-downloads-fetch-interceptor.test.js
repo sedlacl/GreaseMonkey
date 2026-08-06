@@ -46,15 +46,15 @@ function assertSafeFetchInterceptor(source, label, expectedVersion) {
   assert.doesNotMatch(patchBody, /instanceof\s+Request\b/, `${label} no instanceof Request in patchFetch`);
 }
 
-test("main MR preview userscript fetch interceptor is GM/Firefox-safe (1.33)", () => {
-  assertSafeFetchInterceptor(mainSource, "main", "1.33");
+test("main MR preview userscript fetch interceptor is GM/Firefox-safe (1.34)", () => {
+  assertSafeFetchInterceptor(mainSource, "main", "1.34");
   assert.match(mainSource, /@grant\s+none\b/);
   // Non-preview path still caches message/get via fire-and-forget side effect.
   assert.match(extractPatchFetchBody(mainSource), /rememberMessageSourceResponse/);
 });
 
-test("uucloud1 MR preview userscript fetch interceptor is GM/Firefox-safe (1.19)", () => {
-  assertSafeFetchInterceptor(uucloud1Source, "uucloud1", "1.19");
+test("uucloud1 MR preview userscript fetch interceptor is GM/Firefox-safe (1.20)", () => {
+  assertSafeFetchInterceptor(uucloud1Source, "uucloud1", "1.20");
   assert.match(uucloud1Source, /@grant\s+none\b/);
 });
 
