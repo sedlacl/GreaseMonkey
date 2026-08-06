@@ -48,6 +48,10 @@ Use `uuBookKit Fulltext Search` in `uu-bookkit-maing01` books where the built-in
 
 ## Changelog
 
+Per-script version history: **[changelogs.md](changelogs.md)**
+
+Repo milestones (legacy):
+
 - 1.0 - initial version
 - 1.1 - fix of block element text
 - 1.2 - add message detail download preview userscript

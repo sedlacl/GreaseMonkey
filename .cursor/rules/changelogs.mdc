@@ -1,0 +1,31 @@
+---
+description: Povinné aktualizace changelogs.md při každé nové verzi userscriptu
+alwaysApply: true
+---
+
+# Changelogs (povinné)
+
+Při **každém bumpnutí `@version`** v jakémkoli `*.user.js` (nebo souvisejícím variantním skriptu) **musí** agent ve stejném úkolu aktualizovat kořenový soubor [`changelogs.md`](changelogs.md).
+
+## Povinnosti
+
+1. Přidej novou sekci **nahoru** pod nadpis daného skriptu (nejnovější verze první).
+2. Zapiš `@version`, datum (ISO `YYYY-MM-DD`) a stručné body: **co** a **proč** (ne dump diffu).
+3. Odděl skripty vlastními `##` nadpisy podle názvu souboru.
+4. Nevynechávej changelog jen proto, že změna je „malá“ — i patch bump vyžaduje záznam.
+5. Pokud upravuješ jen jednu variantu (např. uuCloudg02 vs uucloud1), uveď to explicitně v záznamu.
+
+## Formát záznamu
+
+```markdown
+### X.Y — YYYY-MM-DD
+
+- Stručný bod změny (uživatelský dopad / důvod).
+- Další bod…
+```
+
+## Checklist před dokončením úkolu
+
+- [ ] `@version` v userscriptu odpovídá nejnovějšímu záznamu v `changelogs.md`
+- [ ] Záznam je pod správným `##` skriptem
+- [ ] Varianty (uucloud1 / g02 / …) jsou správně označené, pokud se liší

@@ -105,9 +105,11 @@ const SCREENSHOT_GROK_FIXTURE = {
   chargedCents: 133.3092041015625,
 };
 
-test("userscript metadata is 1.3.12 and grants unsafeWindow", () => {
-  assert.equal(VERSION, "1.3.12");
-  assert.match(source, /@version\s+1\.3\.12\b/);
+test("userscript metadata is 1.3.13 and grants unsafeWindow", () => {
+  assert.equal(VERSION, "1.3.13");
+  assert.match(source, /@version\s+1\.3\.13\b/);
+  // SPA: the whole dashboard must be matched, not just the usage route.
+  assert.match(source, /@match\s+https:\/\/cursor\.com\/dashboard\*/);
   assert.match(source, /@grant\s+unsafeWindow\b/);
   assert.doesNotMatch(source, /@grant\s+none\b/);
   assert.match(source, /installPageFetchInterceptor\s*\(/);
@@ -557,9 +559,10 @@ test("UI disclaimer and changelog copy are present for 1.3.11 native Cost", () =
   assert.match(source, /openHelpModal/);
   assert.match(source, /Escape/);
   const versions = CHANGELOG.map((entry) => entry.version);
-  assert.deepEqual(versions.slice(0, 5), ["1.3.12", "1.3.11", "1.3.10", "1.3.9", "1.3.8"]);
-  assert.match(CHANGELOG[0].text, /Firefox Xray|cloneInto/i);
-  assert.match(CHANGELOG[1].text, /nativní per-event Cost|chargedCents/i);
+  assert.deepEqual(versions.slice(0, 5), ["1.3.13", "1.3.12", "1.3.11", "1.3.10", "1.3.9"]);
+  assert.match(CHANGELOG[0].text, /SPA|routing/i);
+  assert.match(CHANGELOG[1].text, /Firefox Xray|cloneInto/i);
+  assert.match(CHANGELOG[2].text, /nativní per-event Cost|chargedCents/i);
   assert.match(source, /Exact vs nativní Cost/);
   assert.match(source, /Coverage nativního Cost/);
   assert.match(source, /Ceník \(vypnutý fallback\)/);

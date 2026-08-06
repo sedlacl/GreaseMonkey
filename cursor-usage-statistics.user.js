@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Cursor Usage Statistics
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3.12
+// @version      1.3.13
 // @description  Adds on-demand spend from native Cursor Cost, usage-value charts, optional catalog fallback, and per-model statistics to the Cursor usage dashboard.
 // @author       Lukáš Sedláček
-// @match        https://cursor.com/dashboard/usage*
+// The dashboard is a SPA: matching only /dashboard/usage skips client-side navigation into it.
+// @match        https://cursor.com/dashboard*
 // @grant        unsafeWindow
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/cursor-usage-statistics.user.js
@@ -14,7 +15,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.3.12";
+  const VERSION = "1.3.13";
   const USAGE_ENDPOINT = "/api/dashboard/get-filtered-usage-events";
   const AGG_ENDPOINT = "/api/dashboard/get-aggregated-usage-events";
   const SUMMARY_ENDPOINT = "/api/usage-summary";
@@ -159,6 +160,10 @@
     "Čísla z nativního Cursor Cost; Included = $0; exact cyklus z billing API; lokální odhad vypnutý.";
 
   const CHANGELOG = [
+    {
+      version: "1.3.13",
+      text: "SPA routing: panel se nasadí i po klientském přechodu na /dashboard/usage, bez ručního refreshe stránky.",
+    },
     {
       version: "1.3.12",
       text: "Oprava Firefox Xray: bezpečné čtení request body a cloneInto fetch init mezi userscript a page compartmentem.",
@@ -903,6 +908,7 @@
 
   const PANEL_ID = "gm-cursor-usage-statistics";
   const STYLE_ID = `${PANEL_ID}-style`;
+  const USAGE_PATH = "/dashboard/usage";
   const PAGE_SIZE = 1000;
   const DAY_MS = 24 * 60 * 60 * 1000;
   const MODEL_COLORS = ["#7c3aed", "#2563eb", "#0891b2", "#16a34a", "#f59e0b"];
@@ -1119,7 +1125,8 @@
   }
 
   async function loadStatistics() {
-    if (!requestContext || loading) return;
+    // Sibling dashboard routes also hit the usage API; don't fetch every page there.
+    if (!requestContext || loading || !isUsagePage()) return;
 
     loading = true;
     renderLoading();
@@ -1821,12 +1828,19 @@
     `;
   }
 
+  function isUsagePage() {
+    return location.pathname === USAGE_PATH || location.pathname.startsWith(`${USAGE_PATH}/`);
+  }
+
   function findMountAnchor() {
     const description = document.getElementById("table-description");
     return description?.closest(".dashboard-table-card")?.parentElement || null;
   }
 
   function ensurePanel() {
+    // Other dashboard routes render similar tables, so the panel must stay usage-only.
+    if (!isUsagePage()) return null;
+
     const existing = document.getElementById(PANEL_ID);
     if (existing?.isConnected) return existing;
 
@@ -2389,19 +2403,69 @@
     bindPanelActions(panel, data);
   }
 
+  function renderCurrentState() {
+    if (currentData) renderStatistics(currentData);
+    else if (loading) renderLoading();
+    else renderWaiting();
+  }
+
+  function removePanel() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+    closeHelpModal(panel);
+    panel.remove();
+  }
+
+  function handleRouteChange() {
+    if (!isUsagePage()) {
+      removePanel();
+      return;
+    }
+
+    // The native table mounts asynchronously; the MutationObserver retries the mount.
+    renderCurrentState();
+    setTimeout(renderCurrentState, 300);
+    if (requestContext && !currentData && !loading) scheduleLoad(50);
+  }
+
+  /**
+   * Router changes are detected by watching `location.href` instead of patching
+   * `history.pushState`: writing sandbox functions into page objects is the same
+   * Xray hazard the fetch interceptor has to work around in Firefox.
+   */
+  function observeRouteChanges() {
+    let lastHref = location.href;
+
+    const checkRoute = () => {
+      if (location.href === lastHref) return;
+      lastHref = location.href;
+      handleRouteChange();
+    };
+
+    window.addEventListener("popstate", checkRoute);
+    window.addEventListener("hashchange", checkRoute);
+    setInterval(checkRoute, 400);
+    return checkRoute;
+  }
+
   function startUi() {
+    const checkRoute = observeRouteChanges();
+
     const observer = new MutationObserver(() => {
+      checkRoute();
+
+      if (!isUsagePage()) {
+        removePanel();
+        return;
+      }
+
       if (!document.getElementById(PANEL_ID)) {
-        if (currentData) renderStatistics(currentData);
-        else if (loading) renderLoading();
-        else renderWaiting();
+        renderCurrentState();
       }
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    if (currentData) renderStatistics(currentData);
-    else if (loading) renderLoading();
-    else renderWaiting();
+    renderCurrentState();
     setTimeout(renderWaiting, 1500);
   }
 

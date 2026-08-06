@@ -1,8 +1,10 @@
 # Dependencies
 node_modules/
 
-# Cursor / IDE
-.cursor/
+# Cursor / IDE (keep shared project rules tracked)
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 
 # Logs
 *.log

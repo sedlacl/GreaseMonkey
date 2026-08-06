@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Message Registry - Preview downloads
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.34
+// @version      1.39
 // @description  Shows message payloads and attachments in a dialog instead of downloading them.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-energygateway-messageregistryg01/*
@@ -19,12 +19,30 @@
   const PREVIEW_TIMEOUT_MS = 15000;
   const DOWNLOAD_SUPPRESSION_MS = 5000;
   const SYNTAX_HIGHLIGHT_MAX_CHARS = 50000;
+  // When Message Registry is opened via usy-edcaflex-maing01, payload/source APIs go through
+  // usy-edcaflex-commproxyg01/.../messageRegistry. Keys/values are pathname prefixes from inventories.
   const MESSAGE_API_BASE_URI_OVERRIDES = Object.freeze({
-    "/usy-edcaflex-maing01/00413101100000000000000000000101": "/usy-edcaflex-commproxyg01/00413101700000000000000000000101/messageRegistry",
+    // trial
+    "/usy-edcaflex-maing01/00413101100000000000000000000101":
+      "/usy-edcaflex-commproxyg01/00413101700000000000000000000101/messageRegistry",
+    // int
+    "/usy-edcaflex-maing01/00417201100000000000000000000101":
+      "/usy-edcaflex-commproxyg01/00417201700000000000000000000101/messageRegistry",
+    // prod
+    "/usy-edcaflex-maing01/00411101100000000000000000000101":
+      "/usy-edcaflex-commproxyg01/00411101700000000000000000000101/messageRegistry",
   });
   const PAYLOAD_BUTTON_SELECTOR = '[data-testid="external-payload-button"], [data-testid="internal-payload-button"]';
   const PREVIEW_BUTTON_CLASS = "gm-message-preview-trigger";
   const MESSAGE_ID_LABELS = ["Message ID", "ID zprávy"];
+  // A linked message is opened in a modal without changing the URL, so previews must resolve
+  // the message id from the modal the clicked button lives in instead of from location.
+  const MODAL_SCOPE_SELECTOR = '[role="dialog"], [aria-modal="true"], .uu5-bricks-modal';
+  const LINKED_MESSAGES_SECTION_SELECTOR = '[data-testid="message-detail-links"]';
+  const LINKED_MESSAGE_ID_CELL_SELECTORS = Object.freeze([
+    '[data-testid="table-cell-messageId"]',
+    '[data-testid="table-cell-linkedMessageId"]',
+  ]);
   const BUSINESS_METADATA_LABELS = ["Business Metadata", "Obchodní metadata"];
   const AUDIT_LOG_HEADER_LABELS = ["Audit log", "Auditní protokol"];
   const AUDIT_LOG_SECTION_SELECTOR = '[data-testid="message-detail-table-auditlog"]';
@@ -357,9 +375,17 @@
     return getMessageDetailContext()?.workspaceBaseUri || "";
   }
 
-  function getRenderedMessageId() {
-    const label = Array.from(document.querySelectorAll("div, span, td")).find((node) => {
-      return node instanceof HTMLElement && MESSAGE_ID_LABELS.includes((node.textContent || "").trim());
+  function isInsideModal(element) {
+    return Boolean(element instanceof HTMLElement && element.closest(MODAL_SCOPE_SELECTOR));
+  }
+
+  function getRenderedMessageId(root = document, { excludeModals = false } = {}) {
+    const label = Array.from(root.querySelectorAll("div, span, td")).find((node) => {
+      if (!(node instanceof HTMLElement) || !MESSAGE_ID_LABELS.includes((node.textContent || "").trim())) {
+        return false;
+      }
+
+      return !excludeModals || !isInsideModal(node);
     });
 
     if (!(label instanceof HTMLElement) || !(label.parentElement instanceof HTMLElement)) {
@@ -376,6 +402,52 @@
     }
 
     return "";
+  }
+
+  function resolvePreviewMessageId(element) {
+    const modalScope = element instanceof HTMLElement ? element.closest(MODAL_SCOPE_SELECTOR) : null;
+
+    // Inside a modal the URL points to a different message, so never fall back to it.
+    if (modalScope instanceof HTMLElement) {
+      return getRenderedMessageId(modalScope);
+    }
+
+    return getRenderedMessageId(document, { excludeModals: true }) || getCurrentMessageId() || "";
+  }
+
+  function buildLinkedMessageDetailUrl(messageId) {
+    const currentUrl = new URL(window.location.href);
+    const pathname = currentUrl.pathname;
+
+    if (/\/messageDetail(?:$|[/?#])/u.test(pathname)) {
+      const nextUrl = new URL(pathname, currentUrl.origin);
+      nextUrl.searchParams.set("messageId", messageId);
+      return nextUrl.toString();
+    }
+
+    let detailPath = pathname;
+    if (!/\/dataFlows\/messages(?:$|[/?#])/u.test(pathname)) {
+      const workspaceBaseUri = getWorkspaceBaseUri();
+      detailPath = workspaceBaseUri ? `${workspaceBaseUri}/dataFlows/messages` : pathname;
+    }
+
+    const nextUrl = new URL(detailPath, currentUrl.origin);
+    nextUrl.searchParams.set("displayMessageId", messageId);
+    return nextUrl.toString();
+  }
+
+  function extractLinkedMessageId(cell) {
+    const text = (cell.textContent || "").replace(/\s+/gu, " ").trim();
+    if (!text) {
+      return "";
+    }
+
+    const objectIdMatch = text.match(/\b[a-f0-9]{24}\b/iu);
+    if (objectIdMatch) {
+      return objectIdMatch[0];
+    }
+
+    return /^\S+$/u.test(text) ? text : "";
   }
 
   function createEmptyAuditLogSeverityCounts() {
@@ -402,7 +474,7 @@
 
   function ensureMessageDetailUiState() {
     const messageId = getCurrentMessageId() || "";
-    const renderedMessageId = getRenderedMessageId();
+    const renderedMessageId = getRenderedMessageId(document, { excludeModals: true });
 
     if (!messageId) {
       if (activeEnhancedMessageId) {
@@ -550,10 +622,9 @@
     };
   }
 
-  function buildPayloadPreviewUrl(payloadType) {
-    const messageId = getCurrentMessageId();
+  function buildPayloadPreviewUrl(payloadType, messageId) {
     if (!messageId) {
-      throw new Error("Message ID was not found in the current URL.");
+      throw new Error("Message ID of the displayed message was not found.");
     }
 
     const url = new URL(`${window.location.origin}${getMessageApiBaseUri()}/message/payload/get`);
@@ -564,10 +635,9 @@
     return url.toString();
   }
 
-  function buildMessageSourcePreviewUrl() {
-    const messageId = getCurrentMessageId();
+  function buildMessageSourcePreviewUrl(messageId) {
     if (!messageId) {
-      throw new Error("Message ID was not found in the current URL.");
+      throw new Error("Message ID of the displayed message was not found.");
     }
 
     const url = new URL(`${window.location.origin}${getMessageApiBaseUri()}/message/get`);
@@ -1471,9 +1541,16 @@
     });
   }
 
-  async function previewPayloadDirectly(payloadType) {
+  async function previewPayloadDirectly(payloadType, messageId) {
     const title = payloadType === "external" ? "Download External" : "Download Internal";
-    const requestUrl = buildPayloadPreviewUrl(payloadType);
+
+    let requestUrl;
+    try {
+      requestUrl = buildPayloadPreviewUrl(payloadType, messageId);
+    } catch (error) {
+      await showErrorPreview(error, window.location.href, { title });
+      return;
+    }
 
     try {
       const response = await window.fetch(
@@ -1493,8 +1570,15 @@
     }
   }
 
-  async function previewMessageSourceDirectly() {
-    const requestUrl = buildMessageSourcePreviewUrl();
+  async function previewMessageSourceDirectly(messageId) {
+    let requestUrl;
+    try {
+      requestUrl = buildMessageSourcePreviewUrl(messageId);
+    } catch (error) {
+      await showErrorPreview(error, window.location.href, { title: "Message Source" });
+      return;
+    }
+
     const cachedResponse = lastMessageSourceResponseCache?.cacheKey === requestUrl ? lastMessageSourceResponseCache : null;
 
     if (cachedResponse) {
@@ -1532,8 +1616,15 @@
     }
   }
 
-  async function previewChannelMetadataDirectly() {
-    const requestUrl = buildMessageSourcePreviewUrl();
+  async function previewChannelMetadataDirectly(messageId) {
+    let requestUrl;
+    try {
+      requestUrl = buildMessageSourcePreviewUrl(messageId);
+    } catch (error) {
+      await showErrorPreview(error, window.location.href, { title: "Channel Metadata" });
+      return;
+    }
+
     const cachedResponse = lastMessageSourceResponseCache?.cacheKey === requestUrl ? lastMessageSourceResponseCache : null;
 
     if (cachedResponse) {
@@ -1602,6 +1693,15 @@
     if (kind === "hidden") {
       addPath("M3 12s3.5-6 9-6 9 6 9 6-3.5 6-9 6-9-6-9-6");
       addPath("M5 5l14 14");
+      return icon;
+    }
+
+    if (kind === "open-linked") {
+      icon.setAttribute("width", "16");
+      icon.setAttribute("height", "16");
+      addPath("M14 4h6v6");
+      addPath("M10 14 20 4");
+      addPath("M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5");
       return icon;
     }
 
@@ -2269,7 +2369,7 @@
           payloadType,
           title: payloadType === "external" ? "Preview external payload" : "Preview internal payload",
           onClick: () => {
-            void previewPayloadDirectly(payloadType);
+            void previewPayloadDirectly(payloadType, resolvePreviewMessageId(button));
           },
         }),
       );
@@ -2282,40 +2382,55 @@
       return;
     }
 
-    const internalButton = document.querySelector('[data-testid="internal-payload-button"]');
-    if (!(internalButton instanceof HTMLButtonElement)) {
-      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`).forEach((button) => button.remove());
-      return;
-    }
+    // Rejected messages expose only the external payload button, so anchor on any payload button
+    // (internal preferred) instead of losing the source icon together with the internal one.
+    const preferredPayloadButtons = new Map();
+    [...document.querySelectorAll(PAYLOAD_BUTTON_SELECTOR)]
+      .filter((payloadButton) => payloadButton instanceof HTMLButtonElement)
+      .forEach((payloadButton) => {
+        const group = payloadButton.parentElement || document.body;
+        const currentButton = preferredPayloadButtons.get(group);
+        const isUpgrade = !currentButton || (getPayloadButtonType(currentButton) !== "internal" && getPayloadButtonType(payloadButton) === "internal");
 
-    const payloadPreviewButton =
-      internalButton.nextElementSibling?.classList?.contains(PREVIEW_BUTTON_CLASS) && internalButton.nextElementSibling.dataset.previewKind === "payload"
-        ? internalButton.nextElementSibling
-        : null;
-    const anchorElement = payloadPreviewButton || internalButton;
+        if (isUpgrade) {
+          preferredPayloadButtons.set(group, payloadButton);
+        }
+      });
+
+    const sourceAnchors = [...preferredPayloadButtons.values()].map((payloadButton) => {
+      const payloadPreviewButton =
+        payloadButton.nextElementSibling?.classList?.contains(PREVIEW_BUTTON_CLASS) && payloadButton.nextElementSibling.dataset.previewKind === "payload"
+          ? payloadButton.nextElementSibling
+          : null;
+
+      return { payloadButton, anchorElement: payloadPreviewButton || payloadButton };
+    });
+
+    const anchorElements = new Set(sourceAnchors.map(({ anchorElement }) => anchorElement));
 
     document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="source"]`).forEach((button) => {
-      if (button.previousElementSibling !== anchorElement) {
+      if (!anchorElements.has(button.previousElementSibling)) {
         button.remove();
       }
     });
 
-    const existingButton = anchorElement.nextElementSibling;
+    sourceAnchors.forEach(({ payloadButton, anchorElement }) => {
+      const existingButton = anchorElement.nextElementSibling;
+      if (existingButton?.classList?.contains(PREVIEW_BUTTON_CLASS) && existingButton.dataset.previewKind === "source") {
+        return;
+      }
 
-    if (existingButton?.previousElementSibling === anchorElement) {
-      return;
-    }
-
-    anchorElement.insertAdjacentElement(
-      "afterend",
-      createPreviewButton(internalButton, {
-        kind: "source",
-        title: "Preview message source",
-        onClick: () => {
-          void previewMessageSourceDirectly();
-        },
-      }),
-    );
+      anchorElement.insertAdjacentElement(
+        "afterend",
+        createPreviewButton(payloadButton, {
+          kind: "source",
+          title: "Preview message source",
+          onClick: () => {
+            void previewMessageSourceDirectly(resolvePreviewMessageId(payloadButton));
+          },
+        }),
+      );
+    });
   }
 
   function ensureChannelMetadataButton() {
@@ -2324,35 +2439,33 @@
       return;
     }
 
-    const headerText = Array.from(document.querySelectorAll('[data-testid="page-header-text"]')).find((node) => {
-      return BUSINESS_METADATA_LABELS.includes((node.textContent || "").trim());
+    const headerTexts = Array.from(document.querySelectorAll('[data-testid="page-header-text"]')).filter((node) => {
+      return node instanceof HTMLSpanElement && BUSINESS_METADATA_LABELS.includes((node.textContent || "").trim());
     });
-    if (!(headerText instanceof HTMLSpanElement)) {
-      document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`).forEach((button) => button.remove());
-      return;
-    }
 
     document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="hidden"]`).forEach((button) => {
-      if (button.previousElementSibling !== headerText) {
+      if (!headerTexts.includes(button.previousElementSibling)) {
         button.remove();
       }
     });
 
-    const existingButton = headerText.nextElementSibling;
-    if (existingButton?.previousElementSibling === headerText) {
-      return;
-    }
+    headerTexts.forEach((headerText) => {
+      const existingButton = headerText.nextElementSibling;
+      if (existingButton?.classList?.contains(PREVIEW_BUTTON_CLASS) && existingButton.dataset.previewKind === "hidden") {
+        return;
+      }
 
-    headerText.insertAdjacentElement(
-      "afterend",
-      createSectionActionButton({
-        kind: "hidden",
-        title: "Channel metadata",
-        onClick: () => {
-          void previewChannelMetadataDirectly();
-        },
-      }),
-    );
+      headerText.insertAdjacentElement(
+        "afterend",
+        createSectionActionButton({
+          kind: "hidden",
+          title: "Channel metadata",
+          onClick: () => {
+            void previewChannelMetadataDirectly(resolvePreviewMessageId(headerText));
+          },
+        }),
+      );
+    });
   }
 
   function ensureAttachmentPreviewButtons() {
@@ -2394,6 +2507,112 @@
     });
   }
 
+  function createOpenLinkedMessageLink(messageId) {
+    const link = document.createElement("a");
+    link.className = PREVIEW_BUTTON_CLASS;
+    link.dataset.previewKind = "open-linked";
+    link.dataset.messageId = messageId;
+    link.href = buildLinkedMessageDetailUrl(messageId);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.title = "Open in new window";
+    link.setAttribute("aria-label", "Open in new window");
+    link.style.display = "inline-flex";
+    link.style.alignItems = "center";
+    link.style.justifyContent = "center";
+    link.style.width = "28px";
+    link.style.minWidth = "28px";
+    link.style.height = "28px";
+    link.style.marginLeft = "6px";
+    link.style.border = "none";
+    link.style.borderRadius = "999px";
+    link.style.background = "transparent";
+    link.style.color = "#475569";
+    link.style.textDecoration = "none";
+    link.style.verticalAlign = "middle";
+    link.style.flex = "0 0 auto";
+    link.appendChild(createButtonIcon("open-linked"));
+
+    // Row click opens the linked message in a modal — keep that separate from this link.
+    ["pointerdown", "mousedown", "mouseup", "click", "dblclick"].forEach((eventName) => {
+      link.addEventListener(eventName, (event) => {
+        event.stopPropagation();
+        if (eventName !== "click") {
+          event.stopImmediatePropagation();
+        }
+      });
+    });
+
+    return link;
+  }
+
+  // The cell stacks its content by default, which would push the link below the message id.
+  function prepareLinkedMessageIdCell(cell) {
+    if (!/flex/u.test(window.getComputedStyle(cell).display)) {
+      cell.style.display = "flex";
+    }
+
+    cell.style.flexDirection = "row";
+    cell.style.flexWrap = "nowrap";
+    cell.style.alignItems = "center";
+
+    if (cell.firstElementChild instanceof HTMLElement) {
+      cell.firstElementChild.style.minWidth = "0";
+    }
+  }
+
+  function ensureLinkedMessageOpenButtons() {
+    const sections = [...document.querySelectorAll(LINKED_MESSAGES_SECTION_SELECTOR)].filter(
+      (section) => section instanceof HTMLElement,
+    );
+
+    document.querySelectorAll(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="open-linked"]`).forEach((button) => {
+      if (!(button instanceof HTMLElement) || !sections.some((section) => section.contains(button))) {
+        button.remove();
+      }
+    });
+
+    sections.forEach((section) => {
+      const cells = LINKED_MESSAGE_ID_CELL_SELECTORS.flatMap((selector) => [...section.querySelectorAll(selector)]);
+      const rowsWithButton = new WeakSet();
+
+      cells.forEach((cell) => {
+        if (!(cell instanceof HTMLElement)) {
+          return;
+        }
+
+        const row = cell.closest("tr") || cell.parentElement;
+        if (!(row instanceof HTMLElement)) {
+          return;
+        }
+
+        if (rowsWithButton.has(row) || row.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="open-linked"]`)) {
+          rowsWithButton.add(row);
+          return;
+        }
+
+        const messageId = extractLinkedMessageId(cell);
+        if (!messageId) {
+          return;
+        }
+
+        const existingLink = cell.querySelector(`.${PREVIEW_BUTTON_CLASS}[data-preview-kind="open-linked"]`);
+        if (existingLink instanceof HTMLAnchorElement) {
+          if (existingLink.dataset.messageId !== messageId) {
+            existingLink.dataset.messageId = messageId;
+            existingLink.href = buildLinkedMessageDetailUrl(messageId);
+          }
+          rowsWithButton.add(row);
+          return;
+        }
+
+        prepareLinkedMessageIdCell(cell);
+        cell.appendChild(createOpenLinkedMessageLink(messageId));
+        rowsWithButton.add(row);
+      });
+    });
+  }
+
   function refreshInjectedMessageDetailUi() {
     if (isRefreshingMessageDetailUi) {
       refreshMessageDetailUiRequested = true;
@@ -2403,16 +2622,18 @@
     isRefreshingMessageDetailUi = true;
 
     try {
-      if (!ensureMessageDetailUiState()) {
-        return;
+      const detailReady = ensureMessageDetailUiState();
+      if (detailReady) {
+        ensurePayloadPreviewButtons();
+        ensureMessageSourceButton();
+        ensureChannelMetadataButton();
+        ensureAttachmentPreviewButtons();
+        ensureAuditLogDecorations();
+        scheduleResponsiveMessageDetailGridUpdate();
       }
 
-      ensurePayloadPreviewButtons();
-      ensureMessageSourceButton();
-      ensureChannelMetadataButton();
-      ensureAttachmentPreviewButtons();
-      ensureAuditLogDecorations();
-      scheduleResponsiveMessageDetailGridUpdate();
+      // Links can appear in a modal even when the URL still points at another message.
+      ensureLinkedMessageOpenButtons();
     } finally {
       isRefreshingMessageDetailUi = false;
 
