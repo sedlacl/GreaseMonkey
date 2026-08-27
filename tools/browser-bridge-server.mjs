@@ -14,7 +14,9 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 /** @type {Map<string, string>} */
 const STATIC_SCRIPTS = new Map([
   ["/tools/bookkit-fulltext-search.bootstrap.js", "tools/bookkit-fulltext-search.bootstrap.js"],
+  ["/tools/bookkit-file-manager.bootstrap.js", "tools/bookkit-file-manager.bootstrap.js"],
   ["/bookkit-fulltext-search.user.js", "bookkit-fulltext-search.user.js"],
+  ["/bookkit-file-manager.user.js", "bookkit-file-manager.user.js"],
   ["/cursor-usage-statistics.user.js", "cursor-usage-statistics.user.js"],
   ["/tools/browser-bridge.user.js", "tools/browser-bridge.user.js"],
 ]);

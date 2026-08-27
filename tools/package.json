@@ -7,6 +7,7 @@
     "bridge": "node browser-bridge-server.mjs",
     "bridge:health": "node browser-bridge-cli.mjs health",
     "bridge:diagnostics": "node browser-bridge-cli.mjs diagnostics --source bookkit-fulltext --limit 30",
-    "test:fulltext": "node --test ../test/bookkit-fulltext-search.test.js"
+    "test:fulltext": "node --test ../test/bookkit-fulltext-search.test.js",
+    "test:file-manager": "node --test ../test/bookkit-file-manager.test.js"
   }
 }

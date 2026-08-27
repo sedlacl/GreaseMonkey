@@ -5,6 +5,23 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ---
 
+## bookkit-file-manager.user.js
+
+### 1.4.2 — 2026-08-27
+
+- Přidáno tlačítko **Označit nepoužité**, které se zpřístupní jen po úplném ověření bez chyb a přidá rozpoznané nepoužité přílohy do nativního výběru pro hromadné akce.
+- Výběr pracuje i s nevykreslenými položkami virtualizovaného FileManageru a zachová již označené soubory.
+
+### 1.4.1 — 2026-08-27
+
+- Adopce kolegova **uuBookKit – FileManager 1.4.0** (autor Lukáš Vyleťal; SHA-256 `C3035143B5C2AF747F5BFF6D2CF700F2A9757F4C2399105836942FC18E8B8850`) do repozitáře pod MIT (jen tento skript / `LICENSES/MIT.txt`).
+- **Auth:** žádné odposlouchávání `Authorization` z XHR/fetch; BookKit uuCmd přes `Plus4U5.Utils.AppClient` s fallbackem same-origin fetch + sessionStorage token scan (jako fulltext search).
+- **Síť:** pasivní hook pouze pro velikosti z `listBinaries`/`listDictionaryEntries`/`listPublicDictionaryEntries`; aktivní dotaz velikostí jednou na AWID při zobrazeném FileManageru.
+- **Usage scan:** heuristika rozšířena (`binaryCode`, `attachmentCode`, `fileCode`, `srcUri`); nepoužité přílohy se označí jen po úplném scanu bez chyb; při selhání stránek varování na tlačítku, ne definitivní červená; cache `gm-bk-att-usage:v4:` se při chybách nezapisuje.
+- AWID parser včetně prefixovaných workspace ID; singleton lifecycle; size sorter retry max 10 s; factory pattern + unit testy; bez `@include`.
+
+---
+
 ## message-registry-preview-downloads.user.js (uuCloudg02)
 
 ### 1.39 — 2026-08-06

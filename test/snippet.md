@@ -27,6 +27,14 @@ javascript:load=function(u){document.head.appendChild(Object.assign(document.cre
 
 Obě varianty načtou bootstrap z bridge serveru, který smaže starou instanci, dočte MiniSearch a pak hlavní skript z kořene repa.
 
+## uuBookKit FileManager (lokální reload)
+
+```
+javascript:void(document.head.appendChild(Object.assign(document.createElement("script"),{src:"http://127.0.0.1:8766/tools/bookkit-file-manager.bootstrap.js"})))
+```
+
+Bootstrap zruší předchozí UI FileManager doplňku a načte aktuální `bookkit-file-manager.user.js` z bridge serveru. Ověření prováděj na `/book/fileManager` (menu Kniha → Správce souborů).
+
 ## Konzole
 
 ```javascript

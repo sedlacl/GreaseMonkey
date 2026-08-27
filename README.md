@@ -33,6 +33,7 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 | Message Registry - Auto refresh                 | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.user.js)                |
 | Message Registry - Preview downloads            | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js)          |
 | Message Registry - Preview downloads (UUCloud1) | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.uucloud1.user.js) |
+| uuBookKit – FileManager                        | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/bookkit-file-manager.user.js)                        |
 
 ## Notes
 
@@ -45,6 +46,8 @@ Use `Identity login password manager bridge` on uuIdentity login pages where pas
 Use `Cursor Usage Statistics` on the Cursor usage dashboard to see spend KPIs (today, last 7 days, calendar month, daily average), a stacked chart of the top five models by spend plus others, and a per-model cost table. Toggle the chart between 7 or 30 days and tokens or spend; click a model in the table to filter it in the chart. Tooltips show daily and per-segment details. Included usage remains visible in token totals but counts as $0 spend, matching Cursor's own table.
 
 Use `uuBookKit Fulltext Search` in `uu-bookkit-maing01` books where the built-in search is too limited. The script adds its own cached fulltext index over BookKit JSON commands, remembers known books, and lets you search previously indexed books from one dialog.
+
+Use `uuBookKit – FileManager` on the BookKit attachments page to show file sizes on tiles, sort by size, and optionally run a heuristic unused-attachment check across book pages. After a clean scan, `Select unused` adds the detected unused files to the native bulk-action selection. The usage scan may miss non-standard references; partial page failures do not mark attachments as unused.
 
 ## Changelog
 
@@ -60,3 +63,4 @@ Repo milestones (legacy):
 - 1.5 - add UUCloud1-specific message registry preview downloads variant
 - 1.6 - add uuIdentity login password manager bridge
 - 1.7 - add uuBookKit fulltext search userscript
+- 1.8 - add uuBookKit FileManager userscript (sizes, sort, heuristic usage check)
