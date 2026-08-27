@@ -47,7 +47,7 @@ Use `Cursor Usage Statistics` on the Cursor usage dashboard to see spend KPIs (t
 
 Use `uuBookKit Fulltext Search` in `uu-bookkit-maing01` books where the built-in search is too limited. The script adds its own cached fulltext index over BookKit JSON commands, remembers known books, and lets you search previously indexed books from one dialog.
 
-Use `uuBookKit – FileManager` on the BookKit attachments page to show file sizes on tiles, sort by size, and optionally run a heuristic unused-attachment check across book pages. After a clean scan, `Select unused` adds the detected unused files to the native bulk-action selection. The usage scan may miss non-standard references; partial page failures do not mark attachments as unused.
+Use `uuBookKit – FileManager` on the BookKit attachments page to show file sizes on tiles, sort by size, and optionally run a heuristic unused-attachment check across book pages. After a clean scan, `Select candidates` adds heuristically identified unused attachments to the native bulk-action selection. The usage scan may miss non-standard references; partial page failures do not mark attachments as unused.
 
 ## Changelog
 

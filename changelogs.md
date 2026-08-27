@@ -7,6 +7,18 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## bookkit-file-manager.user.js
 
+### 1.4.4 — 2026-08-28
+
+- **Scan:** legitimní absence intro (HTTP 404, uuApp kódy typu `introDoesNotExist`) scan neukončí — pokračuje bez intra, bez navýšení `failedCount`; prázdná úspěšná odpověď je nefatální.
+- **Scan:** auth (401/403), síť/timeout, 5xx, parsovací a neznámé chyby `getIntro` zůstávají fail-closed (`usageScan.error`, `done=false`, bez cache/kandidátů); `listPages` povinné beze změny.
+- **Testy:** unit testy pro `isMissingIntroError` a `loadOptionalIntro`.
+
+### 1.4.3 — 2026-08-27
+
+- **Detekce:** `pageHaystack` rekurzivně sbírá stringy z celého payloadu stránky včetně bezpečné JSON serializace; rozšířené vzory pro `src`, `dataUri`, `srcUri`, `href` (atributy, JSON, URL s `?code=`) a normalizace HTML entit / URL-encodingu.
+- **Scan:** selhání `listPages` nebo `getIntro` ukončí scan chybou (`usageScan.error`, `done=false`), bez cache a bez kandidátů — fail-closed.
+- Tlačítko přejmenováno na **Označit kandidáty** / **Select candidates** (heuristický výsledek, ne definitivní „nepoužité“).
+
 ### 1.4.2 — 2026-08-27
 
 - Přidáno tlačítko **Označit nepoužité**, které se zpřístupní jen po úplném ověření bez chyb a přidá rozpoznané nepoužité přílohy do nativního výběru pro hromadné akce.

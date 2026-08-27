@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         uuBookKit – FileManager
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.4.2
+// @version      1.4.4
 // @description  Attachment size, sort by size, and optional heuristic attachment-usage check for uuBookKit FileManager.
 // @author       Lukáš Vyleťal
 // @match        https://uuapp.plus4u.net/uu-bookkit-maing01/*
@@ -32,7 +32,7 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmBookKitFileManager";
-  const SCRIPT_VERSION = "1.4.2";
+  const SCRIPT_VERSION = "1.4.4";
   const STYLE_ID = "gm-bk-file-manager-style";
   const NET_HOOK_FLAG = "__gmBkFmNetHooked";
   const SIZE_SORTER_HOOK_FLAG = "__gmBkSizeSorterHooked";
@@ -59,9 +59,15 @@
   const BOOK_BASE_PATH_RE = /^(.*?\/uu-bookkit-maing01\/(?:\d+-)?[a-z0-9]{32})/i;
   const AWID_RE = /uu-bookkit-maing01\/((?:\d+-)?[a-z0-9]{32})/i;
 
-  // Heuristic patterns for attachment codes in page content (may miss non-standard references).
-  const CODE_PULL =
-    /(?:(?:^|[^\w-])(?:code|src|binaryCode|attachmentCode|fileCode)\s*=\s*["']?([^\s"'<>/]+)|[?&]code=([^&"'#\s]+)|"(?:code|binaryCode|attachmentCode|fileCode)"\s*:\s*"([^"]+)"|srcUri\s*=\s*["'][^"']*[?&]code=([^&"'#\s]+))/gi;
+  const CODE_DIRECT_ATTR_KEYS = "code|src|dataUri|binaryCode|attachmentCode|fileCode";
+  const CODE_JSON_KEYS = "code|src|dataUri|srcUri|href|binaryCode|attachmentCode|fileCode";
+  const CODE_PULL_DIRECT_ATTR = new RegExp(
+    "(?:^|[^\\w-])(?:" + CODE_DIRECT_ATTR_KEYS + ')\\s*=\\s*["\']?([^\\s"\'<>/]+)',
+    "gi"
+  );
+  const CODE_PULL_QUERY = /[?&]code=([^&"'#\s]+)/gi;
+  const CODE_PULL_JSON = new RegExp('"(?:' + CODE_JSON_KEYS + ')"\\s*:\\s*"([^"]+)"', "gi");
+  const CODE_PULL_URL_ATTR = /(?:srcUri|href)\s*=\s*["']([^"']+)["']/gi;
 
   const LANGUAGES = ["cs", "en", "uk"];
   const FALLBACK_LANGUAGE = "en";
@@ -80,14 +86,14 @@
     buttonProgress: { cs: "Ověřuji…", en: "Checking…", uk: "Перевіряю…" },
     buttonFailed: { cs: "Ověření selhalo", en: "Check failed", uk: "Перевірка не вдалася" },
     selectUnusedLabel: {
-      cs: "Označit nepoužité",
-      en: "Select unused",
-      uk: "Вибрати невикористані",
+      cs: "Označit kandidáty",
+      en: "Select candidates",
+      uk: "Вибрати кандидатів",
     },
     selectUnusedTitle: {
-      cs: "Přidá všechny bezpečně rozpoznané nepoužité přílohy do výběru pro hromadné akce.",
-      en: "Adds all confidently identified unused attachments to the bulk-action selection.",
-      uk: "Додає всі надійно визначені невикористані вкладення до вибору для масових дій.",
+      cs: "Přidá heuristicky rozpoznané kandidáty na nepoužité přílohy do výběru pro hromadné akce.",
+      en: "Adds heuristically identified candidate unused attachments to the bulk-action selection.",
+      uk: "Додає евристично визначених кандидатів на невикористані вкладення до вибору для масових дій.",
     },
     selectUnusedUnavailable: {
       cs: "Nejprve dokončete ověření použití příloh bez chyb.",
@@ -195,33 +201,94 @@
     return hasNonEmptyUsagePaths(pathsByCode);
   }
 
+  function normalizeHaystackText(text) {
+    if (!text) return "";
+    return String(text)
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">");
+  }
+
+  function decodeMentionedCode(value) {
+    if (!value) return value;
+    let decoded = normalizeHaystackText(value);
+    try {
+      decoded = decodeURIComponent(decoded.replace(/\+/g, " "));
+    } catch {
+      /* keep partially decoded value */
+    }
+    return decoded;
+  }
+
+  function pullCodesFromPattern(pattern, text, found) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(text))) {
+      pushMentionedCode(match[1], found);
+    }
+  }
+
+  function pushMentionedCode(raw, found) {
+    const code = decodeMentionedCode(raw);
+    if (!code) return;
+    if (/^https?:/i.test(code) || /[?&]code=/i.test(code)) {
+      pullCodesFromPattern(CODE_PULL_QUERY, code, found);
+      return;
+    }
+    found.push(code);
+  }
+
   function extractMentionedCodes(text) {
     const found = [];
     if (!text) return found;
-    CODE_PULL.lastIndex = 0;
-    let match;
-    while ((match = CODE_PULL.exec(text))) {
-      const code = match[1] || match[2] || match[3] || match[4];
-      if (code) found.push(code);
-    }
+    const normalized = normalizeHaystackText(text);
+    pullCodesFromPattern(CODE_PULL_DIRECT_ATTR, normalized, found);
+    pullCodesFromPattern(CODE_PULL_QUERY, normalized, found);
+    pullCodesFromPattern(CODE_PULL_URL_ATTR, normalized, found);
+    pullCodesFromPattern(CODE_PULL_JSON, normalized, found);
     return found;
   }
 
-  function collectStrings(value, out) {
-    if (typeof value === "string") out.push(value);
-    else if (Array.isArray(value)) value.forEach((item) => collectStrings(item, out));
-    else if (value && typeof value === "object") {
-      Object.keys(value).forEach((key) => collectStrings(value[key], out));
+  function collectStrings(value, out, seen) {
+    if (typeof value === "string") {
+      out.push(value);
+      return;
+    }
+    if (value == null || typeof value !== "object") return;
+    const tracker = seen || new WeakSet();
+    if (tracker.has(value)) return;
+    tracker.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((item) => collectStrings(item, out, tracker));
+      return;
+    }
+    Object.keys(value).forEach((key) => collectStrings(value[key], out, tracker));
+  }
+
+  function safeSerializeForHaystack(value) {
+    if (value == null) return "";
+    const seen = new WeakSet();
+    try {
+      return JSON.stringify(value, (_key, nested) => {
+        if (typeof nested === "object" && nested !== null) {
+          if (seen.has(nested)) return undefined;
+          seen.add(nested);
+        }
+        return nested;
+      });
+    } catch {
+      return "";
     }
   }
 
   function pageHaystack(page) {
+    if (!page) return "";
     const parts = [];
-    collectStrings(page && page.name, parts);
-    collectStrings(page && page.desc, parts);
-    if (page && Array.isArray(page.body)) {
-      page.body.forEach((section) => collectStrings(section && section.content, parts));
-    }
+    collectStrings(page, parts, new WeakSet());
+    const serialized = safeSerializeForHaystack(page);
+    if (serialized) parts.push(serialized);
     return parts.join("\n");
   }
 
@@ -252,6 +319,61 @@
       return JSON.parse(value);
     } catch {
       return null;
+    }
+  }
+
+  function collectUuAppErrorCodes(body) {
+    if (!body || typeof body !== "object") return [];
+    const map = body.uuAppErrorMap;
+    if (!map || typeof map !== "object") return [];
+    const codes = [];
+    Object.keys(map).forEach((key) => {
+      codes.push(key);
+      const entry = map[key];
+      if (entry && typeof entry.code === "string") codes.push(entry.code);
+    });
+    return codes;
+  }
+
+  function copyBookKitErrorMeta(target, source) {
+    if (!target || !source) return target;
+    if (source.status != null) {
+      target.status = source.status;
+      target.statusCode = source.statusCode != null ? source.statusCode : source.status;
+    } else if (source.statusCode != null) {
+      target.statusCode = source.statusCode;
+    }
+    if (Array.isArray(source.uuAppErrorCodes)) {
+      target.uuAppErrorCodes = source.uuAppErrorCodes.slice();
+    }
+    return target;
+  }
+
+  function isMissingIntroError(error) {
+    if (!error) return false;
+    const status = error.status != null ? error.status : error.statusCode;
+    if (status === 404) return true;
+
+    const parts = [];
+    if (Array.isArray(error.uuAppErrorCodes)) parts.push(...error.uuAppErrorCodes);
+    if (typeof error.message === "string") parts.push(error.message);
+    const haystack = parts.join(" ").toLowerCase();
+    const compact = haystack.replace(/[^a-z0-9]+/g, "");
+    if (!compact.includes("intro")) return false;
+
+    return (
+      compact.includes("notfound") ||
+      compact.includes("doesnotexist") ||
+      compact.includes("missing")
+    );
+  }
+
+  async function loadOptionalIntro(fetchFn) {
+    try {
+      return await fetchFn("getIntro");
+    } catch (error) {
+      if (isMissingIntroError(error)) return null;
+      throw error;
     }
   }
 
@@ -360,7 +482,9 @@
           : response.statusText
       );
       lastError.status = response.status;
-      lastError.body = json || text;
+      lastError.statusCode = response.status;
+      const uuAppErrorCodes = collectUuAppErrorCodes(json);
+      if (uuAppErrorCodes.length) lastError.uuAppErrorCodes = uuAppErrorCodes;
       if (response.status !== 401 && response.status !== 403) {
         throw lastError;
       }
@@ -1042,7 +1166,9 @@
     } catch (error) {
       const status = error && error.status;
       const hint = status === 401 ? " (" + t("missingToken") + ")" : "";
-      throw new Error(cmd + " → " + ((error && error.message) || String(error)) + hint);
+      const wrapped = new Error(cmd + " → " + ((error && error.message) || String(error)) + hint);
+      copyBookKitErrorMeta(wrapped, error);
+      throw wrapped;
     }
   }
 
@@ -1151,12 +1277,7 @@
       const paths = walked.paths;
       const pageCodes = walked.order.slice();
 
-      let extra = new Map();
-      try {
-        extra = await listAllPageCodes();
-      } catch {
-        /* without listPages only the menu tree remains */
-      }
+      const extra = await listAllPageCodes();
       extra.forEach((name, code) => {
         if (paths[code]) return;
         paths[code] = name || code;
@@ -1166,11 +1287,9 @@
       usageScan.totalCount = pageCodes.length;
       ensureUsageButton();
 
-      try {
-        const intro = await uuGet("getIntro");
-        scanHaystack(pageHaystack(intro) || JSON.stringify(intro), t("bookIntro"));
-      } catch {
-        /* the intro does not have to exist */
+      const intro = await loadOptionalIntro(uuGet);
+      if (intro != null) {
+        scanHaystack(pageHaystack(intro), t("bookIntro"));
       }
 
       await mapPool(pageCodes, SCAN_CONCURRENCY, async (pageCode) => {
@@ -1317,6 +1436,8 @@
     formatSize,
     itemSize,
     extractMentionedCodes,
+    normalizeHaystackText,
+    safeSerializeForHaystack,
     pageHaystack,
     structureRev,
     shouldWriteUsageCache,
@@ -1325,6 +1446,8 @@
     usagePathsForCode,
     unusedCodes,
     addCodesToSelection,
+    isMissingIntroError,
+    loadOptionalIntro,
     SCRIPT_VERSION,
     run,
   };

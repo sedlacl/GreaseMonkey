@@ -6,6 +6,8 @@ const {
   formatSize,
   itemSize,
   extractMentionedCodes,
+  normalizeHaystackText,
+  safeSerializeForHaystack,
   pageHaystack,
   structureRev,
   shouldWriteUsageCache,
@@ -13,11 +15,86 @@ const {
   usagePathsForCode,
   unusedCodes,
   addCodesToSelection,
+  isMissingIntroError,
+  loadOptionalIntro,
   SCRIPT_VERSION,
 } = require("../bookkit-file-manager.user.js");
 
-test("SCRIPT_VERSION is 1.4.2", () => {
-  assert.equal(SCRIPT_VERSION, "1.4.2");
+test("SCRIPT_VERSION is 1.4.4", () => {
+  assert.equal(SCRIPT_VERSION, "1.4.4");
+});
+
+test("isMissingIntroError accepts HTTP 404", () => {
+  assert.equal(isMissingIntroError({ status: 404 }), true);
+  assert.equal(isMissingIntroError({ statusCode: 404 }), true);
+});
+
+test("isMissingIntroError accepts uuApp introDoesNotExist codes", () => {
+  assert.equal(
+    isMissingIntroError({
+      uuAppErrorCodes: ["uu-bookkit-maing01/getIntro/introDoesNotExist"],
+    }),
+    true,
+  );
+  assert.equal(
+    isMissingIntroError({
+      message: "getIntro → Intro not found",
+    }),
+    true,
+  );
+});
+
+test("isMissingIntroError rejects auth, server, network and unknown errors", () => {
+  assert.equal(isMissingIntroError({ status: 401 }), false);
+  assert.equal(isMissingIntroError({ status: 403 }), false);
+  assert.equal(isMissingIntroError({ status: 500 }), false);
+  assert.equal(isMissingIntroError({ message: "Failed to fetch" }), false);
+  assert.equal(isMissingIntroError({ message: "Unexpected token < in JSON" }), false);
+  assert.equal(isMissingIntroError({ uuAppErrorCodes: ["uu-bookkit-maing01/getIntro/invalidDtoIn"] }), false);
+});
+
+test("loadOptionalIntro returns payload on success", async () => {
+  const intro = { uu5String: "intro-code" };
+  assert.deepEqual(await loadOptionalIntro(async () => intro), intro);
+});
+
+test("loadOptionalIntro returns null for missing intro", async () => {
+  assert.equal(
+    await loadOptionalIntro(async () => {
+      throw { status: 404, message: "Not Found" };
+    }),
+    null,
+  );
+  assert.equal(
+    await loadOptionalIntro(async () => {
+      throw { uuAppErrorCodes: ["uu-bookkit-maing01/getIntro/introDoesNotExist"] };
+    }),
+    null,
+  );
+});
+
+test("loadOptionalIntro rethrows fatal errors", async () => {
+  await assert.rejects(
+    () =>
+      loadOptionalIntro(async () => {
+        throw { status: 401, message: "Unauthorized" };
+      }),
+    (error) => error.status === 401,
+  );
+  await assert.rejects(
+    () =>
+      loadOptionalIntro(async () => {
+        throw { status: 500, message: "Internal Server Error" };
+      }),
+    (error) => error.status === 500,
+  );
+  await assert.rejects(
+    () =>
+      loadOptionalIntro(async () => {
+        throw new Error("Failed to fetch");
+      }),
+    /Failed to fetch/,
+  );
 });
 
 test("parseBookBaseFromUrl extracts origin, awid and baseUri", () => {
@@ -86,17 +163,79 @@ test("extractMentionedCodes finds uu5 and JSON attachment references", () => {
   );
 });
 
-test("pageHaystack collects nested string content", () => {
+test("extractMentionedCodes finds src, dataUri, href and URL-encoded query codes", () => {
+  const text = [
+    '"src": "json-src-code"',
+    '"dataUri": "data-uri-code"',
+    '"href": "https://example/getBinary?code=href-json-code"',
+    'href="https://example/getBinary?code=href-attr-code"',
+    "?code=url%2Dencoded%2Dcode",
+    'src="file%2Dname"',
+  ].join("\n");
+
+  const codes = extractMentionedCodes(text);
+  assert.deepEqual(
+    [...new Set(codes)].sort(),
+    [
+      "data-uri-code",
+      "file-name",
+      "href-attr-code",
+      "href-json-code",
+      "json-src-code",
+      "url-encoded-code",
+    ].sort(),
+  );
+});
+
+test("pageHaystack collects nested string content from full page payload", () => {
   const haystack = pageHaystack({
     name: { cs: "Úvod" },
     desc: "Popis",
-    body: [{ content: 'src="used-attachment"' }, { content: { nested: "ignored-object-string" } }],
+    uu5String: '<UU5.Bricks.Image src="uu5-string-code" />',
+    contentEn: "content-en-code",
+    body: [
+      { content: 'src="used-attachment"' },
+      { content: { nested: "ignored-object-string" } },
+      '<UU5.Bricks.Image src="body-string-code" />',
+    ],
+    props: {
+      nested: {
+        dataUri: "nested-data-uri",
+      },
+    },
   });
 
   assert.match(haystack, /Úvod/);
   assert.match(haystack, /Popis/);
   assert.match(haystack, /used-attachment/);
   assert.match(haystack, /ignored-object-string/);
+  assert.match(haystack, /uu5-string-code/);
+  assert.match(haystack, /content-en-code/);
+  assert.match(haystack, /body-string-code/);
+  assert.match(haystack, /nested-data-uri/);
+  assert.match(haystack, /"dataUri"/);
+});
+
+test("pageHaystack survives cyclic object references", () => {
+  const page = { name: "Cycle", body: [{ content: "cycle-code" }] };
+  page.self = page;
+  page.body[0].parent = page;
+
+  assert.doesNotThrow(() => pageHaystack(page));
+  assert.match(pageHaystack(page), /cycle-code/);
+});
+
+test("safeSerializeForHaystack produces cycle-safe JSON", () => {
+  const value = { code: "a", nested: { src: "b" } };
+  value.nested.parent = value;
+
+  const serialized = safeSerializeForHaystack(value);
+  assert.match(serialized, /"src":"b"/);
+  assert.doesNotThrow(() => JSON.parse(serialized));
+});
+
+test("normalizeHaystackText decodes common HTML entities", () => {
+  assert.equal(normalizeHaystackText("&amp;quot;code&amp;quot;"), '"code"');
 });
 
 test("structureRev reads sys.rev", () => {
