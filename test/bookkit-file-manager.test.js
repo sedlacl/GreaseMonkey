@@ -1,5 +1,18 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+function uniqueCodesInOrder(codes) {
+  const seen = new Set();
+  const ordered = [];
+  for (const code of codes) {
+    if (seen.has(code)) continue;
+    seen.add(code);
+    ordered.push(code);
+  }
+  return ordered;
+}
 
 const {
   parseBookBaseFromUrl,
@@ -7,21 +20,94 @@ const {
   itemSize,
   extractMentionedCodes,
   normalizeHaystackText,
+  decodeMentionedCode,
+  pullCodesFromPattern,
+  HAYSTACK_REGEX_MATCH_LIMIT,
+  HAYSTACK_REGEX_MATCH_LIMIT_ERROR,
+  isHaystackHostObject,
   safeSerializeForHaystack,
   pageHaystack,
-  structureRev,
-  shouldWriteUsageCache,
+  pageHaystackAsync,
+  extractMentionedCodesAsync,
+  recordUsageHit,
   compareBySize,
   usagePathsForCode,
   unusedCodes,
   addCodesToSelection,
   isMissingIntroError,
   loadOptionalIntro,
+  withTimeout,
+  mapPool,
+  yieldToBrowser,
+  scanConcurrencyForCount,
+  RATE_CONTROLLER_DEFAULTS,
+  nextRateControllerState,
+  createRateController,
+  nextRateGate,
+  createRateGate,
   SCRIPT_VERSION,
 } = require("../bookkit-file-manager.user.js");
 
-test("SCRIPT_VERSION is 1.4.4", () => {
-  assert.equal(SCRIPT_VERSION, "1.4.4");
+test("SCRIPT_VERSION is 1.4.12", () => {
+  assert.equal(SCRIPT_VERSION, "1.4.12");
+});
+
+test("bootstrap waits for the deferred first render before probing the mount", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "tools", "bookkit-file-manager.bootstrap.js"), "utf8");
+  const loadIndex = source.indexOf("await loadScript(USER_SCRIPT_URL);");
+  const waitIndex = source.indexOf("await waitForFirstRender();", loadIndex);
+  const probeIndex = source.indexOf("button: !!document.querySelector", waitIndex);
+
+  assert.match(source, /window\.__gmBookKitFileManagerReady\s*=\s*\(async \(\) =>/);
+  assert.ok(loadIndex >= 0);
+  assert.ok(waitIndex > loadIndex);
+  assert.ok(probeIndex > waitIndex);
+});
+
+test("withTimeout resolves before timeout", async () => {
+  assert.equal(await withTimeout(Promise.resolve("done"), 50), "done");
+});
+
+test("withTimeout rejects before timeout", async () => {
+  await assert.rejects(
+    withTimeout(Promise.reject(new Error("original")), 50, () => new Error("too late")),
+    /original/,
+  );
+});
+
+test("withTimeout rejects a never-settling Promise", async () => {
+  const started = Date.now();
+  await assert.rejects(
+    withTimeout(new Promise(() => {}), 10, () => new Error("timed out")),
+    /timed out/,
+  );
+  assert.ok(Date.now() - started < 500);
+});
+
+test("mapPool continues after one timed-out loadPage", async () => {
+  const completed = [];
+  const failed = [];
+  const pages = ["page-ok-1", "page-timeout", "page-ok-2"];
+
+  await mapPool(pages, 1, async (pageCode) => {
+    try {
+      const loadPage =
+        pageCode === "page-timeout"
+          ? new Promise(() => {})
+          : Promise.resolve({ code: pageCode });
+      await withTimeout(
+        loadPage,
+        10,
+        () => new Error("loadPage page " + pageCode + " timed out after 10 ms"),
+      );
+      completed.push(pageCode);
+    } catch {
+      failed.push(pageCode);
+    }
+  });
+
+  assert.deepEqual(completed, ["page-ok-1", "page-ok-2"]);
+  assert.deepEqual(failed, ["page-timeout"]);
 });
 
 test("isMissingIntroError accepts HTTP 404", () => {
@@ -187,6 +273,72 @@ test("extractMentionedCodes finds src, dataUri, href and URL-encoded query codes
   );
 });
 
+test("extractMentionedCodes still finds codes in a large haystack via windows", () => {
+  const text = "x".repeat(90000) + ' src="windowed-att-code" ' + "y".repeat(1000);
+  const codes = extractMentionedCodes(text);
+  assert.ok(codes.includes("windowed-att-code"));
+});
+
+test("async code extraction matches sync unique codes across regex window overlap", async () => {
+  const prefix = "x".repeat(80000 - 12);
+  const text = prefix + ' src="overlap-code" ' + "y".repeat(1000);
+  assert.deepEqual(
+    uniqueCodesInOrder(await extractMentionedCodesAsync(text)),
+    uniqueCodesInOrder(extractMentionedCodes(text)),
+  );
+});
+
+test("async haystack scan yields to timers and matches sync reference", async () => {
+  const page = {
+    items: Array.from({ length: 12000 }, (_, index) => ({
+      body: 'src="synthetic-code-' + (index % 31) + '" ' + "x".repeat(100),
+    })),
+  };
+  const expected = extractMentionedCodes(pageHaystack(page));
+  let heartbeatCount = 0;
+  const heartbeat = setInterval(() => {
+    heartbeatCount++;
+  }, 0);
+
+  const asyncHaystack = await pageHaystackAsync(page);
+  const actual = await extractMentionedCodesAsync(asyncHaystack);
+  clearInterval(heartbeat);
+
+  assert.ok(heartbeatCount > 0);
+  assert.equal(asyncHaystack, pageHaystack(page));
+  assert.deepEqual(uniqueCodesInOrder(actual), uniqueCodesInOrder(expected));
+});
+
+test("usage hit deduplication preserves first path order", () => {
+  const pathsByCode = new Map();
+  const pathSetsByCode = new Map();
+  [
+    ["code-a", "Page 2"],
+    ["code-a", "Page 1"],
+    ["code-a", "Page 2"],
+    ["code-a", "Page 1"],
+    ["code-a", "Page 3"],
+    ["code-a", "Page 3"],
+  ].forEach(([code, path]) => recordUsageHit(pathsByCode, pathSetsByCode, code, path));
+
+  assert.deepEqual(pathsByCode.get("code-a"), ["Page 2", "Page 1", "Page 3"]);
+  assert.deepEqual([...pathSetsByCode.get("code-a")], ["Page 2", "Page 1", "Page 3"]);
+});
+
+test("isHaystackHostObject detects DOM-like hosts", () => {
+  assert.equal(isHaystackHostObject({ nodeType: 1, tagName: "DIV" }), true);
+  assert.equal(isHaystackHostObject({ content: "page" }), false);
+});
+
+test("pageHaystack skips long data URI blobs", () => {
+  const haystack = pageHaystack({
+    code: "keep-me",
+    dataUri: "data:image/png;base64," + "A".repeat(5000),
+  });
+  assert.match(haystack, /keep-me/);
+  assert.equal(haystack.includes("AAAA"), false);
+});
+
 test("pageHaystack collects nested string content from full page payload", () => {
   const haystack = pageHaystack({
     name: { cs: "Úvod" },
@@ -214,6 +366,7 @@ test("pageHaystack collects nested string content from full page payload", () =>
   assert.match(haystack, /body-string-code/);
   assert.match(haystack, /nested-data-uri/);
   assert.match(haystack, /"dataUri"/);
+  assert.match(haystack, /"dataUri":"nested-data-uri"/);
 });
 
 test("pageHaystack survives cyclic object references", () => {
@@ -225,6 +378,34 @@ test("pageHaystack survives cyclic object references", () => {
   assert.match(pageHaystack(page), /cycle-code/);
 });
 
+test("pageHaystack keeps JSON-like fragments for parsed attachment props", () => {
+  const haystack = pageHaystack({
+    parsed: {
+      src: "parsed-src",
+      dataUri: "parsed-data-uri",
+      href: "parsed-href",
+    },
+    body: '<UU5.Bricks.Image src="body-code" />',
+  });
+
+  assert.match(haystack, /"src":"parsed-src"/);
+  assert.match(haystack, /"dataUri":"parsed-data-uri"/);
+  assert.match(haystack, /"href":"parsed-href"/);
+  assert.match(haystack, /body-code/);
+  assert.doesNotMatch(haystack, /"parsed"/);
+});
+
+test("pageHaystack rejects injectable traversal limits", () => {
+  assert.throws(
+    () => pageHaystack({ nested: { value: "too-many-nodes" } }, { maxNodes: 1 }),
+    /node limit exceeded/,
+  );
+  assert.throws(
+    () => pageHaystack({ body: "12345" }, { maxStringData: 4 }),
+    /string limit exceeded/,
+  );
+});
+
 test("safeSerializeForHaystack produces cycle-safe JSON", () => {
   const value = { code: "a", nested: { src: "b" } };
   value.nested.parent = value;
@@ -234,21 +415,206 @@ test("safeSerializeForHaystack produces cycle-safe JSON", () => {
   assert.doesNotThrow(() => JSON.parse(serialized));
 });
 
+test("scanConcurrencyForCount uses two workers above 1000 pages", () => {
+  assert.equal(scanConcurrencyForCount(1000), 2);
+  assert.equal(scanConcurrencyForCount(1001), 2);
+  assert.equal(scanConcurrencyForCount(2161), 2);
+});
+
+test("nextRateGate spaces requests by the configured gap", () => {
+  const first = nextRateGate(0, 1000, 150);
+  assert.deepEqual(first, { waitMs: 0, nextAllowedAt: 1150 });
+  const second = nextRateGate(first.nextAllowedAt, 1010, 150);
+  assert.deepEqual(second, { waitMs: 140, nextAllowedAt: 1300 });
+  const later = nextRateGate(1300, 2000, 150);
+  assert.deepEqual(later, { waitMs: 0, nextAllowedAt: 2150 });
+});
+
+test("rate controller starts conservatively without a success streak", () => {
+  const controller = createRateController();
+  assert.deepEqual(controller.getState(), { gapMs: 75, successStreak: 0 });
+  assert.deepEqual(RATE_CONTROLLER_DEFAULTS, {
+    initialGapMs: 75,
+    minGapMs: 15,
+    maxGapMs: 2000,
+    successStreakLimit: 10,
+    successGapFactor: 0.8,
+    failureMinGapMs: 250,
+  });
+});
+
+test("rate controller lowers gap only after a stable success streak", () => {
+  let state = { gapMs: 75, successStreak: 0 };
+  for (let index = 0; index < 9; index++) {
+    state = nextRateControllerState(state, "success");
+  }
+  assert.deepEqual(state, { gapMs: 75, successStreak: 9 });
+  assert.deepEqual(nextRateControllerState(state, "success"), { gapMs: 60, successStreak: 0 });
+});
+
+test("rate controller stops decreasing at 15 ms", () => {
+  let state = { gapMs: 19, successStreak: 9 };
+  state = nextRateControllerState(state, "success");
+  assert.deepEqual(state, { gapMs: 15, successStreak: 0 });
+  for (let index = 0; index < 10; index++) {
+    state = nextRateControllerState(state, "success");
+  }
+  assert.equal(state.gapMs, 15);
+});
+
+test("rate controller backs off failures multiplicatively with a 250 ms floor", () => {
+  assert.deepEqual(
+    nextRateControllerState({ gapMs: 100, successStreak: 7 }, "failure"),
+    { gapMs: 250, successStreak: 0 },
+  );
+  assert.deepEqual(
+    nextRateControllerState({ gapMs: 400, successStreak: 7 }, "failure"),
+    { gapMs: 800, successStreak: 0 },
+  );
+});
+
+test("rate controller caps failure backoff at 2000 ms", () => {
+  assert.deepEqual(
+    nextRateControllerState({ gapMs: 1500, successStreak: 4 }, "failure"),
+    { gapMs: 2000, successStreak: 0 },
+  );
+  assert.deepEqual(
+    nextRateControllerState({ gapMs: 2000, successStreak: 4 }, "failure"),
+    { gapMs: 2000, successStreak: 0 },
+  );
+});
+
+test("rate controller failure resets the success streak", () => {
+  const controller = createRateController();
+  for (let index = 0; index < 6; index++) controller.recordSuccess();
+  assert.equal(controller.getState().successStreak, 6);
+  assert.deepEqual(controller.recordFailure(), { gapMs: 250, successStreak: 0 });
+});
+
+test("shared rate gate spaces concurrent worker starts without burst", () => {
+  let sharedNextAllowedAt = 0;
+  const acquire = (now, gapMs) => {
+    const planned = nextRateGate(sharedNextAllowedAt, now, gapMs);
+    sharedNextAllowedAt = planned.nextAllowedAt;
+    return planned;
+  };
+
+  const now = 1000;
+  const first = acquire(now, 75);
+  const second = acquire(now, 75);
+
+  assert.deepEqual(first, { waitMs: 0, nextAllowedAt: 1075 });
+  assert.deepEqual(second, { waitMs: 75, nextAllowedAt: 1150 });
+});
+
+test("rate gate uses the current gap without creating a burst", () => {
+  const first = nextRateGate(0, 1000, 75);
+  const second = nextRateGate(first.nextAllowedAt, 1000, 15);
+  assert.deepEqual(first, { waitMs: 0, nextAllowedAt: 1075 });
+  assert.deepEqual(second, { waitMs: 75, nextAllowedAt: 1090 });
+});
+
+test("yieldToBrowser yields to a timer macrotask", async () => {
+  let timerRan = false;
+  setTimeout(() => {
+    timerRan = true;
+  }, 0);
+
+  await yieldToBrowser();
+  assert.equal(timerRan, true);
+});
+
 test("normalizeHaystackText decodes common HTML entities", () => {
   assert.equal(normalizeHaystackText("&amp;quot;code&amp;quot;"), '"code"');
 });
 
-test("structureRev reads sys.rev", () => {
-  assert.equal(structureRev({ sys: { rev: 12 } }), "12");
-  assert.equal(structureRev({}), "");
+test("normalizeHaystackText skips entity replace when text has no ampersand", () => {
+  assert.equal(normalizeHaystackText("plain-code"), "plain-code");
 });
 
-test("shouldWriteUsageCache requires clean completed scan with hits", () => {
-  const paths = new Map([["a", ["Intro"]]]);
-  assert.equal(shouldWriteUsageCache({ completed: true, failedCount: 0, pathsByCode: paths }), true);
-  assert.equal(shouldWriteUsageCache({ completed: true, failedCount: 1, pathsByCode: paths }), false);
-  assert.equal(shouldWriteUsageCache({ completed: false, failedCount: 0, pathsByCode: paths }), false);
-  assert.equal(shouldWriteUsageCache({ completed: true, failedCount: 0, pathsByCode: new Map() }), false);
+test("decodeMentionedCode skips decodeURIComponent when text has no percent", () => {
+  assert.equal(decodeMentionedCode("file-name"), "file-name");
+  assert.equal(decodeMentionedCode("file%2Dname"), "file-name");
+});
+
+test("async regex matcher yields during a single 80k window with many matches", async () => {
+  const unit = "&code=hit";
+  const text = unit.repeat(Math.floor(80000 / unit.length));
+  let heartbeatCount = 0;
+  const heartbeat = setInterval(() => {
+    heartbeatCount++;
+  }, 0);
+
+  await extractMentionedCodesAsync(text);
+  clearInterval(heartbeat);
+
+  assert.ok(heartbeatCount > 0);
+});
+
+test("async and sync extraction agree on encoded entity and overlap variants", async () => {
+  const prefix = "x".repeat(80000 - 24);
+  const text = [
+    'code="file%2Dname"',
+    '"code": "json%2Dcode"',
+    "&quot;binaryCode&quot;: &quot;entity%2Dbin&quot;",
+    prefix + ' src="overlap-code"',
+  ].join("\n");
+
+  assert.deepEqual(
+    uniqueCodesInOrder(await extractMentionedCodesAsync(text)),
+    uniqueCodesInOrder(extractMentionedCodes(text)),
+  );
+});
+
+test("extractMentionedCodesAsync decodes each unique raw candidate once", async () => {
+  let decodeCount = 0;
+  const text = ('"code":"duplicate"').repeat(500);
+  await extractMentionedCodesAsync(text, {
+    hooks: {
+      onDecodeMentionedCode: () => {
+        decodeCount++;
+      },
+    },
+  });
+
+  assert.equal(decodeCount, 1);
+  assert.deepEqual(
+    uniqueCodesInOrder(await extractMentionedCodesAsync(text)),
+    uniqueCodesInOrder(extractMentionedCodes(text)),
+  );
+});
+
+test("extractMentionedCodesAsync rejects page when regex match limit exceeded", async () => {
+  const text = "&code=x".repeat(HAYSTACK_REGEX_MATCH_LIMIT + 1);
+  await assert.rejects(
+    () => extractMentionedCodesAsync(text),
+    (error) => error.message === HAYSTACK_REGEX_MATCH_LIMIT_ERROR,
+  );
+});
+
+test("pullCodesFromPattern advances lastIndex on zero-length matches", () => {
+  const pattern = /()/g;
+  const found = [];
+  const started = Date.now();
+  pullCodesFromPattern(pattern, "abc", found);
+  assert.ok(Date.now() - started < 500);
+});
+
+test("startUsageScan always runs a fresh scan without persistent usage cache", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "bookkit-file-manager.user.js"), "utf8");
+  const startIndex = source.indexOf("async function startUsageScan()");
+  assert.ok(startIndex >= 0);
+  const startBody = source.slice(startIndex, startIndex + 4500);
+
+  assert.doesNotMatch(
+    source,
+    /CACHE_KEY_PREFIX|CACHE_TTL_MS|cacheKey|readUsageCache|writeUsageCache|applyCachedPaths|shouldWriteUsageCache|structureRev/,
+  );
+  assert.doesNotMatch(startBody, /sessionStorage|localStorage/);
+  assert.doesNotMatch(startBody, /readUsageCache|writeUsageCache|applyCachedPaths|shouldWriteUsageCache/);
+  assert.match(startBody, /resetUsagePaths\(\)/);
+  assert.match(startBody, /await mapPool\(pageCodes/);
+  assert.match(source, /if \(!usageScan\.running\) startUsageScan\(\)/);
 });
 
 test("usagePathsForCode maps thumbnail suffix to base code", () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         uuBookKit – FileManager
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.4.4
+// @version      1.4.12
 // @description  Attachment size, sort by size, and optional heuristic attachment-usage check for uuBookKit FileManager.
 // @author       Lukáš Vyleťal
 // @match        https://uuapp.plus4u.net/uu-bookkit-maing01/*
@@ -32,7 +32,7 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmBookKitFileManager";
-  const SCRIPT_VERSION = "1.4.4";
+  const SCRIPT_VERSION = "1.4.12";
   const STYLE_ID = "gm-bk-file-manager-style";
   const NET_HOOK_FLAG = "__gmBkFmNetHooked";
   const SIZE_SORTER_HOOK_FLAG = "__gmBkSizeSorterHooked";
@@ -48,9 +48,48 @@
   const BUTTON_FALLBACK_CLASS = "bk-attachment-usage-btn-fallback";
   const TILE_SELECTOR = ".plus4u5-files-file-manager-tile";
   const FM_SELECTOR = ".plus4u5-files-file-manager";
-  const CACHE_TTL_MS = 30 * 60 * 1000;
-  const CACHE_KEY_PREFIX = "gm-bk-att-usage:v4:";
-  const SCAN_CONCURRENCY = 4;
+  const SCAN_CONCURRENCY = 2;
+  const LARGE_SCAN_PAGE_COUNT = 1000;
+  const LARGE_SCAN_CONCURRENCY = 2;
+  const SCAN_INITIAL_GAP_MS = 75;
+  const SCAN_GAP_MIN_MS = 15;
+  const SCAN_GAP_MAX_MS = 2000;
+  const SCAN_SUCCESS_STREAK_LIMIT = 10;
+  const SCAN_SUCCESS_GAP_FACTOR = 0.8;
+  const SCAN_FAILURE_MIN_GAP_MS = 250;
+  const LOAD_PAGE_TIMEOUT_MS = 15000;
+  const PROGRESS_UI_THROTTLE_MS = 200;
+  const HAYSTACK_REGEX_WINDOW = 80000;
+  const HAYSTACK_REGEX_OVERLAP = 256;
+  const HAYSTACK_COOPERATIVE_NODE_BATCH = 256;
+  const HAYSTACK_COOPERATIVE_BUDGET_MS = 7;
+  const HAYSTACK_REGEX_MATCH_BUDGET_MS = 7;
+  const HAYSTACK_REGEX_MATCH_BATCH = 200;
+  const HAYSTACK_REGEX_MATCH_LIMIT = 50000;
+  const HAYSTACK_REGEX_MATCH_LIMIT_ERROR =
+    "gm-bk-att-usage:haystack regex match limit exceeded";
+  const DEFAULT_HAYSTACK_LIMITS = {
+    maxNodes: 100000,
+    maxStringData: 5 * 1024 * 1024,
+  };
+  const HAYSTACK_SKIP_KEYS = new Set([
+    "sys",
+    "uuAppErrorMap",
+    "authorizationResult",
+    "session",
+    "memoizedProps",
+    "stateNode",
+  ]);
+  const HAYSTACK_JSON_KEYS = new Set([
+    "src",
+    "dataUri",
+    "srcUri",
+    "href",
+    "code",
+    "binaryCode",
+    "attachmentCode",
+    "fileCode",
+  ]);
   const SIZE_SORT_KEY = "size";
   const SIZE_SORTER_RETRY_MS = 200;
   const SIZE_SORTER_MAX_MS = 10000;
@@ -68,6 +107,13 @@
   const CODE_PULL_QUERY = /[?&]code=([^&"'#\s]+)/gi;
   const CODE_PULL_JSON = new RegExp('"(?:' + CODE_JSON_KEYS + ')"\\s*:\\s*"([^"]+)"', "gi");
   const CODE_PULL_URL_ATTR = /(?:srcUri|href)\s*=\s*["']([^"']+)["']/gi;
+
+  const CODE_PULL_PATTERNS = [
+    CODE_PULL_DIRECT_ATTR,
+    CODE_PULL_QUERY,
+    CODE_PULL_URL_ATTR,
+    CODE_PULL_JSON,
+  ];
 
   const LANGUAGES = ["cs", "en", "uk"];
   const FALLBACK_LANGUAGE = "en";
@@ -116,6 +162,11 @@
       cs: "nepodařilo se načíst žádnou stránku knihy",
       en: "no book page could be loaded",
       uk: "не вдалося завантажити жодної сторінки книги",
+    },
+    scanHostGone: {
+      cs: "FileManager během ověření zmizel (BookKit Unknown Error / reload) — scan zastaven, aby se neposílaly další loadPage",
+      en: "FileManager disappeared during the check (BookKit Unknown Error / reload) — scan stopped so further loadPage calls are not sent",
+      uk: "FileManager зник під час перевірки (BookKit Unknown Error / reload) — сканування зупинено",
     },
     pagesFailed: {
       cs: "{failed} z {total} stránek se nepodařilo načíst — nepoužité přílohy nejsou označeny",
@@ -176,34 +227,11 @@
     };
   }
 
-  function structureRev(structure) {
-    return structure && structure.sys && structure.sys.rev != null ? String(structure.sys.rev) : "";
-  }
-
-  function hasNonEmptyUsagePaths(pathsByCode) {
-    if (pathsByCode instanceof Map) {
-      for (const list of pathsByCode.values()) {
-        if (Array.isArray(list) && list.length) return true;
-      }
-      return false;
-    }
-    if (pathsByCode && typeof pathsByCode === "object") {
-      return Object.keys(pathsByCode).some((key) => {
-        const list = pathsByCode[key];
-        return Array.isArray(list) && list.length > 0;
-      });
-    }
-    return false;
-  }
-
-  function shouldWriteUsageCache({ failedCount, completed, pathsByCode }) {
-    if (!completed || failedCount > 0) return false;
-    return hasNonEmptyUsagePaths(pathsByCode);
-  }
-
   function normalizeHaystackText(text) {
     if (!text) return "";
-    return String(text)
+    const value = String(text);
+    if (!value.includes("&")) return value;
+    return value
       .replace(/&amp;/g, "&")
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
@@ -211,27 +239,39 @@
       .replace(/&gt;/g, ">");
   }
 
-  function decodeMentionedCode(value) {
+  function decodeMentionedCode(value, hooks) {
     if (!value) return value;
+    if (hooks && typeof hooks.onDecodeMentionedCode === "function") {
+      hooks.onDecodeMentionedCode();
+    }
     let decoded = normalizeHaystackText(value);
-    try {
-      decoded = decodeURIComponent(decoded.replace(/\+/g, " "));
-    } catch {
-      /* keep partially decoded value */
+    if (decoded.includes("%")) {
+      try {
+        decoded = decodeURIComponent(decoded.replace(/\+/g, " "));
+      } catch {
+        /* keep partially decoded value */
+      }
     }
     return decoded;
+  }
+
+  function advancePatternLastIndex(pattern, match) {
+    if (match[0].length === 0) {
+      pattern.lastIndex++;
+    }
   }
 
   function pullCodesFromPattern(pattern, text, found) {
     pattern.lastIndex = 0;
     let match;
     while ((match = pattern.exec(text))) {
+      advancePatternLastIndex(pattern, match);
       pushMentionedCode(match[1], found);
     }
   }
 
-  function pushMentionedCode(raw, found) {
-    const code = decodeMentionedCode(raw);
+  function pushMentionedCode(raw, found, hooks) {
+    const code = decodeMentionedCode(raw, hooks);
     if (!code) return;
     if (/^https?:/i.test(code) || /[?&]code=/i.test(code)) {
       pullCodesFromPattern(CODE_PULL_QUERY, code, found);
@@ -240,31 +280,132 @@
     found.push(code);
   }
 
+  function createMentionedCodeScanState(found) {
+    return {
+      found,
+      seenRaw: new Set(),
+      matchCount: 0,
+    };
+  }
+
+  function noteRegexMatch(state) {
+    state.matchCount++;
+    if (state.matchCount > HAYSTACK_REGEX_MATCH_LIMIT) {
+      throw new Error(HAYSTACK_REGEX_MATCH_LIMIT_ERROR);
+    }
+  }
+
+  async function pullCodesFromPatternAsync(pattern, text, state, hooks) {
+    pattern.lastIndex = 0;
+    let match;
+    let matchesInBatch = 0;
+    let budgetStart = Date.now();
+
+    while ((match = pattern.exec(text))) {
+      noteRegexMatch(state);
+      advancePatternLastIndex(pattern, match);
+      matchesInBatch++;
+      if (
+        matchesInBatch >= HAYSTACK_REGEX_MATCH_BATCH ||
+        Date.now() - budgetStart >= HAYSTACK_REGEX_MATCH_BUDGET_MS
+      ) {
+        matchesInBatch = 0;
+        budgetStart = Date.now();
+        await yieldToBrowser();
+      }
+      const raw = match[1];
+      if (!raw || state.seenRaw.has(raw)) continue;
+      state.seenRaw.add(raw);
+      await pushMentionedCodeAsync(raw, state, hooks);
+    }
+  }
+
+  async function pushMentionedCodeAsync(raw, state, hooks) {
+    const pending = [raw];
+    while (pending.length) {
+      const nextRaw = pending.shift();
+      const code = decodeMentionedCode(nextRaw, hooks);
+      if (!code) continue;
+      if (/^https?:/i.test(code) || /[?&]code=/i.test(code)) {
+        CODE_PULL_QUERY.lastIndex = 0;
+        let match;
+        let matchesInBatch = 0;
+        let budgetStart = Date.now();
+        while ((match = CODE_PULL_QUERY.exec(code))) {
+          noteRegexMatch(state);
+          advancePatternLastIndex(CODE_PULL_QUERY, match);
+          const nestedRaw = match[1];
+          if (!nestedRaw || state.seenRaw.has(nestedRaw)) continue;
+          state.seenRaw.add(nestedRaw);
+          pending.push(nestedRaw);
+          matchesInBatch++;
+          if (
+            matchesInBatch >= HAYSTACK_REGEX_MATCH_BATCH ||
+            Date.now() - budgetStart >= HAYSTACK_REGEX_MATCH_BUDGET_MS
+          ) {
+            matchesInBatch = 0;
+            budgetStart = Date.now();
+            await yieldToBrowser();
+          }
+        }
+        continue;
+      }
+      state.found.push(code);
+    }
+  }
+
+  async function scanChunkForMentionedCodesAsync(chunk, state, hooks) {
+    for (const pattern of CODE_PULL_PATTERNS) {
+      await pullCodesFromPatternAsync(pattern, chunk, state, hooks);
+    }
+  }
+
   function extractMentionedCodes(text) {
     const found = [];
     if (!text) return found;
     const normalized = normalizeHaystackText(text);
-    pullCodesFromPattern(CODE_PULL_DIRECT_ATTR, normalized, found);
-    pullCodesFromPattern(CODE_PULL_QUERY, normalized, found);
-    pullCodesFromPattern(CODE_PULL_URL_ATTR, normalized, found);
-    pullCodesFromPattern(CODE_PULL_JSON, normalized, found);
+    const scanChunk = (chunk) => {
+      pullCodesFromPattern(CODE_PULL_DIRECT_ATTR, chunk, found);
+      pullCodesFromPattern(CODE_PULL_QUERY, chunk, found);
+      pullCodesFromPattern(CODE_PULL_URL_ATTR, chunk, found);
+      pullCodesFromPattern(CODE_PULL_JSON, chunk, found);
+    };
+    if (normalized.length <= HAYSTACK_REGEX_WINDOW) {
+      scanChunk(normalized);
+      return found;
+    }
+    const step = HAYSTACK_REGEX_WINDOW - HAYSTACK_REGEX_OVERLAP;
+    for (let start = 0; start < normalized.length; start += step) {
+      scanChunk(normalized.slice(start, start + HAYSTACK_REGEX_WINDOW));
+    }
     return found;
   }
 
-  function collectStrings(value, out, seen) {
-    if (typeof value === "string") {
-      out.push(value);
-      return;
+  async function extractMentionedCodesAsync(text, options) {
+    const found = [];
+    if (!text) return found;
+    const hooks = options && options.hooks;
+    const normalized = normalizeHaystackText(text);
+    const state = createMentionedCodeScanState(found);
+    const step = HAYSTACK_REGEX_WINDOW - HAYSTACK_REGEX_OVERLAP;
+    for (let start = 0; start < normalized.length; start += step) {
+      const end = Math.min(start + HAYSTACK_REGEX_WINDOW, normalized.length);
+      await scanChunkForMentionedCodesAsync(normalized.slice(start, end), state, hooks);
+      if (end < normalized.length) await yieldToBrowser();
     }
-    if (value == null || typeof value !== "object") return;
-    const tracker = seen || new WeakSet();
-    if (tracker.has(value)) return;
-    tracker.add(value);
-    if (Array.isArray(value)) {
-      value.forEach((item) => collectStrings(item, out, tracker));
-      return;
-    }
-    Object.keys(value).forEach((key) => collectStrings(value[key], out, tracker));
+    return found;
+  }
+
+  function isLongDataUri(text) {
+    return typeof text === "string" && text.length > 4096 && /^data:/i.test(text);
+  }
+
+  function isHaystackHostObject(value) {
+    if (!value || typeof value !== "object") return false;
+    if (value.nodeType != null) return true;
+    if (typeof Element !== "undefined" && value instanceof Element) return true;
+    if (typeof Window !== "undefined" && value instanceof Window) return true;
+    return false;
   }
 
   function safeSerializeForHaystack(value) {
@@ -283,12 +424,137 @@
     }
   }
 
-  function pageHaystack(page) {
+  function pageHaystack(page, limits) {
     if (!page) return "";
     const parts = [];
-    collectStrings(page, parts, new WeakSet());
-    const serialized = safeSerializeForHaystack(page);
-    if (serialized) parts.push(serialized);
+    const options = Object.assign({}, DEFAULT_HAYSTACK_LIMITS, limits || {});
+    const maxNodes = Number.isFinite(options.maxNodes) ? options.maxNodes : DEFAULT_HAYSTACK_LIMITS.maxNodes;
+    const maxStringData = Number.isFinite(options.maxStringData)
+      ? options.maxStringData
+      : DEFAULT_HAYSTACK_LIMITS.maxStringData;
+    const stack = [page];
+    const seen = new WeakSet();
+    let visitedNodes = 0;
+    let stringData = 0;
+
+    const addString = (text) => {
+      stringData += text.length;
+      if (stringData > maxStringData) {
+        throw new Error("page haystack string limit exceeded");
+      }
+      parts.push(text);
+    };
+
+    while (stack.length) {
+      const value = stack.pop();
+      visitedNodes++;
+      if (visitedNodes > maxNodes) {
+        throw new Error("page haystack node limit exceeded");
+      }
+      if (typeof value === "string") {
+        if (isLongDataUri(value)) continue;
+        addString(value);
+        continue;
+      }
+      if (value == null || typeof value !== "object") continue;
+      if (isHaystackHostObject(value)) continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+
+      let keys;
+      try {
+        keys = Object.keys(value);
+      } catch {
+        throw new Error("page haystack traversal failed");
+      }
+      for (let index = keys.length - 1; index >= 0; index--) {
+        const key = keys[index];
+        if (HAYSTACK_SKIP_KEYS.has(key)) continue;
+        let nested;
+        try {
+          nested = value[key];
+        } catch {
+          throw new Error("page haystack traversal failed");
+        }
+        if (isLongDataUri(nested)) continue;
+        if (typeof nested === "string" && HAYSTACK_JSON_KEYS.has(key)) {
+          addString(JSON.stringify(key) + ":" + JSON.stringify(nested));
+        }
+        stack.push(nested);
+      }
+    }
+    return parts.join("\n");
+  }
+
+  async function pageHaystackAsync(page, limits) {
+    if (!page) return "";
+    const parts = [];
+    const options = Object.assign({}, DEFAULT_HAYSTACK_LIMITS, limits || {});
+    const maxNodes = Number.isFinite(options.maxNodes) ? options.maxNodes : DEFAULT_HAYSTACK_LIMITS.maxNodes;
+    const maxStringData = Number.isFinite(options.maxStringData)
+      ? options.maxStringData
+      : DEFAULT_HAYSTACK_LIMITS.maxStringData;
+    const stack = [page];
+    const seen = new WeakSet();
+    let visitedNodes = 0;
+    let stringData = 0;
+    let batchStart = Date.now();
+    let batchNodes = 0;
+
+    const addString = (text) => {
+      stringData += text.length;
+      if (stringData > maxStringData) {
+        throw new Error("page haystack string limit exceeded");
+      }
+      parts.push(text);
+    };
+
+    while (stack.length) {
+      const value = stack.pop();
+      visitedNodes++;
+      batchNodes++;
+      if (visitedNodes > maxNodes) {
+        throw new Error("page haystack node limit exceeded");
+      }
+      if (typeof value === "string") {
+        if (!isLongDataUri(value)) addString(value);
+      } else if (value != null && typeof value === "object" && !isHaystackHostObject(value)) {
+        if (!seen.has(value)) {
+          seen.add(value);
+          let keys;
+          try {
+            keys = Object.keys(value);
+          } catch {
+            throw new Error("page haystack traversal failed");
+          }
+          for (let index = keys.length - 1; index >= 0; index--) {
+            const key = keys[index];
+            if (HAYSTACK_SKIP_KEYS.has(key)) continue;
+            let nested;
+            try {
+              nested = value[key];
+            } catch {
+              throw new Error("page haystack traversal failed");
+            }
+            if (isLongDataUri(nested)) continue;
+            if (typeof nested === "string" && HAYSTACK_JSON_KEYS.has(key)) {
+              addString(JSON.stringify(key) + ":" + JSON.stringify(nested));
+            }
+            stack.push(nested);
+          }
+        }
+      }
+
+      if (
+        stack.length &&
+        (batchNodes >= HAYSTACK_COOPERATIVE_NODE_BATCH ||
+          Date.now() - batchStart >= HAYSTACK_COOPERATIVE_BUDGET_MS)
+      ) {
+        await yieldToBrowser();
+        batchStart = Date.now();
+        batchNodes = 0;
+      }
+    }
     return parts.join("\n");
   }
 
@@ -556,6 +822,11 @@
   const sizeByCode = new Map();
   const sizeByFilename = new Map();
 
+  function resetUsagePaths() {
+    usageScan.pathsByCode = new Map();
+    usageScan.pathSetsByCode = new Map();
+  }
+
   const usageScan = {
     active: false,
     running: false,
@@ -565,11 +836,16 @@
     failedCount: 0,
     error: null,
     pathsByCode: new Map(),
+    pathSetsByCode: new Map(),
   };
 
   let trackedAwid = "";
   let sizesFetchedForAwid = "";
   let renderScheduled = false;
+  let progressUiTimer = null;
+  let progressUiPending = false;
+  let progressUiGeneration = 0;
+  let usageScanGeneration = 0;
   let sizeSorterAdded = false;
   let activeSizeFetchPromise = null;
   let sizeSorterTimer = null;
@@ -597,7 +873,7 @@
         );
       }
     }
-    if (changed) scheduleRender();
+    if (changed && !usageScan.running) scheduleRender();
   }
 
   function hookNetworkForSizes() {
@@ -838,12 +1114,49 @@
   }
 
   function scheduleRender() {
-    if (renderScheduled || typeof requestAnimationFrame !== "function") return;
+    if (usageScan.running || renderScheduled || typeof requestAnimationFrame !== "function") return;
     renderScheduled = true;
     requestAnimationFrame(() => {
       renderScheduled = false;
+      if (usageScan.running) return;
       render();
     });
+  }
+
+  function clearProgressUiTimer() {
+    if (progressUiTimer !== null) {
+      clearTimeout(progressUiTimer);
+      progressUiTimer = null;
+    }
+    progressUiPending = false;
+    progressUiGeneration++;
+  }
+
+  function flushProgressUi() {
+    if (progressUiTimer !== null) {
+      clearTimeout(progressUiTimer);
+      progressUiTimer = null;
+    }
+    progressUiPending = false;
+    ensureUsageButton();
+    if (!usageScan.running) scheduleRender();
+  }
+
+  function scheduleProgressUiUpdate(immediate) {
+    if (immediate) {
+      flushProgressUi();
+      return;
+    }
+    progressUiPending = true;
+    if (progressUiTimer !== null) return;
+    const generation = progressUiGeneration;
+    progressUiTimer = setTimeout(() => {
+      progressUiTimer = null;
+      if (generation !== progressUiGeneration || !progressUiPending) return;
+      progressUiPending = false;
+      ensureUsageButton();
+      if (!usageScan.running) scheduleRender();
+    }, PROGRESS_UI_THROTTLE_MS);
   }
 
   function injectStyles() {
@@ -1069,13 +1382,14 @@
     if (usageScan.running) return;
     if (fm || document.querySelector(TILE_SELECTOR)) return;
     if (!usageScan.active && !usageScan.done) return;
+    clearProgressUiTimer();
     usageScan.active = false;
     usageScan.done = false;
     usageScan.doneCount = 0;
     usageScan.totalCount = 0;
     usageScan.failedCount = 0;
     usageScan.error = null;
-    usageScan.pathsByCode = new Map();
+    resetUsagePaths();
   }
 
   function ensureUsageButton() {
@@ -1114,50 +1428,6 @@
     return book ? book.awid : "";
   }
 
-  function cacheKey() {
-    return CACHE_KEY_PREFIX + language() + ":" + bookAwid();
-  }
-
-  function readUsageCache(structure) {
-    if (typeof sessionStorage === "undefined") return null;
-    try {
-      const raw = sessionStorage.getItem(cacheKey());
-      if (!raw) return null;
-      const data = JSON.parse(raw);
-      if (!data || typeof data !== "object" || !data.paths) return null;
-      if (Date.now() - data.ts > CACHE_TTL_MS) return null;
-      if (data.rev !== structureRev(structure)) return null;
-      return Object.keys(data.paths).length ? data.paths : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function writeUsageCache(structure, pathsByCode) {
-    if (!shouldWriteUsageCache({ failedCount: 0, completed: true, pathsByCode })) return;
-    const paths = {};
-    pathsByCode.forEach((list, code) => {
-      paths[code] = list;
-    });
-    try {
-      sessionStorage.setItem(
-        cacheKey(),
-        JSON.stringify({ rev: structureRev(structure), ts: Date.now(), paths: paths })
-      );
-    } catch {
-      /* storage quota / private mode */
-    }
-  }
-
-  function applyCachedPaths(paths) {
-    const map = new Map();
-    Object.keys(paths).forEach((code) => {
-      const list = paths[code];
-      if (Array.isArray(list) && list.length) map.set(code, list.slice());
-    });
-    usageScan.pathsByCode = map;
-  }
-
   async function uuGet(cmd, params) {
     const base = bookBaseUri();
     if (!base) throw new Error("missing book base uri");
@@ -1172,18 +1442,35 @@
     }
   }
 
-  function recordHit(code, path) {
+  function recordUsageHit(pathsByCode, pathSetsByCode, code, path) {
     if (!code || !path) return;
-    let list = usageScan.pathsByCode.get(code);
+    let list = pathsByCode.get(code);
+    let membership = pathSetsByCode.get(code);
     if (!list) {
       list = [];
-      usageScan.pathsByCode.set(code, list);
+      pathsByCode.set(code, list);
+      membership = new Set();
+      pathSetsByCode.set(code, membership);
+    } else if (!membership) {
+      membership = new Set(list);
+      pathSetsByCode.set(code, membership);
     }
-    if (list.indexOf(path) === -1) list.push(path);
+    if (membership.has(path)) return;
+    membership.add(path);
+    list.push(path);
+  }
+
+  function recordHit(code, path) {
+    recordUsageHit(usageScan.pathsByCode, usageScan.pathSetsByCode, code, path);
   }
 
   function scanHaystack(text, path) {
     extractMentionedCodes(text).forEach((code) => recordHit(code, path));
+  }
+
+  async function scanHaystackAsync(text, path) {
+    const codes = await extractMentionedCodesAsync(text);
+    codes.forEach((code) => recordHit(code, path));
   }
 
   function pageOrderAndPaths(itemMap) {
@@ -1234,12 +1521,47 @@
     return codes;
   }
 
+  function withTimeout(promise, timeoutMs, createError) {
+    let timer;
+    let settled = false;
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+
+    return new Promise((resolve, reject) => {
+      timer = setTimeout(() => {
+        let error;
+        try {
+          error =
+            typeof createError === "function"
+              ? createError()
+              : createError || new Error("Promise timed out after " + timeoutMs + " ms");
+        } catch (createErrorError) {
+          error = createErrorError;
+        }
+        settle(reject, error);
+      }, timeoutMs);
+
+      Promise.resolve(promise).then(
+        (value) => settle(resolve, value),
+        (error) => settle(reject, error),
+      );
+    });
+  }
+
   async function mapPool(items, limit, fn) {
     let index = 0;
     async function worker() {
       while (index < items.length) {
         const current = index++;
-        await fn(items[current], current);
+        try {
+          await fn(items[current], current);
+        } finally {
+          await yieldToBrowser();
+        }
       }
     }
     const workers = [];
@@ -1248,7 +1570,138 @@
     await Promise.all(workers);
   }
 
+  function yieldToBrowser() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  function scanConcurrencyForCount(count) {
+    return count > LARGE_SCAN_PAGE_COUNT ? LARGE_SCAN_CONCURRENCY : SCAN_CONCURRENCY;
+  }
+
+  const RATE_CONTROLLER_DEFAULTS = Object.freeze({
+    initialGapMs: SCAN_INITIAL_GAP_MS,
+    minGapMs: SCAN_GAP_MIN_MS,
+    maxGapMs: SCAN_GAP_MAX_MS,
+    successStreakLimit: SCAN_SUCCESS_STREAK_LIMIT,
+    successGapFactor: SCAN_SUCCESS_GAP_FACTOR,
+    failureMinGapMs: SCAN_FAILURE_MIN_GAP_MS,
+  });
+
+  function rateControllerOptions(options) {
+    const source = options || {};
+    const minGapMs = Number.isFinite(source.minGapMs)
+      ? Math.max(1, Math.round(source.minGapMs))
+      : RATE_CONTROLLER_DEFAULTS.minGapMs;
+    const maxGapMs = Number.isFinite(source.maxGapMs)
+      ? Math.max(minGapMs, Math.round(source.maxGapMs))
+      : RATE_CONTROLLER_DEFAULTS.maxGapMs;
+    return {
+      initialGapMs: Math.min(
+        maxGapMs,
+        Math.max(
+          minGapMs,
+          Number.isFinite(source.initialGapMs)
+            ? Math.round(source.initialGapMs)
+            : RATE_CONTROLLER_DEFAULTS.initialGapMs,
+        ),
+      ),
+      minGapMs,
+      maxGapMs,
+      successStreakLimit: Number.isFinite(source.successStreakLimit)
+        ? Math.max(1, Math.round(source.successStreakLimit))
+        : RATE_CONTROLLER_DEFAULTS.successStreakLimit,
+      successGapFactor:
+        Number.isFinite(source.successGapFactor) && source.successGapFactor > 0 && source.successGapFactor < 1
+          ? source.successGapFactor
+          : RATE_CONTROLLER_DEFAULTS.successGapFactor,
+      failureMinGapMs: Number.isFinite(source.failureMinGapMs)
+        ? Math.max(minGapMs, Math.round(source.failureMinGapMs))
+        : RATE_CONTROLLER_DEFAULTS.failureMinGapMs,
+    };
+  }
+
+  function nextRateControllerState(state, outcome, options) {
+    const settings = rateControllerOptions(options);
+    const currentGapMs = Number.isFinite(state && state.gapMs)
+      ? Math.min(settings.maxGapMs, Math.max(settings.minGapMs, Math.round(state.gapMs)))
+      : settings.initialGapMs;
+    const currentStreak = Number.isFinite(state && state.successStreak)
+      ? Math.max(0, Math.round(state.successStreak))
+      : 0;
+    const event = typeof outcome === "string" ? outcome : outcome && outcome.type;
+
+    if (event === "failure") {
+      return {
+        gapMs: Math.min(
+          settings.maxGapMs,
+          Math.max(settings.failureMinGapMs, currentGapMs * 2),
+        ),
+        successStreak: 0,
+      };
+    }
+
+    if (event !== "success") {
+      return { gapMs: currentGapMs, successStreak: currentStreak };
+    }
+
+    const successStreak = currentStreak + 1;
+    if (successStreak < settings.successStreakLimit) {
+      return { gapMs: currentGapMs, successStreak };
+    }
+    return {
+      gapMs: Math.max(settings.minGapMs, Math.round(currentGapMs * settings.successGapFactor)),
+      successStreak: 0,
+    };
+  }
+
+  function createRateController(options) {
+    const settings = rateControllerOptions(options);
+    let state = {
+      gapMs: settings.initialGapMs,
+      successStreak: 0,
+    };
+    const getState = () => ({ gapMs: state.gapMs, successStreak: state.successStreak });
+    return {
+      getGapMs: () => state.gapMs,
+      getState,
+      recordSuccess: () => {
+        state = nextRateControllerState(state, "success", settings);
+        return getState();
+      },
+      recordFailure: () => {
+        state = nextRateControllerState(state, "failure", settings);
+        return getState();
+      },
+    };
+  }
+
+  function nextRateGate(nextAllowedAt, now, gapMs) {
+    const start = Math.max(now, nextAllowedAt);
+    return { waitMs: start - now, nextAllowedAt: start + gapMs };
+  }
+
+  function createRateGate(defaultGapMs = SCAN_INITIAL_GAP_MS) {
+    let nextAllowedAt = 0;
+    return async function waitForSlot(currentGapMs = defaultGapMs) {
+      const now = Date.now();
+      const planned = nextRateGate(nextAllowedAt, now, currentGapMs);
+      nextAllowedAt = planned.nextAllowedAt;
+      if (planned.waitMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, planned.waitMs));
+      }
+      return planned.waitMs;
+    };
+  }
+
+  function isScanHostAlive() {
+    if (typeof document === "undefined") return true;
+    if (!findFileManager()) return false;
+    const text = (document.body && document.body.textContent) || "";
+    return !( /Unknown Error/i.test(text) && /uuBookKit/i.test(text) );
+  }
+
   async function startUsageScan() {
+    const scanGeneration = ++usageScanGeneration;
     usageScan.active = true;
     usageScan.running = true;
     usageScan.done = false;
@@ -1256,28 +1709,20 @@
     usageScan.totalCount = 0;
     usageScan.failedCount = 0;
     usageScan.error = null;
-    usageScan.pathsByCode = new Map();
-    ensureUsageButton();
-    scheduleRender();
+    resetUsagePaths();
+    flushProgressUi();
 
     let completed = false;
     try {
       const structure = await uuGet("getBookStructure");
-      const cached = readUsageCache(structure);
-      if (cached) {
-        applyCachedPaths(cached);
-        usageScan.done = true;
-        usageScan.running = false;
-        ensureUsageButton();
-        scheduleRender();
-        return;
-      }
+      if (scanGeneration !== usageScanGeneration) return;
 
       const walked = pageOrderAndPaths(structure.itemMap);
       const paths = walked.paths;
       const pageCodes = walked.order.slice();
 
       const extra = await listAllPageCodes();
+      if (scanGeneration !== usageScanGeneration) return;
       extra.forEach((name, code) => {
         if (paths[code]) return;
         paths[code] = name || code;
@@ -1288,42 +1733,65 @@
       ensureUsageButton();
 
       const intro = await loadOptionalIntro(uuGet);
+      if (scanGeneration !== usageScanGeneration) return;
       if (intro != null) {
-        scanHaystack(pageHaystack(intro), t("bookIntro"));
+        await scanHaystackAsync(await pageHaystackAsync(intro), t("bookIntro"));
       }
 
-      await mapPool(pageCodes, SCAN_CONCURRENCY, async (pageCode) => {
+      const rateController = createRateController();
+      const waitForScanSlot = createRateGate();
+      await mapPool(pageCodes, scanConcurrencyForCount(pageCodes.length), async (pageCode) => {
+        if (scanGeneration !== usageScanGeneration) return;
+        if (!isScanHostAlive()) throw new Error(t("scanHostGone"));
+        await waitForScanSlot(rateController.getGapMs());
+        if (scanGeneration !== usageScanGeneration) return;
+        if (!isScanHostAlive()) throw new Error(t("scanHostGone"));
+        let pageLoaded = false;
         try {
-          const page = await uuGet("loadPage", { code: pageCode });
-          scanHaystack(pageHaystack(page), paths[pageCode] || pageCode);
-        } catch {
+          const page = await withTimeout(
+            uuGet("loadPage", { code: pageCode }),
+            LOAD_PAGE_TIMEOUT_MS,
+            () =>
+              new Error(
+                "loadPage page " + String(pageCode) + " timed out after " + LOAD_PAGE_TIMEOUT_MS + " ms",
+              ),
+          );
+          pageLoaded = true;
+          rateController.recordSuccess();
+          if (scanGeneration !== usageScanGeneration) return;
+          await scanHaystackAsync(
+            await pageHaystackAsync(page),
+            paths[pageCode] || pageCode,
+          );
+        } catch (error) {
+          if (error && error.message === t("scanHostGone")) throw error;
+          if (!pageLoaded) rateController.recordFailure();
           usageScan.failedCount++;
         }
         usageScan.doneCount++;
-        ensureUsageButton();
-        scheduleRender();
+        scheduleProgressUiUpdate(false);
       });
 
+      if (scanGeneration !== usageScanGeneration) return;
       if (pageCodes.length && usageScan.failedCount === pageCodes.length) {
         throw new Error(t("noPageLoaded"));
       }
 
       completed = true;
-      if (shouldWriteUsageCache({ failedCount: usageScan.failedCount, completed, pathsByCode: usageScan.pathsByCode })) {
-        writeUsageCache(structure, usageScan.pathsByCode);
-      }
     } catch (error) {
+      if (scanGeneration !== usageScanGeneration) return;
       usageScan.active = false;
       usageScan.error = (error && error.message) || String(error);
     }
 
     usageScan.running = false;
     usageScan.done = completed;
-    ensureUsageButton();
-    scheduleRender();
+    flushProgressUi();
   }
 
   function clearBookState() {
+    usageScanGeneration++;
+    clearProgressUiTimer();
     sizeByCode.clear();
     sizeByFilename.clear();
     sizesFetchedForAwid = "";
@@ -1334,7 +1802,7 @@
     usageScan.totalCount = 0;
     usageScan.failedCount = 0;
     usageScan.error = null;
-    usageScan.pathsByCode = new Map();
+    resetUsagePaths();
   }
 
   function syncBookContext() {
@@ -1408,7 +1876,10 @@
   }
 
   function observeTiles() {
-    new MutationObserver(scheduleRender).observe(document.documentElement, {
+    new MutationObserver(() => {
+      if (usageScan.running) return;
+      scheduleRender();
+    }).observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
@@ -1436,18 +1907,34 @@
     formatSize,
     itemSize,
     extractMentionedCodes,
+    extractMentionedCodesAsync,
     normalizeHaystackText,
+    decodeMentionedCode,
+    pullCodesFromPattern,
+    HAYSTACK_REGEX_MATCH_LIMIT,
+    HAYSTACK_REGEX_MATCH_LIMIT_ERROR,
+    isHaystackHostObject,
     safeSerializeForHaystack,
     pageHaystack,
-    structureRev,
-    shouldWriteUsageCache,
+    pageHaystackAsync,
     compareBySize,
     createSizeSortItem,
     usagePathsForCode,
+    recordUsageHit,
     unusedCodes,
     addCodesToSelection,
     isMissingIntroError,
     loadOptionalIntro,
+    withTimeout,
+    mapPool,
+    yieldToBrowser,
+    scanConcurrencyForCount,
+    RATE_CONTROLLER_DEFAULTS,
+    nextRateControllerState,
+    createRateController,
+    nextRateGate,
+    createRateGate,
+    isScanHostAlive,
     SCRIPT_VERSION,
     run,
   };

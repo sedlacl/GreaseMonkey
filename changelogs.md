@@ -7,6 +7,52 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## bookkit-file-manager.user.js
 
+### 1.4.12 — 2026-09-08
+
+- Rychlejší občasný plný scan: adaptivní `loadPage` pacing 75 ms → 15 ms (dříve 100 ms → 25 ms); success streak (10), pokles o 20 % a failure backoff floor 250 ms / max 2000 ms beze změny. Knihy nad 1000 stránek mají 2 paralelní workery se sdíleným globálním rate gate (max 2 in-flight, starty rozestoupené); malé knihy beze změny.
+- Odstraněna persistentní cache výsledků usage scanu — každý stisk „Check attachment usage“ vždy provede čerstvý průchod knihou. In-memory stav po dokončení zůstává pro badge a Select candidates; fail-closed u chyb beze změny.
+
+### 1.4.11 — 2026-09-08
+
+- **Příčina z trace:** `pullCodesFromPattern` synchronně dokončil celý `while (pattern.exec)` v jednom 80k okně — až 57 s blokace hlavního vlákna po `loadPage` (93,8 % CPU v decode/normalize).
+- Regex scan je kooperativní: yield mezi dávkami matchů (7 ms / 200 matchů), deduplikace syrových kandidátů před decode, fast path bez `&`/`%`, fail-closed limit 50 000 matchů na stránku.
+- UI během scanu zůstává responsivní; při překročení limitu se stránka započte jako selhaná bez cache a kandidátů.
+
+### 1.4.10 — 2026-09-08
+
+- `loadPage` používá adaptivní pacing: začíná na 100 ms, po stabilních sériích úspěchů postupně klesá k 25 ms a po chybě/timeoutu se bezpečně vrací až k 2000 ms.
+- Rate controller reaguje na skutečné chyby serverového požadavku bez dodatečné penalizace za pomalou, ale úspěšnou odpověď; cílem je chránit BookKit při zachování concurrency 1 u velkých knih.
+
+### 1.4.9 — 2026-09-08
+
+- Deduplikace zásahů používá interní `Set` index, takže opakované reference nerostou kvadraticky a veřejné pořadí `pathsByCode` zůstává stejné.
+- Živý scan zpracovává traversal i regex po kooperativních chunky s macrotask yieldem; během scanu se dlaždice nepřekreslují a po dokončení proběhne finální render.
+- Kontrola stavu FileManageru čte text stránky jednou přes `textContent`, bez zbytečného forced layoutu.
+
+### 1.4.8 — 2026-09-08
+
+- **Zasek JS, ne plus4u:** během scanu se po každém `loadPage` překreslovaly všechny dlaždice (React fiber + MutationObserver na celý dokument). Po stovkách stránek to zablokovalo hlavní vlákno — proto i CDP polling na ~2 minuty ztichl, ačkoli `loadPage` kolem indexu 660 je ~60 ms a payload ~150–240 kB.
+- **Scan:** progress jen aktualizuje tlačítko; značky na dlaždicích až po dokončení. MutationObserver během běhu nic nepřekresluje.
+- **Haystack:** přeskakuje DOM/host objekty, `sys`/`session` a dlouhé `data:` URI; regex nad velkým textem jde po 80 kB oknech, ať jedna obří uu5 stránka nespustí minutový parse.
+
+### 1.4.7 — 2026-09-08
+
+- **Příčina zasekávání:** full scan posílal `loadPage` tempem ~30 req/s; po ~600 stránkách BookKit spadl na „Unknown Error“, FileManager zmizel a UI vypadalo jako freeze. Samotné stránky kolem indexu 610–680 jsou rychlé (~60 ms).
+- **Tempo:** globální rate-limit 150 ms mezi starty `loadPage` (~6–7 req/s); nad 1000 stránek jediný worker, pod tím dva místo čtyř.
+- **Fail-fast:** když FileManager nebo stránka zmizí (Unknown Error / reload), scan se zastaví místo dalších stovek requestů.
+
+### 1.4.6 — 2026-09-07
+
+- **Stabilita full scanu:** progress UI je throttlované a zpracování stránek pravidelně uvolňuje browser macrotask, takže vykreslení, BrowserBridge a timeouty dostanou prostor i u tisíců stránek.
+- **Paměť a fail-closed:** page haystack používá jednoprůchodový cycle-safe traversal s limity 100 000 uzlů / 5 MB stringů; překročení se započte jako selhaná stránka bez cache a kandidátů.
+- **Velké knihy:** nad 1 000 stránek se concurrency sníží ze 4 na 2; zachován 15s `loadPage` timeout a volitelný 404 intro.
+
+### 1.4.5 — 2026-09-07
+
+- **Scan:** každý `loadPage` má 15s timeout, takže zavěšený AppClient Promise nezablokuje celý scan; stránka se započte jako selhaná a další stránky pokračují bez automatického retry.
+- **Bezpečnost výsledku:** pozdní dokončení původního timeoutovaného requestu už nemůže změnit `pathsByCode`; při částečném selhání se nezapíše cache, nezobrazí definitivní 0× a **Označit kandidáty** zůstane vypnuté.
+- **Testy:** přidán obecný Promise timeout helper a testy úspěchu, odmítnutí, timeoutu a pokračování `mapPool` po selhání stránky.
+
 ### 1.4.4 — 2026-08-28
 
 - **Scan:** legitimní absence intro (HTTP 404, uuApp kódy typu `introDoesNotExist`) scan neukončí — pokračuje bez intra, bez navýšení `failedCount`; prázdná úspěšná odpověď je nefatální.

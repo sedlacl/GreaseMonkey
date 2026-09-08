@@ -19,6 +19,16 @@
     });
   }
 
+  function waitForFirstRender() {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(resolve);
+      } else {
+        setTimeout(resolve, 0);
+      }
+    });
+  }
+
   function teardown() {
     document.getElementById("gm-bk-file-manager-style")?.remove();
     document
@@ -35,13 +45,15 @@
     } catch {
       // Ignore non-configurable flags from a previous Tampermonkey instance.
     }
+    delete window.__gmBookKitFileManagerReady;
   }
 
   teardown();
 
-  (async () => {
+  window.__gmBookKitFileManagerReady = (async () => {
     try {
       await loadScript(USER_SCRIPT_URL);
+      await waitForFirstRender();
       console.log("[gm-bookkit-file-manager] loaded", {
         version: window.__gmBookKitFileManager ? "flag-set" : "unknown",
         button: !!document.querySelector(".bk-attachment-usage-btn"),
