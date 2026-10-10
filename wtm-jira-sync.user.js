@@ -698,6 +698,7 @@
       }
       renderDaySummary(date, headerEl, actions);
     }
+    const emptyBlocks = [];
     for (const date of Object.keys(state.results).filter((d) => !known.has(d) && state.results[d].missing.length)) {
       const actions = rowActionsFor(date);
       const block = h("div", { class: "gm-wjs-vday" }, [h("strong", {}, `${date} – v Jiře, ve WTM nic`)]);
@@ -705,6 +706,17 @@
       const after = sections.find((s) => s.date < date);
       if (after) after.sectionEl.before(block);
       else if (sections.length) sections[sections.length - 1].sectionEl.after(block);
+      else emptyBlocks.push({ date, block });
+    }
+    if (emptyBlocks.length) {
+      const button = [...document.querySelectorAll("button")].find((b) => /Vytvořit položku výkazu|Create timesheet item/.test(b.textContent));
+      let cursor = button && button.parentElement;
+      for (const { block } of emptyBlocks.sort((a, b) => b.date.localeCompare(a.date))) {
+        if (cursor) {
+          cursor.after(block);
+          cursor = block;
+        } else document.body.append(block);
+      }
     }
   }
 
