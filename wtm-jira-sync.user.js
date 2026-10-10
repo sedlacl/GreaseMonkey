@@ -86,6 +86,67 @@
     return toPragueParts(Date.now()).date;
   }
 
+  // --- PURE: normalize ---
+
+  function buildWtmDescription(key, comment) {
+    const c = String(comment || "").trim();
+    return c ? `${key} ${c}` : key;
+  }
+
+  function normalizeWtmItems(list) {
+    return (list || []).map((i) => {
+      const from = toPragueParts(i.datetimeFrom);
+      const to = toPragueParts(i.datetimeTo);
+      const description = String(i.description || "").trim();
+      const key = String(i.category || description.split(/\s+/)[0] || "").trim();
+      let comment = "";
+      if (description.startsWith(`${key} `)) comment = description.slice(key.length + 1).trim();
+      else if (description !== key) comment = description;
+      return {
+        id: i.id,
+        date: from.date,
+        from: from.hm,
+        to: to.hm,
+        key,
+        comment,
+        description,
+        subject: i.subject || "",
+        subjectName: i.subjectName || "",
+        state: i.state || "",
+      };
+    });
+  }
+
+  function parseJiraDate(s) {
+    return Date.parse(String(s).replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+  }
+
+  function normalizeJiraWorklogs({ issues, worklogsByKey, meName, range }) {
+    const out = [];
+    for (const issue of issues || []) {
+      const labels = (issue.fields && issue.fields.labels) || [];
+      const summary = (issue.fields && issue.fields.summary) || "";
+      for (const wl of (worklogsByKey && worklogsByKey[issue.key]) || []) {
+        if (!wl.author || wl.author.name !== meName) continue;
+        const startMs = parseJiraDate(wl.started);
+        const from = toPragueParts(startMs);
+        const to = toPragueParts(startMs + wl.timeSpentSeconds * 1000);
+        if (from.date < range.from || from.date > range.to) continue;
+        out.push({
+          key: issue.key,
+          summary,
+          labels,
+          date: from.date,
+          from: from.hm,
+          to: to.hm,
+          comment: String(wl.comment || "").trim(),
+          worklogId: String(wl.id),
+        });
+      }
+    }
+    return out.sort((a, b) => (a.date + a.from).localeCompare(b.date + b.from));
+  }
+
   // --- BROWSER ---
 
   function run() {
@@ -103,6 +164,9 @@
     monthRange,
     previousYearMonthDash,
     todayPrague,
+    buildWtmDescription,
+    normalizeWtmItems,
+    normalizeJiraWorklogs,
     run,
   };
 });
