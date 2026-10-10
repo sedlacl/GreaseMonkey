@@ -374,6 +374,27 @@
     };
   }
 
+  // --- PURE: jira ---
+
+  async function fetchJiraMonth(range, request) {
+    const me = await request("/rest/api/2/myself");
+    const jql = `worklogAuthor = currentUser() AND worklogDate >= "${range.from}" AND worklogDate <= "${range.to}"`;
+    const issues = [];
+    let startAt = 0;
+    for (;;) {
+      const page = await request(`/rest/api/2/search?maxResults=100&startAt=${startAt}&fields=summary,labels&jql=${encodeURIComponent(jql)}`);
+      issues.push(...page.issues);
+      startAt += page.issues.length;
+      if (!page.issues.length || startAt >= page.total) break;
+    }
+    const worklogsByKey = {};
+    for (const issue of issues) {
+      const res = await request(`/rest/api/2/issue/${issue.key}/worklog?maxResults=1000`);
+      worklogsByKey[issue.key] = res.worklogs || [];
+    }
+    return normalizeJiraWorklogs({ issues, worklogsByKey, meName: me.name, range });
+  }
+
   // --- BROWSER ---
 
   // --- BROWSER: agent ---
@@ -383,6 +404,55 @@
     script.textContent = buildAgentSource();
     (document.head || document.documentElement).appendChild(script);
     script.remove();
+  }
+
+  // --- BROWSER: settings & transport ---
+
+  const SETTINGS_KEY = "gm-wjs-settings";
+  const DEFAULT_SETTINGS = Object.freeze({ jiraBaseUrl: "http://jira.indsoft.local", mapping: { ...DEFAULT_MAPPING } });
+
+  function storageGet() {
+    if (typeof GM_getValue === "function") return GM_getValue(SETTINGS_KEY, null);
+    try {
+      return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function loadSettings() {
+    const stored = storageGet() || {};
+    return { jiraBaseUrl: stored.jiraBaseUrl || DEFAULT_SETTINGS.jiraBaseUrl, mapping: { ...DEFAULT_SETTINGS.mapping, ...(stored.mapping || {}) } };
+  }
+
+  function saveSettings(settings) {
+    if (typeof GM_setValue === "function") GM_setValue(SETTINGS_KEY, settings);
+    else localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+
+  function createJiraRequest(baseUrl) {
+    return (path) =>
+      new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest !== "function") {
+          reject(Object.assign(new Error("GM_xmlhttpRequest není k dispozici (spusť skript v Tampermonkey)"), { status: 0 }));
+          return;
+        }
+        GM_xmlhttpRequest({
+          method: "GET",
+          url: `${baseUrl.replace(/\/$/, "")}${path}`,
+          headers: { Accept: "application/json" },
+          onload: (r) => {
+            if (r.status >= 200 && r.status < 300) {
+              try {
+                resolve(JSON.parse(r.responseText));
+              } catch (e) {
+                reject(Object.assign(new Error("Jira nevrátila JSON – nejsi přihlášený?"), { status: 401 }));
+              }
+            } else reject(Object.assign(new Error(`Jira HTTP ${r.status}`), { status: r.status }));
+          },
+          onerror: () => reject(Object.assign(new Error("Jira je nedostupná"), { status: 0 })),
+        });
+      });
   }
 
   function run() {
@@ -403,6 +473,7 @@
     buildWtmDescription,
     normalizeWtmItems,
     normalizeJiraWorklogs,
+    fetchJiraMonth,
     matchDay,
     matchMonth,
     DEFAULT_MAPPING,

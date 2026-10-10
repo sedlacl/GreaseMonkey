@@ -185,3 +185,25 @@ test("createAgentClient round-trips a WTM call and forwards month/auth", async (
   assert.deepEqual(seen.month, { yearMonth: "202610", items: [] });
   assert.equal(seen.auth, 1);
 });
+
+test("fetchJiraMonth pages the search and loads worklogs per issue", async () => {
+  const calls = [];
+  const responses = {
+    "/rest/api/2/myself": { name: "me" },
+    search0: { total: 2, issues: [{ key: "CS-1", fields: { summary: "A", labels: ["W_SLA"] } }] },
+    search1: { total: 2, issues: [{ key: "IDS-2", fields: { summary: "B", labels: [] } }] },
+    "/rest/api/2/issue/CS-1/worklog?maxResults=1000": { worklogs: [{ id: "1", author: { name: "me" }, started: "2026-10-09T08:00:00.000+0200", timeSpentSeconds: 900, comment: "Vývoj" }] },
+    "/rest/api/2/issue/IDS-2/worklog?maxResults=1000": { worklogs: [] },
+  };
+  const request = async (path) => {
+    calls.push(path);
+    if (path.startsWith("/rest/api/2/search")) return path.includes("startAt=0") ? responses.search0 : responses.search1;
+    return responses[path];
+  };
+  const out = await api.fetchJiraMonth({ from: "2026-10-01", to: "2026-10-31" }, request);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].key, "CS-1");
+  assert.equal(out[0].from, "08:00");
+  assert.ok(calls.some((p) => p.includes(encodeURIComponent('worklogDate >= "2026-10-01"'))));
+  assert.equal(calls.filter((p) => p.startsWith("/rest/api/2/search")).length, 2);
+});
