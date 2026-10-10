@@ -395,6 +395,28 @@
     return normalizeJiraWorklogs({ issues, worklogsByKey, meName: me.name, range });
   }
 
+  // --- PURE: dom text ---
+
+  const DAY_HEADER_RE = /^\p{L}+\s+(\d{2})\.(\d{2})\.(\d{4})$/u;
+  const TIME_RANGE_RE = /(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})/;
+  const TIME_RANGE_ONLY_RE = /^\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}$/;
+
+  function parseDayHeaderText(text) {
+    const m = String(text).replace(/\s+/g, " ").trim().match(DAY_HEADER_RE);
+    return m ? `${m[3]}-${m[2]}-${m[1]}` : null;
+  }
+
+  function parseTimeRangeText(text) {
+    const m = String(text).match(TIME_RANGE_RE);
+    if (!m) return null;
+    const hm = (h, mm) => `${h.padStart(2, "0")}:${mm}`;
+    return { from: hm(m[1], m[2]), to: hm(m[3], m[4]) };
+  }
+
+  function countTimeRanges(text) {
+    return (String(text).match(/\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}/g) || []).length;
+  }
+
   // --- BROWSER ---
 
   // --- BROWSER: agent ---
@@ -455,6 +477,46 @@
       });
   }
 
+  // --- BROWSER: dom ---
+
+  const OWN_CLASS = "gm-wjs";
+
+  function findDaySections(root) {
+    const headers = [];
+    for (const el of root.querySelectorAll("div,span,h1,h2,h3,h4,p")) {
+      if (el.closest(`.${OWN_CLASS}`)) continue;
+      const date = parseDayHeaderText(el.textContent);
+      if (!date) continue;
+      if ([...el.children].some((c) => parseDayHeaderText(c.textContent))) continue;
+      headers.push({ date, el });
+    }
+    return headers.map(({ date, el }) => {
+      let section = el;
+      while (section.parentElement && section.parentElement !== document.body) {
+        const parent = section.parentElement;
+        if (headers.filter((h) => parent.contains(h.el)).length > 1) break;
+        section = parent;
+      }
+      return { date, headerEl: el, sectionEl: section };
+    });
+  }
+
+  function findItemCards(sectionEl) {
+    const cards = [];
+    for (const el of sectionEl.querySelectorAll("div,span")) {
+      if (el.closest(`.${OWN_CLASS}`)) continue;
+      const text = el.textContent.trim();
+      if (!TIME_RANGE_ONLY_RE.test(text)) continue;
+      let card = el;
+      while (card.parentElement && card.parentElement !== sectionEl && countTimeRanges(card.parentElement.textContent) === 1) {
+        card = card.parentElement;
+      }
+      if (cards.some((c) => c.el === card)) continue;
+      cards.push({ ...parseTimeRangeText(text), el: card, timeEl: el });
+    }
+    return cards;
+  }
+
   function run() {
     if (window[SCRIPT_FLAG]) return;
     window[SCRIPT_FLAG] = true;
@@ -474,6 +536,8 @@
     normalizeWtmItems,
     normalizeJiraWorklogs,
     fetchJiraMonth,
+    parseDayHeaderText,
+    parseTimeRangeText,
     matchDay,
     matchMonth,
     DEFAULT_MAPPING,

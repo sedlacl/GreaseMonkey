@@ -207,3 +207,16 @@ test("fetchJiraMonth pages the search and loads worklogs per issue", async () =>
   assert.ok(calls.some((p) => p.includes(encodeURIComponent('worklogDate >= "2026-10-01"'))));
   assert.equal(calls.filter((p) => p.startsWith("/rest/api/2/search")).length, 2);
 });
+
+test("parseDayHeaderText reads Czech and English day headers", () => {
+  assert.equal(api.parseDayHeaderText("Pátek 09.10.2026"), "2026-10-09");
+  assert.equal(api.parseDayHeaderText("  Friday   09.10.2026 "), "2026-10-09");
+  assert.equal(api.parseDayHeaderText("09.10.2026"), null);
+  assert.equal(api.parseDayHeaderText("Pátek 09.10.2026 Odpracováno"), null);
+});
+
+test("parseTimeRangeText reads item time ranges", () => {
+  assert.deepEqual(api.parseTimeRangeText("18:00 - 18:30"), { from: "18:00", to: "18:30" });
+  assert.deepEqual(api.parseTimeRangeText("8:15-9:00"), { from: "08:15", to: "09:00" });
+  assert.equal(api.parseTimeRangeText("00h 30m"), null);
+});
