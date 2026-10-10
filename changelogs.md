@@ -42,6 +42,12 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 - Nový skript: párování WTM ↔ Jira na stránce Výkazy za měsíc, zápis chybějících a rozdílných položek do WTM, nastavení label → artefakt.
 
+## tools/browser-bridge.user.js
+
+### 1.4 — 2026-10-10
+
+- Tlačítko v hlavičce pro aktualizaci userscriptů v Tampermonkey ze serveru: když stránce odpovídá jeden skript (podle `@match`), je to rovnou „⟳ <název>“; šipka otevře seznam všech skriptů s verzí, relevantní nahoře. Server v `/health` vrací `userScripts` (název, verze, `@match`).
+
 ## bookkit-file-manager.user.js
 
 ### 1.4.12 — 2026-09-08
