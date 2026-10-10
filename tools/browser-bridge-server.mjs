@@ -18,6 +18,7 @@ const STATIC_SCRIPTS = new Map([
   ["/bookkit-fulltext-search.user.js", "bookkit-fulltext-search.user.js"],
   ["/bookkit-file-manager.user.js", "bookkit-file-manager.user.js"],
   ["/cursor-usage-statistics.user.js", "cursor-usage-statistics.user.js"],
+  ["/wtm-jira-sync.user.js", "wtm-jira-sync.user.js"],
   ["/tools/browser-bridge.user.js", "tools/browser-bridge.user.js"],
 ]);
 
