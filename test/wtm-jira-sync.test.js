@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.2.1", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.2.1");
+test("SCRIPT_VERSION is 0.3.0", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.3.0");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -118,13 +118,14 @@ test("matchMonth groups by day across both sources", () => {
 test("seedMappingFromWtm adds W_ subjects without overwriting", () => {
   const items = [I("1", "CS-1", "2026-10-01", "08:00", "09:00"), { ...I("2", "X-1", "2026-10-01", "09:00", "10:00"), subjectName: "Projekt", subject: "p" }];
   items[0].subject = "sla-url";
-  assert.deepEqual(api.seedMappingFromWtm(items, { W_DR: "dr-url" }), { W_DR: "dr-url", W_SLA: "sla-url" });
-  assert.deepEqual(api.seedMappingFromWtm(items, { W_SLA: "keep" }), { W_SLA: "keep" });
+  assert.deepEqual(api.seedMappingFromWtm(items, { W_DR: { url: "dr-url" } }), { W_DR: { url: "dr-url" }, W_SLA: { url: "sla-url" } });
+  assert.deepEqual(api.seedMappingFromWtm(items, { W_SLA: { url: "keep" } }), { W_SLA: { url: "keep" } });
 });
 
 test("resolveSubject prefers a mapped W_ label", () => {
-  const m = { W_SLA: "sla" };
+  const m = { W_SLA: { url: "sla" }, W_OLD: "old" };
   assert.deepEqual(api.resolveSubject(["AFLEX", "W_SLA"], m), { label: "W_SLA", subject: "sla" });
+  assert.deepEqual(api.resolveSubject(["W_OLD"], m), { label: "W_OLD", subject: "old" });
   assert.deepEqual(api.resolveSubject(["W_RE_RE2"], m), { label: "W_RE_RE2", subject: null });
   assert.deepEqual(api.resolveSubject(["AFLEX"], m), { label: null, subject: null });
 });
@@ -180,6 +181,120 @@ test("planDayActions blocks confirmed diff items and unknown artifacts, honours 
   const chosen = plan({ [wUnknown.worklogId]: "picked" });
   assert.equal(chosen[1].subject, "picked");
   assert.equal(chosen[1].blocked, null);
+});
+
+test("planDayActions blocks writes for blocked and expired labels", () => {
+  const d = "2026-10-09";
+  const wExpired = { ...W("CS-4", d, "08:00", "09:00"), labels: ["W_OLD"] };
+  const wBlocked = { ...W("CS-5", d, "10:00", "11:00"), labels: ["W_STOP"] };
+  const wValid = { ...W("CS-6", d, "12:00", "13:00"), labels: ["W_FUT"] };
+  const result = { ok: [], diff: [], missing: [wExpired, wBlocked, wValid], extra: [] };
+  const mapping = {
+    W_OLD: { url: "old", validTo: "2026-09-30" },
+    W_STOP: { url: "stop", blocked: true, note: "Jen na povolení" },
+    W_FUT: { url: "fut", validTo: "2026-10-09" },
+  };
+  const actions = api.planDayActions({ result, dayItems: [], mapping, choices: {}, today: "2026-10-10" });
+  assert.equal(actions[0].blocked, "Label W_OLD platí jen do 30. 9. 2026");
+  assert.equal(actions[1].blocked, "Label W_STOP je blokovaný: Jen na povolení");
+  assert.equal(actions[2].blocked, null);
+  const picked = api.planDayActions({ result, dayItems: [], mapping, choices: { [wExpired.worklogId]: "fut" }, today: "2026-10-10" });
+  assert.equal(picked[0].blocked, null);
+});
+
+test("labelRuleBlock explains blocked and expired labels", () => {
+  assert.equal(api.labelRuleBlock("W_A", { url: "a" }, "2026-10-01"), null);
+  assert.equal(api.labelRuleBlock("W_A", { url: "a", blocked: true }, "2026-10-01"), "Label W_A je blokovaný");
+  assert.equal(api.labelRuleBlock("W_A", { url: "a", validTo: "2026-10-01" }, "2026-10-01"), null);
+  assert.equal(api.labelRuleBlock("W_A", { url: "a", validTo: "2026-10-01" }, "2026-10-02"), "Label W_A platí jen do 1. 10. 2026");
+});
+
+test("parseToml reads the mappings subset", () => {
+  const doc = api.parseToml([
+    "# komentář",
+    "schema_version = 1",
+    "revision = 7 # inline",
+    "updated_at = 2026-10-08T12:00:00+02:00",
+    'updated_by = "Někdo \\"Q\\""',
+    "",
+    "[[mapping]]",
+    'label = "W_A"',
+    "subject_url = 'https://example.test/artifactInfo?id=1#x'",
+    "valid_to = 2026-09-30",
+    "blocked = true",
+    'approvers = ["A", "B"]',
+    "",
+    "[[mapping]]",
+    'label = "W_B"',
+    "allowed_users = [",
+    '  "x", # první',
+    '  "y",',
+    "]",
+    "ratio = -1.5",
+  ].join("\n"));
+  assert.equal(doc.schema_version, 1);
+  assert.equal(doc.revision, 7);
+  assert.equal(doc.updated_at, "2026-10-08T12:00:00+02:00");
+  assert.equal(doc.updated_by, 'Někdo "Q"');
+  assert.deepEqual(doc.mapping, [
+    { label: "W_A", subject_url: "https://example.test/artifactInfo?id=1#x", valid_to: "2026-09-30", blocked: true, approvers: ["A", "B"] },
+    { label: "W_B", allowed_users: ["x", "y"], ratio: -1.5 },
+  ]);
+});
+
+test("parseToml reports the failing line", () => {
+  assert.throws(() => api.parseToml('a = 1\nb = "unterminated'), /řádek 2/);
+  assert.throws(() => api.parseToml("a = 1\njen text"), /řádek 2/);
+  assert.throws(() => api.parseToml("a = 1\na = 2"), /řádek 2.*a/);
+});
+
+test("normalizeSubjectUrl drops the userGate segment", () => {
+  assert.equal(api.normalizeSubjectUrl("https://h.test/bt/awid/userGate/artifactInfo?id=1"), "https://h.test/bt/awid/artifactInfo?id=1");
+  assert.equal(api.normalizeSubjectUrl(" https://h.test/bt/awid/artifactInfo?id=1 "), "https://h.test/bt/awid/artifactInfo?id=1");
+});
+
+test("normalizeMapping upgrades string values and drops entries without url", () => {
+  assert.deepEqual(api.normalizeMapping({ W_A: "a", W_B: { url: "b", note: "n" }, W_C: { url: "" }, X: "x" }), {
+    W_A: { url: "a" },
+    W_B: { url: "b", note: "n" },
+  });
+});
+
+test("mappingFromToml converts entries and lists skipped labels", () => {
+  const doc = {
+    schema_version: 1, revision: 3, updated_at: "2026-10-08T12:00:00+02:00", updated_by: "X",
+    mapping: [
+      { label: "W_A", project: "P", artifact: "A", subject_url: "https://h.test/userGate/artifactInfo?id=1", valid_to: "2026-09-30", note: "n", requires_approval: true, approvers: ["L"] },
+      { label: "W_B", subject_url: "https://h.test/artifactInfo?id=2", blocked: true },
+      { label: "W_C", note: "bez url" },
+      { label: "BAD", subject_url: "https://h.test/artifactInfo?id=3" },
+    ],
+  };
+  const out = api.mappingFromToml(doc);
+  assert.deepEqual(out.meta, { revision: 3, updatedAt: "2026-10-08T12:00:00+02:00", updatedBy: "X" });
+  assert.deepEqual(out.entries, {
+    W_A: { url: "https://h.test/artifactInfo?id=1", project: "P", artifact: "A", validTo: "2026-09-30", note: "n", requiresApproval: true, approvers: ["L"], fromFile: true },
+    W_B: { url: "https://h.test/artifactInfo?id=2", blocked: true, fromFile: true },
+  });
+  assert.deepEqual(out.skipped, [{ label: "W_C", reason: "chybí subject_url" }, { label: "BAD", reason: "label nezačíná W_" }]);
+  assert.throws(() => api.mappingFromToml({ schema_version: 2, mapping: [] }), /schema_version/);
+  assert.throws(() => api.mappingFromToml({ schema_version: 1 }), /mapping/);
+});
+
+test("planMappingImport merges file entries and keeps labels not in the file", () => {
+  const current = { W_A: { url: "a" }, W_B: { url: "b-old" }, W_KEEP: { url: "k", fromFile: true } };
+  const entries = { W_A: { url: "a", fromFile: true }, W_B: { url: "b-new", fromFile: true }, W_N: { url: "n", fromFile: true } };
+  const plan = api.planMappingImport(current, entries);
+  assert.deepEqual(plan.added, ["W_N"]);
+  assert.deepEqual(plan.changed, ["W_B"]);
+  assert.deepEqual(plan.same, ["W_A"]);
+  assert.deepEqual(plan.notInFile, ["W_KEEP"]);
+  assert.deepEqual(plan.merged, {
+    W_A: { url: "a", fromFile: true },
+    W_B: { url: "b-new", fromFile: true },
+    W_KEEP: { url: "k", fromFile: false },
+    W_N: { url: "n", fromFile: true },
+  });
 });
 
 test("checkWtmRules blocks invalid, old, out-of-month and overlapping entries", () => {

@@ -7,6 +7,13 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.3.0 — 2026-10-10
+
+- Import mapování label → artefakt ze souboru TOML (`mappings.toml`, `schema_version = 1`) v Nastavení: náhled přidaných, změněných, přeskočených (bez `subject_url`) a ponechaných labelů, uloží se až tlačítkem Uložit; panel ukazuje zdroj a revizi.
+- Metadata ze souboru: `blocked` a `valid_to` blokují zápis s důvodem, projekt, artefakt, poznámka a schvalování se zobrazí v Nastavení a u virtuálního řádku; URL `userGate/artifactInfo` se sjednotí na tvar z WTM.
+- Vzhled podle uu5g04 stránky WTM: Roboto, Material barvy, tlačítka, štítky, karta virtuálního řádku, panel jako Box, Nastavení jako uu5 Modal (zavření i Escape), toast jako Alert.
+- Uložené nastavení se samo převede na nový formát mapování.
+
 ### 0.2.1 — 2026-10-10
 
 - Zabezpečení agenta: stránkový agent přijímá příkazy jen z téhož okna a původu a jen `createTimesheetItem` / `updateTimesheetItem`; klient ignoruje cizí zprávy.
