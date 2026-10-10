@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Browser Bridge for Cursor Agent
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.4
+// @version      1.5
 // @description  Polls a local bridge server so a Cursor agent can execute JS and read results from your logged-in browser.
 // @author       Lukáš Sedláček
 // @match        *://*/*
@@ -105,28 +105,31 @@
       #${PANEL_ID} .gm-bridge__title {
         flex: 1 1 auto;
         font-weight: 600;
+        white-space: nowrap;
       }
-      #${PANEL_ID} .gm-bridge__update {
-        display: inline-flex;
-        border: 1px solid #475569;
-        border-radius: 4px;
-        overflow: hidden;
-      }
-      #${PANEL_ID} .gm-bridge__update button {
-        padding: 1px 6px;
+      #${PANEL_ID} .gm-bridge__link {
+        flex: none;
+        padding: 0;
         border: 0;
-        background: #0f172a;
-        color: #cbd5e1;
+        background: none;
+        color: #94a3b8;
         font: inherit;
         font-size: 11px;
+        line-height: 1.4;
+        white-space: nowrap;
         cursor: pointer;
+      }
+      #${PANEL_ID} .gm-bridge__link:hover { color: #f8fafc; }
+      #${PANEL_ID} .gm-bridge__update-main {
+        flex: 0 1 auto;
+        min-width: 0;
         max-width: 150px;
         overflow: hidden;
         text-overflow: ellipsis;
-        white-space: nowrap;
+        color: #86efac;
       }
-      #${PANEL_ID} .gm-bridge__update button + button { border-left: 1px solid #475569; }
-      #${PANEL_ID} .gm-bridge__update button:hover { background: #1e293b; color: #f8fafc; }
+      #${PANEL_ID} .gm-bridge__update-main:hover { color: #bbf7d0; }
+      #${PANEL_ID} .gm-bridge__update-main[hidden] { display: none; }
       #${PANEL_ID} .gm-bridge__scripts {
         display: none;
         padding: 6px 10px;
@@ -159,7 +162,11 @@
         border-bottom: 1px solid #334155;
         color: #64748b;
         font-size: 11px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
       }
+      #${PANEL_ID} .gm-bridge__bookkit { flex: 1 1 auto; }
       #${PANEL_ID} .gm-bridge__bookkit[data-present="true"] {
         color: #86efac;
       }
@@ -187,16 +194,14 @@
       <div class="gm-bridge__header">
         <span class="gm-bridge__dot"></span>
         <span class="gm-bridge__title">Browser Bridge</span>
-        <span class="gm-bridge__update">
-          <button type="button" class="gm-bridge__update-main" title="Aktualizovat userscripty v Tampermonkey ze serveru">⟳ skripty</button>
-          <button type="button" class="gm-bridge__update-list" title="Všechny userscripty ze serveru">▾</button>
-        </span>
+        <button type="button" class="gm-bridge__link gm-bridge__update-main" hidden></button>
+        <button type="button" class="gm-bridge__link gm-bridge__update-list" title="Userscripty ze serveru – klik otevře aktualizaci v Tampermonkey">skripty ▾</button>
         <span class="gm-bridge__meta">offline</span>
       </div>
-      <div class="gm-bridge__scripts"></div>
       <div class="gm-bridge__extras">
         <span class="gm-bridge__bookkit" data-present="false">BookKit FT: —</span>
       </div>
+      <div class="gm-bridge__scripts"></div>
       <div class="gm-bridge__body"></div>
     `;
 
@@ -219,15 +224,20 @@
       const list = health.userScripts || [];
       for (const script of list) script.relevant = (script.matches || []).some(matchesPage);
       relevantScripts = list.filter((script) => script.relevant);
-      updateMain.textContent = relevantScripts.length === 1 ? `⟳ ${relevantScripts[0].name}` : "⟳ skripty";
-      updateMain.title = relevantScripts.length === 1
-        ? `Aktualizovat ${relevantScripts[0].name}${relevantScripts[0].version ? ` na v${relevantScripts[0].version}` : ""} v Tampermonkey`
-        : "Aktualizovat userscripty v Tampermonkey ze serveru";
+      // One script for this page gets a one-click link; several are in the list (marked ●).
+      const only = relevantScripts.length === 1 ? relevantScripts[0] : null;
+      updateMain.hidden = !only;
+      if (only) {
+        updateMain.textContent = `⟳ ${only.name}`;
+        updateMain.title = `Aktualizovat ${only.name}${only.version ? ` na v${only.version}` : ""} v Tampermonkey (otevře ${BRIDGE_URL}${only.path})`;
+      }
+      setToggleLabel();
       return list;
     };
     const showList = async () => {
       panel.dataset.scripts = "open";
       panel.dataset.collapsed = "false";
+      setToggleLabel();
       scriptsBox.textContent = "načítám…";
       try {
         const list = (await loadScripts()).sort((a, b) => Number(b.relevant) - Number(a.relevant));
@@ -252,15 +262,21 @@
         scriptsBox.textContent = `server nedostupný: ${error?.message || error}`;
       }
     };
+    // Both sit in the header, whose click collapses the panel.
     updateMain.addEventListener("click", (event) => {
       event.stopPropagation();
       if (relevantScripts.length === 1) openScript(relevantScripts[0]);
-      else showList();
     });
-    panel.querySelector(".gm-bridge__update-list").addEventListener("click", (event) => {
+    const listToggle = panel.querySelector(".gm-bridge__update-list");
+    function setToggleLabel() {
+      listToggle.textContent = `${updateMain.hidden ? "skripty " : ""}${panel.dataset.scripts === "open" ? "▴" : "▾"}`;
+    }
+    listToggle.addEventListener("click", (event) => {
       event.stopPropagation();
-      if (panel.dataset.scripts === "open") panel.dataset.scripts = "";
-      else showList();
+      if (panel.dataset.scripts === "open") {
+        panel.dataset.scripts = "";
+        setToggleLabel();
+      } else showList();
     });
     loadScripts().catch(() => {});
 

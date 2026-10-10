@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.4.2
+// @version      0.5.0
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.4.2";
+  const SCRIPT_VERSION = "0.5.0";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -626,6 +626,26 @@
       const data = event.data;
       if (!data || data.source !== MSG.toAgent || data.nonce !== nonce || data.type !== "wtm-call") return;
       const reply = (body) => window.postMessage({ source: MSG.fromAgent, nonce, type: "wtm-result", payload: Object.assign({ id: data.id }, body) }, location.origin);
+      if (data.cmd === "reloadMonth") {
+        // The month list is a uu5g04 loader component; its reload() refetches and re-renders natively.
+        const el = document.querySelector(".uu-specialistwtm-worker-monthly-detail-ready");
+        const key = el && Object.keys(el).find((k) => /^__react(Fiber|InternalInstance)\$/.test(k));
+        let loader = null;
+        for (let f = key ? el[key] : null; f && !loader; f = f.return) {
+          if (f.type && f.type.tagName === "Uu.SpecialistWtm.WorkerMonthlyDetail" && f.stateNode && typeof f.stateNode.reload === "function") loader = f.stateNode;
+        }
+        if (!loader) {
+          reply({ ok: false, error: "Komponenta výkazu nenalezena" });
+          return;
+        }
+        try {
+          loader.reload();
+          reply({ ok: true });
+        } catch (e) {
+          reply({ ok: false, error: String((e && e.message) || e) });
+        }
+        return;
+      }
       if (data.cmd !== "createTimesheetItem" && data.cmd !== "updateTimesheetItem") {
         reply({ ok: false, error: "Nepovolený příkaz" });
         return;
@@ -1025,6 +1045,7 @@
     foreign: false,
     missingDays: "",
     busy: false,
+    awaitingMonth: false,
     choices: {},
     messages: {},
   };
@@ -1224,7 +1245,7 @@
     }
     state.busy = true;
     render();
-    // After a late success or a partial write the page data is stale: stay busy until the user reloads.
+    // After writes the page data is stale: stay busy until fresh month data arrive (softReload) or the user reloads.
     let keepBusy = false;
     try {
       const result = await executeActions(actions);
@@ -1233,11 +1254,12 @@
         toast("WTM neodpovědělo – načti stránku znovu a zkontroluj stav.", true, "warning");
       } else if (result.done && !result.failed.length) {
         keepBusy = true;
-        toast(`Zapsáno ${result.done}. Načítám stránku znovu…`, false, "success");
-        setTimeout(() => location.reload(), 1500);
+        toast(`Zapsáno ${result.done}.`, false, "success");
+        softReload();
       } else if (result.done) {
         keepBusy = true;
-        toast(`Zapsáno ${result.done}, ${result.failed.length} selhalo: ${result.failed.map((f) => f.error).join("; ")}`, true, "warning");
+        toast(`Zapsáno ${result.done}, ${result.failed.length} selhalo: ${result.failed.map((f) => f.error).join("; ")}`, false, "warning");
+        softReload();
       } else {
         toast(`Nic se nezapsalo: ${result.failed.map((f) => f.error).join("; ")}`, false, "danger");
       }
@@ -1245,6 +1267,13 @@
       state.busy = keepBusy;
       render();
     }
+  }
+
+  // Ask the page's own month loader to reload (native re-render, no cold reload); fall back to a full page reload.
+  async function softReload() {
+    state.awaitingMonth = true;
+    const res = agent ? await agent.call("reloadMonth", null) : { ok: false };
+    if (!res.ok) location.reload();
   }
 
   function onAction(action) {
@@ -1562,6 +1591,10 @@
         }
         state.foreign = false;
         state.items = normalizeWtmItems(payload.items);
+        if (state.awaitingMonth) {
+          state.awaitingMonth = false;
+          state.busy = false;
+        }
         const seeded = seedMappingFromWtm(state.items, state.settings.mapping);
         if (Object.keys(seeded).length !== Object.keys(state.settings.mapping).length) {
           state.settings.mapping = seeded;

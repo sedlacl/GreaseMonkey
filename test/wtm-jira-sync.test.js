@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.4.2", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.4.2");
+test("SCRIPT_VERSION is 0.5.0", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.5.0");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -451,6 +451,31 @@ test("pageAgent refetches the month after a page-side delete", async () => {
   assert.deepEqual(months.map((m) => m.payload.items.map((i) => i.id)), [["a", "b"], ["a"]]);
   assert.ok(posted.every((m) => m.nonce === "n1"));
   assert.deepEqual(calls[2], { url: monthUrl, body: '{"yearMonth":"202610"}', auth: "Bearer t" });
+});
+
+test("pageAgent reloadMonth calls the page's own month loader", async () => {
+  let reloads = 0;
+  const loaderFiber = { type: { tagName: "Uu.SpecialistWtm.WorkerMonthlyDetail" }, stateNode: { reload: () => reloads++ }, return: null };
+  const el = { "__reactInternalInstance$abc": { type: "div", stateNode: null, return: { type: { tagName: "Uu.SpecialistWtm.WorkerMonthlyDetailReady" }, stateNode: {}, return: loaderFiber } } };
+  const posted = [];
+  let onMessage = null;
+  const saved = { window: globalThis.window, location: globalThis.location, document: globalThis.document };
+  globalThis.location = { origin: "https://uuapp.test", pathname: "/uu-specialistwtm-maing01/awid/workerMonthlyDetail" };
+  globalThis.document = { querySelector: (sel) => (sel === ".uu-specialistwtm-worker-monthly-detail-ready" ? el : null) };
+  globalThis.window = { postMessage: (data) => posted.push(data), addEventListener: (type, fn) => (onMessage = fn), fetch: async () => ({ ok: true, text: async () => "{}" }) };
+  try {
+    api.pageAgent(api.extractMonthResponse, api.isTimesheetMutation, api.MSG, "n1");
+    await onMessage({ origin: "https://uuapp.test", data: { source: api.MSG.toAgent, nonce: "n1", type: "wtm-call", id: "c1", cmd: "reloadMonth" } });
+    globalThis.document = { querySelector: () => null };
+    await onMessage({ origin: "https://uuapp.test", data: { source: api.MSG.toAgent, nonce: "n1", type: "wtm-call", id: "c2", cmd: "reloadMonth" } });
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+  assert.equal(reloads, 1);
+  const results = posted.filter((m) => m.type === "wtm-result").map((m) => m.payload);
+  assert.deepEqual(results[0], { id: "c1", ok: true });
+  assert.equal(results[1].ok, false);
+  assert.match(results[1].error, /nenalezena/);
 });
 
 test("fetchJiraMonth pages the search and loads worklogs per issue", async () => {

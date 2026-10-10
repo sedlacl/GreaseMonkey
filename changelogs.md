@@ -7,6 +7,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.5.0 — 2026-10-10
+
+- Po zápisu do WTM už se neobnovuje celá stránka: háček zavolá `reload()` komponenty výkazu (stejný mechanismus jako změna měsíce), WTM vykreslí nové položky nativně a skript převezme nová data. Tlačítka zůstanou zamčená do příchodu nových dat; když komponentu nenajde, obnoví stránku jako dřív. Totéž po částečném selhání.
+
 ### 0.4.2 — 2026-10-10
 
 - Hlavička dne: místo textu štítky stavu jako v liště – zelené „✓ sedí“, nebo barevné ≠ / chybí / navíc jen pro nenulové počty. „Zapsat vše“ už nerozbaluje/nesbaluje den.
@@ -52,6 +56,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 - Nový skript: párování WTM ↔ Jira na stránce Výkazy za měsíc, zápis chybějících a rozdílných položek do WTM, nastavení label → artefakt.
 
 ## tools/browser-bridge.user.js
+
+### 1.5 — 2026-10-10
+
+- Ovládání aktualizace v hlavičce sladěné se stylem overlaye (text místo tlačítek s rámečkem, bez ořezu šipky, nadpis se nezalamuje); verze skriptu je v tooltipu.
 
 ### 1.4 — 2026-10-10
 
