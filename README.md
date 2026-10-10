@@ -34,6 +34,7 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 | Message Registry - Preview downloads            | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js)          |
 | Message Registry - Preview downloads (UUCloud1) | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.uucloud1.user.js) |
 | uuBookKit – FileManager                        | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/bookkit-file-manager.user.js)                        |
+| WTM ← Jira sync                                 | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/wtm-jira-sync.user.js)                               |
 
 ## Notes
 
@@ -48,6 +49,8 @@ Use `Cursor Usage Statistics` on the Cursor usage dashboard to see spend KPIs (t
 Use `uuBookKit Fulltext Search` in `uu-bookkit-maing01` books where the built-in search is too limited. The script adds its own cached fulltext index over BookKit JSON commands, remembers known books, and lets you search previously indexed books from one dialog.
 
 Use `uuBookKit – FileManager` on the BookKit attachments page to show file sizes on tiles, sort by size, and optionally run a heuristic unused-attachment check across book pages. After a clean scan, `Select candidates` adds heuristically identified unused attachments to the native bulk-action selection. The usage scan may miss non-standard references; partial page failures do not mark attachments as unused.
+
+WTM ← Jira sync (`wtm-jira-sync.user.js`): na stránce WTM „Výkazy za měsíc“ spáruje položky s tvými worklogy v Jiře (`jira.indsoft.local`). Zelená = sedí, oranžová = liší se (tlačítko „Upravit podle Jiry“), virtuální řádek = chybí ve WTM („Zapsat do WTM“, „Zapsat vše“ za den), červená = ve WTM navíc (mažeš ručně). Jira je zdroj pravdy, skript do Jiry nezapisuje a ve WTM nic nemaže. Artefakt WTM se bere z W_ labelu ticketu podle tabulky v Nastavení. Potřebuje být přihlášený do Jiry ve stejném prohlížeči.
 
 ## Changelog
 

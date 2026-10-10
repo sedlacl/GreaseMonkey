@@ -5,6 +5,12 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ---
 
+## wtm-jira-sync.user.js
+
+### 0.2.0 — 2026-10-10
+
+- Nový skript: párování WTM ↔ Jira na stránce Výkazy za měsíc, zápis chybějících a rozdílných položek do WTM, nastavení label → artefakt.
+
 ## bookkit-file-manager.user.js
 
 ### 1.4.12 — 2026-09-08
