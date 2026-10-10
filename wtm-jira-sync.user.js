@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.3.2
+// @version      0.4.0
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.3.2";
+  const SCRIPT_VERSION = "0.4.0";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -689,7 +689,11 @@
 
   // --- PURE: jira ---
 
-  async function fetchJiraMonth(range, request) {
+  const WORKLOG_CONCURRENCY = 4;
+
+  async function fetchJiraMonth(range, request, onProgress) {
+    const progress = typeof onProgress === "function" ? onProgress : () => {};
+    progress({ phase: "search", done: 0, total: null });
     const me = await request("/rest/api/2/myself");
     const jql = `worklogAuthor = currentUser() AND worklogDate >= "${range.from}" AND worklogDate <= "${range.to}"`;
     const issues = [];
@@ -701,11 +705,32 @@
       if (!page.issues.length || startAt >= page.total) break;
     }
     const worklogsByKey = {};
-    for (const issue of issues) {
-      const res = await request(`/rest/api/2/issue/${issue.key}/worklog?maxResults=1000`);
-      worklogsByKey[issue.key] = res.worklogs || [];
-    }
+    let done = 0;
+    progress({ phase: "worklogs", done, total: issues.length });
+    const queue = [...issues];
+    const worker = async () => {
+      for (let issue = queue.shift(); issue; issue = queue.shift()) {
+        const res = await request(`/rest/api/2/issue/${issue.key}/worklog?maxResults=1000`);
+        worklogsByKey[issue.key] = res.worklogs || [];
+        progress({ phase: "worklogs", done: ++done, total: issues.length });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(WORKLOG_CONCURRENCY, issues.length) }, worker));
     return normalizeJiraWorklogs({ issues, worklogsByKey, meName: me.name, range });
+  }
+
+  // --- PURE: jira cache ---
+
+  function putJiraCache(cache, yearMonth, worklogs, at, keep = 3) {
+    const out = { ...(cache || {}), [yearMonth]: { at, worklogs } };
+    for (const ym of Object.keys(out).sort().reverse().slice(keep)) delete out[ym];
+    return out;
+  }
+
+  function staleReason(jira) {
+    if (!jira || !jira.cachedAt) return null;
+    if (jira.refreshError) return "Jira je nedostupná – zobrazená data jsou z mezipaměti, zápis je vypnutý";
+    return "Data z Jiry se načítají – zápis bude možný po aktualizaci";
   }
 
   // --- PURE: dom text ---
@@ -746,14 +771,21 @@
   const SETTINGS_KEY = "gm-wjs-settings";
   const DEFAULT_SETTINGS = Object.freeze({ jiraBaseUrl: "http://jira.indsoft.local", mapping: { ...DEFAULT_MAPPING }, mappingSource: null });
 
-  function storageGet() {
-    if (typeof GM_getValue === "function") return GM_getValue(SETTINGS_KEY, null);
+  function storageGet(key = SETTINGS_KEY) {
+    if (typeof GM_getValue === "function") return GM_getValue(key, null);
     try {
-      return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "null");
+      return JSON.parse(localStorage.getItem(key) || "null");
     } catch (e) {
       return null;
     }
   }
+
+  function storageSet(key, value) {
+    if (typeof GM_setValue === "function") GM_setValue(key, value);
+    else localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  const JIRA_CACHE_KEY = "gm-wjs-jira-cache";
 
   function loadSettings() {
     const stored = storageGet() || {};
@@ -765,8 +797,7 @@
   }
 
   function saveSettings(settings) {
-    if (typeof GM_setValue === "function") GM_setValue(SETTINGS_KEY, settings);
-    else localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    storageSet(SETTINGS_KEY, settings);
   }
 
   function createJiraRequest(baseUrl) {
@@ -890,14 +921,16 @@
     .gm-wjs-vday{margin:8px;padding:16px;border:1px dashed var(--gm-wjs-primary);border-radius:4px;background:var(--gm-wjs-surface)}
     .gm-wjs-vday-title{font-size:14px;font-weight:700}
 
-    #gm-wjs-panel{position:fixed;top:56px;right:16px;z-index:99998;width:320px;background:#fff;border-radius:2px;box-shadow:var(--gm-wjs-shadow);font-size:14px;line-height:21px}
-    .gm-wjs-panel-head{display:flex;align-items:center;justify-content:space-between;min-height:40px;padding:4px 8px 4px 16px;border-bottom:1px solid var(--gm-wjs-border);font-weight:700}
-    .gm-wjs-panel-head small{font-weight:400;color:var(--gm-wjs-text2)}
-    .gm-wjs-panel-body{padding:8px 16px}
-    .gm-wjs-panel-body>div+div{margin-top:4px}
-    .gm-wjs-panel-stats .gm-wjs-badge{margin:0 4px 0 0}
-    .gm-wjs-panel-foot{display:flex;justify-content:flex-end;gap:8px;padding:4px 8px 8px}
-    .gm-wjs-panel-foot .gm-wjs-btn{margin:0}
+    #gm-wjs-panel{display:flex;align-items:center;flex-wrap:wrap;gap:4px 16px;flex:1;min-width:0;margin-left:24px;font-size:13px;line-height:21px;color:var(--gm-wjs-text2)}
+    .gm-wjs-panel-title{font-size:14px;font-weight:700;color:var(--gm-wjs-text);white-space:nowrap}
+    .gm-wjs-panel-title small{font-size:12px;font-weight:400;color:var(--gm-wjs-text2)}
+    .gm-wjs-panel-status,.gm-wjs-panel-info{display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px 8px}
+    .gm-wjs-panel-status .gm-wjs-badge{margin:0}
+    .gm-wjs-panel-actions{display:inline-flex;gap:8px;margin-left:auto}
+    .gm-wjs-panel-actions .gm-wjs-btn{margin:0}
+    .gm-wjs-spinner{display:inline-block;width:20px;height:20px;border:2px solid var(--gm-wjs-primary-bg);border-top-color:var(--gm-wjs-primary);border-radius:50%;animation:gm-wjs-spin .8s linear infinite;flex:none}
+    .gm-wjs-spinner-s{width:14px;height:14px}
+    @keyframes gm-wjs-spin{to{transform:rotate(360deg)}}
     .gm-wjs-text2{color:var(--gm-wjs-text2);font-size:13px}
     .gm-wjs-warn{color:var(--gm-wjs-warning-dark);font-size:13px}
     .gm-wjs-err{color:var(--gm-wjs-danger-dark)}
@@ -979,13 +1012,15 @@
   };
 
   function rowActionsFor(date) {
-    return planDayActions({
+    const actions = planDayActions({
       result: state.results[date],
       dayItems: state.items.filter((i) => i.date === date),
       mapping: state.settings.mapping,
       choices: state.choices,
       today: todayPrague(),
     });
+    const stale = staleReason(state.jira);
+    return stale ? actions.map((a) => ({ ...a, blocked: a.blocked || stale })) : actions;
   }
 
   function minutesSum(list) {
@@ -1061,10 +1096,15 @@
     headerEl.append(summary);
   }
 
+  // The SPA keeps this script alive across routes; act only on the own monthly page (not the yearly overview etc.).
+  function isActivePage() {
+    return isOwnMonthlyPage(location.pathname, location.search);
+  }
+
   function render() {
     if (!document.body) return;
     for (const el of document.querySelectorAll(`.${OWN_CLASS}`)) el.remove();
-    if (state.foreign || state.jira.status !== "ok" || !state.settings) return;
+    if (!isActivePage() || state.foreign || state.jira.status !== "ok" || !state.settings) return;
     ensureStyle();
     const sections = findDaySections(document.body);
     const known = new Set(sections.map((s) => s.date));
@@ -1217,38 +1257,61 @@
     return { ok: count("ok"), diff: count("diff"), missing: count("missing"), extra: count("extra") };
   }
 
+  const PANEL_ANCHOR = ".uu-specialistwtm-worker-monthly-detail-top-photo-row";
+
+  function progressText(progress) {
+    if (!progress || progress.phase === "search") return "hledám tickety s worklogy…";
+    return `načítám worklogy ${progress.done}/${progress.total}`;
+  }
+
+  function loginLink() {
+    return make("a", { href: `${state.settings.jiraBaseUrl}/login.jsp`, target: "_blank", rel: "noopener" }, "Přihlásit do Jiry");
+  }
+
+  // Inline bar in the page header (next to the worker name), styled like the page itself.
   function renderPanel() {
     if (!document.body) return;
-    ensureStyle();
+    const anchor = isActivePage() ? document.querySelector(PANEL_ANCHOR) : null;
     let panel = document.getElementById(PANEL_ID);
-    if (!panel) {
-      panel = make("div", { id: PANEL_ID });
-      document.body.append(panel);
+    if (!anchor) {
+      if (panel) panel.remove();
+      return;
     }
-    const body = [];
-    if (state.foreign) body.push(make("div", { class: "gm-wjs-text2" }, "Cizí výkaz – skript je neaktivní"));
-    else if (state.jira.status === "loading") body.push(make("div", { class: "gm-wjs-text2" }, "Načítám Jiru…"));
-    else if (state.jira.status === "error") {
-      const login = state.jira.unauthorized ? [" ", make("a", { href: `${state.settings.jiraBaseUrl}/login.jsp`, target: "_blank", rel: "noopener" }, "Přihlásit do Jiry")] : [];
-      body.push(make("div", { class: "gm-wjs-err" }, [state.jira.error, ...login]));
-    } else if (state.jira.status === "ok") {
+    ensureStyle();
+    if (!panel) panel = make("div", { id: PANEL_ID, role: "status" });
+    if (panel.parentElement !== anchor) anchor.append(panel);
+    const spinner = (small) => make("span", { class: `gm-wjs-spinner${small ? " gm-wjs-spinner-s" : ""}`, "aria-hidden": "true" });
+    const status = [];
+    const jira = state.jira;
+    if (state.foreign) status.push(make("span", {}, "Cizí výkaz – skript je neaktivní"));
+    else if (jira.status === "loading") status.push(spinner(), make("span", {}, `Jira: ${progressText(jira.progress)}`));
+    else if (jira.status === "error") status.push(make("span", { class: "gm-wjs-err" }, [`Jira: ${jira.error}`, ...(jira.unauthorized ? [" · ", loginLink()] : [])]));
+    else if (jira.status === "ok") {
       const t = monthTotals();
-      body.push(make("div", { class: "gm-wjs-panel-stats" }, [
+      status.push(
         make("span", { class: "gm-wjs-badge gm-wjs-ok", title: "Sedí s Jirou" }, `✓ ${t.ok}`),
         make("span", { class: "gm-wjs-badge gm-wjs-diff", title: "Liší se od Jiry" }, `≠ ${t.diff}`),
         make("span", { class: "gm-wjs-badge gm-wjs-missing", title: "Chybí ve WTM" }, `chybí ${t.missing}`),
         make("span", { class: "gm-wjs-badge gm-wjs-extra", title: "Ve WTM navíc, není v Jiře" }, `navíc ${t.extra}`),
-      ]));
-    } else body.push(make("div", { class: "gm-wjs-text2" }, "Čekám na data WTM (přepni měsíc nebo obnov stránku)"));
-    if (state.settings) body.push(make("div", { class: "gm-wjs-text2" }, `Mapování: ${labelCount(Object.keys(state.settings.mapping).length)} · ${mappingSourceText(state.settings.mappingSource)}`));
-    for (const d of state.missingDays ? state.missingDays.split(",") : []) body.push(make("div", { class: "gm-wjs-warn" }, `Den ${d} nenalezen na stránce`));
-    if (!state.wtmAuth) body.push(make("div", { class: "gm-wjs-warn" }, "Zápis do WTM bude možný po prvním volání WTM (obnov stránku)."));
+      );
+      if (jira.refreshing) status.push(spinner(true), make("span", {}, `aktualizuji z Jiry – ${progressText(jira.progress)}`));
+      else if (jira.refreshError) status.push(make("span", { class: "gm-wjs-warn" }, [`Jira nedostupná, data z ${formatCzDateTime(jira.cachedAt)}`, ...(jira.unauthorized ? [" · ", loginLink()] : [])]));
+    } else status.push(make("span", {}, "Čekám na data WTM…"));
+    const info = [];
+    if (state.settings) {
+      const src = state.settings.mappingSource;
+      info.push(make("span", { title: `Mapování: ${mappingSourceText(src)}` }, `Mapování: ${labelCount(Object.keys(state.settings.mapping).length)}${src && src.revision !== null && src.revision !== undefined ? ` (rev. ${src.revision})` : ""}`));
+    }
+    for (const d of state.missingDays ? state.missingDays.split(",") : []) info.push(make("span", { class: "gm-wjs-warn" }, `Den ${formatCzDate(d)} nenalezen na stránce`));
+    if (!state.wtmAuth && !state.foreign) info.push(make("span", { class: "gm-wjs-warn", title: "Háček ve stránce zatím nezachytil přihlášení WTM." }, "Zápis po obnovení stránky"));
+    const busy = jira.status === "loading" || jira.refreshing;
     panel.replaceChildren(
-      make("div", { class: "gm-wjs-panel-head" }, [make("span", {}, ["WTM ← Jira ", make("small", {}, `v${SCRIPT_VERSION}`)])]),
-      make("div", { class: "gm-wjs-panel-body" }, body),
-      make("div", { class: "gm-wjs-panel-foot" }, [
-        make("button", { class: "gm-wjs-btn gm-wjs-btn-flat", onclick: openSettings }, "Nastavení"),
-        make("button", { class: "gm-wjs-btn gm-wjs-btn-primary", onclick: () => currentYearMonth && loadJira(currentYearMonth) }, "Obnovit"),
+      make("span", { class: "gm-wjs-panel-title" }, ["WTM ← Jira ", make("small", {}, `v${SCRIPT_VERSION}`)]),
+      make("span", { class: "gm-wjs-panel-status" }, status),
+      make("span", { class: "gm-wjs-panel-info" }, info),
+      make("span", { class: "gm-wjs-panel-actions" }, [
+        make("button", { class: "gm-wjs-btn gm-wjs-btn-m", onclick: openSettings }, "Nastavení"),
+        make("button", { class: "gm-wjs-btn gm-wjs-btn-m", disabled: busy || !currentYearMonth, onclick: () => currentYearMonth && loadJira(currentYearMonth) }, "Obnovit"),
       ]),
     );
   }
@@ -1408,19 +1471,42 @@
 
   async function loadJira(yearMonth) {
     const seq = ++jiraSeq;
-    state.jira = { status: "loading", error: null };
-    renderPanel();
+    const cached = (storageGet(JIRA_CACHE_KEY) || {})[yearMonth] || null;
+    if (cached) {
+      state.worklogs = cached.worklogs;
+      state.jira = { status: "ok", error: null, cachedAt: cached.at, refreshing: true, progress: null };
+      renderPanel();
+      recompute();
+    } else {
+      state.jira = { status: "loading", error: null, progress: null };
+      renderPanel();
+    }
+    const onProgress = (progress) => {
+      if (seq !== jiraSeq) return;
+      state.jira.progress = progress;
+      renderPanel();
+    };
     let worklogs = null;
-    let jira;
+    let error = null;
     try {
-      worklogs = await fetchJiraMonth(monthRange(yearMonth), createJiraRequest(state.settings.jiraBaseUrl));
-      jira = { status: "ok", error: null };
+      worklogs = await fetchJiraMonth(monthRange(yearMonth), createJiraRequest(state.settings.jiraBaseUrl), onProgress);
     } catch (e) {
-      jira = { status: "error", error: e.message, unauthorized: e.status === 401 };
+      error = e;
     }
     if (seq !== jiraSeq || yearMonth !== currentYearMonth) return;
-    if (worklogs) state.worklogs = worklogs;
-    state.jira = jira;
+    if (worklogs) {
+      state.worklogs = worklogs;
+      state.jira = { status: "ok", error: null };
+      try {
+        storageSet(JIRA_CACHE_KEY, putJiraCache(storageGet(JIRA_CACHE_KEY), yearMonth, worklogs, new Date().toISOString()));
+      } catch (e) {
+        /* cache is optional */
+      }
+    } else if (cached) {
+      state.jira = { status: "ok", error: null, cachedAt: cached.at, refreshError: error.message, unauthorized: error.status === 401 };
+    } else {
+      state.jira = { status: "error", error: error.message, unauthorized: error.status === 401 };
+    }
     renderPanel();
     recompute();
   }
@@ -1470,7 +1556,12 @@
         return el && el.closest && el.closest("#gm-wjs-settings, #gm-wjs-panel");
       })) return;
       clearTimeout(pending);
-      pending = setTimeout(render, 300);
+      pending = setTimeout(() => {
+        render();
+        const panel = document.getElementById(PANEL_ID);
+        const anchor = document.querySelector(PANEL_ANCHOR);
+        if (panel ? !isActivePage() || panel.parentElement !== anchor : anchor && isActivePage()) renderPanel();
+      }, 300);
     });
     const start = () => {
       observer.observe(document.body, { childList: true, subtree: true });
@@ -1494,6 +1585,8 @@
     normalizeWtmItems,
     normalizeJiraWorklogs,
     fetchJiraMonth,
+    putJiraCache,
+    staleReason,
     parseDayHeaderText,
     parseTimeRangeText,
     matchDay,

@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.3.2", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.3.2");
+test("SCRIPT_VERSION is 0.4.0", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.4.0");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -429,12 +429,29 @@ test("fetchJiraMonth pages the search and loads worklogs per issue", async () =>
     if (path.startsWith("/rest/api/2/search")) return path.includes("startAt=0") ? responses.search0 : responses.search1;
     return responses[path];
   };
-  const out = await api.fetchJiraMonth({ from: "2026-10-01", to: "2026-10-31" }, request);
+  const progress = [];
+  const out = await api.fetchJiraMonth({ from: "2026-10-01", to: "2026-10-31" }, request, (p) => progress.push(p));
+  assert.deepEqual(progress[0], { phase: "search", done: 0, total: null });
+  assert.deepEqual(progress[progress.length - 1], { phase: "worklogs", done: 2, total: 2 });
   assert.equal(out.length, 1);
   assert.equal(out[0].key, "CS-1");
   assert.equal(out[0].from, "08:00");
   assert.ok(calls.some((p) => p.includes(encodeURIComponent('worklogDate >= "2026-10-01"'))));
   assert.equal(calls.filter((p) => p.startsWith("/rest/api/2/search")).length, 2);
+});
+
+test("putJiraCache stores worklogs per month and keeps the newest months", () => {
+  let cache = {};
+  for (const ym of ["202607", "202608", "202609", "202610"]) cache = api.putJiraCache(cache, ym, [{ worklogId: ym }], "2026-10-10T10:00:00.000Z");
+  assert.deepEqual(Object.keys(cache).sort(), ["202608", "202609", "202610"]);
+  assert.deepEqual(cache["202610"], { at: "2026-10-10T10:00:00.000Z", worklogs: [{ worklogId: "202610" }] });
+  assert.deepEqual(api.putJiraCache(null, "202610", [], "x"), { "202610": { at: "x", worklogs: [] } });
+});
+
+test("staleReason blocks writes while Jira data come from the cache", () => {
+  assert.equal(api.staleReason({ status: "ok" }), null);
+  assert.match(api.staleReason({ status: "ok", cachedAt: "x", refreshing: true }), /načítají/);
+  assert.match(api.staleReason({ status: "ok", cachedAt: "x", refreshError: "boom" }), /nedostupná/);
 });
 
 test("parseDayHeaderText reads Czech and English day headers", () => {

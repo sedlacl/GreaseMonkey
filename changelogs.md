@@ -7,6 +7,13 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.4.0 — 2026-10-10
+
+- Ovládání je lišta v hlavičce výkazu vedle jména (stav, počty, mapování, Nastavení, Obnovit) místo plovoucího panelu.
+- Mezipaměť Jiry: poslední 3 měsíce se ukážou hned po otevření a aktuální data se dotáhnou na pozadí; během dotahování nebo při nedostupné Jiře je zápis vypnutý s důvodem.
+- Průběh načítání: kolečko a stav „hledám tickety… / načítám worklogy 12/40“; worklogy se stahují po 4 paralelně.
+- Skript je aktivní jen na vlastní stránce Výkazy za měsíc; na ročním přehledu a jinde (i po přepnutí v aplikaci) lištu i značky odstraní.
+
 ### 0.3.2 — 2026-10-10
 
 - Oprava: po smazání, vytvoření nebo úpravě položky přímo ve WTM se značky neaktualizovaly (stránka si měsíc znovu nenačte). Háček ve stránce si pamatuje dotaz na měsíc a po každé úspěšné změně položky ho do 0,3 s načte znovu sám.
