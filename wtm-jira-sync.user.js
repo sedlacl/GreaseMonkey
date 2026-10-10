@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.3.0
+// @version      0.3.1
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.3.0";
+  const SCRIPT_VERSION = "0.3.1";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -509,12 +509,12 @@
     return { yearMonth: (json.workerMonthlyTimesheet && json.workerMonthlyTimesheet.yearMonth) || null, items: json.timesheetItemList };
   }
 
-  function pageAgent(extractMonthResponse, MSG) {
+  function pageAgent(extractMonthResponse, MSG, nonce) {
     if (window[MSG.agentFlag]) return;
     window[MSG.agentFlag] = true;
     const isWtm = (url) => /\/uu-specialistwtm-maing01\//.test(url);
     let lastAuth = null;
-    const post = (type, payload) => window.postMessage({ source: MSG.fromAgent, type, payload }, "*");
+    const post = (type, payload) => window.postMessage({ source: MSG.fromAgent, nonce, type, payload }, location.origin);
     const rememberAuth = (value) => {
       if (!value || value === lastAuth) return;
       lastAuth = value;
@@ -570,10 +570,11 @@
     }
 
     window.addEventListener("message", async (event) => {
-      if (event.source !== window || event.origin !== location.origin) return;
+      // Identity checks on event.source fail across the Tampermonkey sandbox; trust origin + session nonce instead.
+      if (event.origin !== location.origin) return;
       const data = event.data;
-      if (!data || data.source !== MSG.toAgent || data.type !== "wtm-call") return;
-      const reply = (body) => window.postMessage({ source: MSG.fromAgent, type: "wtm-result", payload: Object.assign({ id: data.id }, body) }, location.origin);
+      if (!data || data.source !== MSG.toAgent || data.nonce !== nonce || data.type !== "wtm-call") return;
+      const reply = (body) => window.postMessage({ source: MSG.fromAgent, nonce, type: "wtm-result", payload: Object.assign({ id: data.id }, body) }, location.origin);
       if (data.cmd !== "createTimesheetItem" && data.cmd !== "updateTimesheetItem") {
         reply({ ok: false, error: "Nepovolený příkaz" });
         return;
@@ -608,19 +609,21 @@
     post("ready", true);
   }
 
-  function buildAgentSource() {
-    return `(${pageAgent.toString()})(${extractMonthResponse.toString()}, ${JSON.stringify(MSG)});`;
+  function buildAgentSource(nonce) {
+    return `(${pageAgent.toString()})(${extractMonthResponse.toString()}, ${JSON.stringify(MSG)}, ${JSON.stringify(String(nonce))});`;
   }
 
   const CALL_TIMEOUT_MS = 20000;
 
-  function createAgentClient(win, handlers) {
+  // In Tampermonkey `win` is a sandbox proxy, so event.source never equals it; check origin + session nonce.
+  function createAgentClient(win, handlers, nonce) {
     const pending = new Map();
     let seq = 0;
+    const origin = win.location && win.location.origin;
     win.addEventListener("message", (event) => {
-      if (event.source !== win) return;
+      if (origin && event.origin !== origin) return;
       const d = event.data;
-      if (!d || d.source !== MSG.fromAgent) return;
+      if (!d || d.source !== MSG.fromAgent || d.nonce !== nonce) return;
       if (d.type === "month") handlers.onMonth(d.payload);
       else if (d.type === "auth") handlers.onAuth();
       else if (d.type === "wtm-result") {
@@ -643,7 +646,7 @@
             clearTimeout(timer);
             resolve(payload);
           });
-          win.postMessage({ source: MSG.toAgent, type: "wtm-call", id, cmd, dtoIn }, "*");
+          win.postMessage({ source: MSG.toAgent, nonce, type: "wtm-call", id, cmd, dtoIn }, origin || "*");
         });
       },
     };
@@ -696,9 +699,9 @@
 
   // --- BROWSER: agent ---
 
-  function injectAgent() {
+  function injectAgent(nonce) {
     const script = document.createElement("script");
-    script.textContent = buildAgentSource();
+    script.textContent = buildAgentSource(nonce);
     (document.head || document.documentElement).appendChild(script);
     script.remove();
   }
@@ -1394,6 +1397,7 @@
     if (window[SCRIPT_FLAG]) return;
     window[SCRIPT_FLAG] = true;
     state.settings = loadSettings();
+    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
     agent = createAgentClient(window, {
       onMonth: (payload) => {
         if (!isOwnMonthlyPage(location.pathname, location.search)) {
@@ -1421,8 +1425,8 @@
         state.wtmAuth = true;
         renderPanel();
       },
-    });
-    injectAgent();
+    }, nonce);
+    injectAgent(nonce);
     let pending = 0;
     const observer = new MutationObserver((mutations) => {
       if (mutations.every((m) => [...m.addedNodes, ...m.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains(OWN_CLASS)))) return;

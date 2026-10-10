@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.3.0", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.3.0");
+test("SCRIPT_VERSION is 0.3.1", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.3.1");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -317,32 +317,58 @@ test("extractMonthResponse accepts only the month list command", () => {
   assert.equal(api.extractMonthResponse("https://x/listWorkerTimesheetItemsByMonth", "{}"), null);
 });
 
-test("buildAgentSource embeds the agent and the extractor", () => {
-  const src = api.buildAgentSource();
+test("buildAgentSource embeds the agent, the extractor and the session nonce", () => {
+  const src = api.buildAgentSource("n0nce");
   assert.match(src, /listWorkerTimesheetItemsByMonth/);
   assert.match(src, /gm-wjs-agent/);
+  assert.match(src, /"n0nce"/);
   assert.doesNotThrow(() => new Function(src));
 });
 
-test("createAgentClient round-trips a WTM call and forwards month/auth", async () => {
+// Tampermonkey sandbox: event.source is the page window, not the sandbox window proxy.
+function fakeSandboxWindow(origin) {
   const listeners = [];
+  const pageWindow = {};
   const win = {
+    location: { origin },
+    posted: [],
     addEventListener: (type, fn) => listeners.push(fn),
-    postMessage: (data) => setTimeout(() => listeners.forEach((fn) => fn({ data, source: win })), 0),
+    dispatch: (data, eventOrigin = origin) => setTimeout(() => listeners.forEach((fn) => fn({ data, source: pageWindow, origin: eventOrigin })), 0),
+    postMessage: (data, targetOrigin) => {
+      win.posted.push(targetOrigin);
+      win.dispatch(data);
+    },
   };
+  return win;
+}
+
+test("createAgentClient round-trips a WTM call and forwards month/auth from the sandbox", async () => {
+  const win = fakeSandboxWindow("https://uuapp.test");
   const seen = { month: null, auth: 0 };
-  const client = api.createAgentClient(win, { onMonth: (m) => (seen.month = m), onAuth: () => seen.auth++ });
+  const client = api.createAgentClient(win, { onMonth: (m) => (seen.month = m), onAuth: () => seen.auth++ }, "n1");
   // fake agent answering every command
   win.addEventListener("message", (e) => {
-    if (e.data.source === api.MSG.toAgent) win.postMessage({ source: api.MSG.fromAgent, type: "wtm-result", payload: { id: e.data.id, ok: true, data: { id: "new" } } });
+    if (e.data.source === api.MSG.toAgent && e.data.nonce === "n1") win.dispatch({ source: api.MSG.fromAgent, nonce: "n1", type: "wtm-result", payload: { id: e.data.id, ok: true, data: { id: "new" } } });
   });
   const res = await client.call("createTimesheetItem", { a: 1 });
   assert.deepEqual(res, { id: res.id, ok: true, data: { id: "new" } });
-  win.postMessage({ source: api.MSG.fromAgent, type: "month", payload: { yearMonth: "202610", items: [] } });
-  win.postMessage({ source: api.MSG.fromAgent, type: "auth", payload: true });
+  assert.deepEqual(win.posted, ["https://uuapp.test"]);
+  win.dispatch({ source: api.MSG.fromAgent, nonce: "n1", type: "month", payload: { yearMonth: "202610", items: [] } });
+  win.dispatch({ source: api.MSG.fromAgent, nonce: "n1", type: "auth", payload: true });
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(seen.month, { yearMonth: "202610", items: [] });
   assert.equal(seen.auth, 1);
+});
+
+test("createAgentClient ignores messages with a wrong nonce or origin", async () => {
+  const win = fakeSandboxWindow("https://uuapp.test");
+  const seen = { month: 0, auth: 0 };
+  api.createAgentClient(win, { onMonth: () => seen.month++, onAuth: () => seen.auth++ }, "n1");
+  win.dispatch({ source: api.MSG.fromAgent, nonce: "other", type: "month", payload: { items: [] } });
+  win.dispatch({ source: api.MSG.fromAgent, type: "auth", payload: true });
+  win.dispatch({ source: api.MSG.fromAgent, nonce: "n1", type: "auth", payload: true }, "https://evil.test");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(seen, { month: 0, auth: 0 });
 });
 
 test("fetchJiraMonth pages the search and loads worklogs per issue", async () => {

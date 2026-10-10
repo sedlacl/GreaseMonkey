@@ -7,6 +7,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.3.1 — 2026-10-10
+
+- Oprava: v Tampermonkey se panel zasekl na „Čekám na data WTM“ – zprávy z háčku ve stránce zahazovala kontrola `event.source` (sandbox má jiný objekt `window`). Nově se ověřuje původ stránky a náhodný kód relace; zprávy se posílají jen na původ stránky.
+
 ### 0.3.0 — 2026-10-10
 
 - Import mapování label → artefakt ze souboru TOML (`mappings.toml`, `schema_version = 1`) v Nastavení: náhled přidaných, změněných, přeskočených (bez `subject_url`) a ponechaných labelů, uloží se až tlačítkem Uložit; panel ukazuje zdroj a revizi.
