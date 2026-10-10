@@ -7,6 +7,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.4.2 — 2026-10-10
+
+- Hlavička dne: místo textu štítky stavu jako v liště – zelené „✓ sedí“, nebo barevné ≠ / chybí / navíc jen pro nenulové počty. „Zapsat vše“ už nerozbaluje/nesbaluje den.
+
 ### 0.4.1 — 2026-10-10
 
 - Záložní párování pro položky WTM bez klíče ticketu: spáruje se worklog ze stejného dne se stejným labelem (W_ label nebo artefakt podle mapování); nejdřív se stejným časem (zelené „≈ KLÍČ“), zbytek jako rozdíl (oranžové „≠“ s „Upravit podle Jiry“). Položky s jiným klíčem ticketu se takto nepárují.

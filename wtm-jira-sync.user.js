@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.4.1
+// @version      0.4.2
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.4.1";
+  const SCRIPT_VERSION = "0.4.2";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -933,7 +933,9 @@
     .gm-wjs-msg{display:block;margin-top:8px;font-size:13px;color:var(--gm-wjs-danger-dark)}
     .gm-wjs-select,.gm-wjs-input{height:32px;padding:0 8px;border:1px solid var(--gm-wjs-border2);border-radius:2px;background:#fff;color:var(--gm-wjs-text);font:14px var(--gm-wjs-font);transition:border-color .15s}
     .gm-wjs-select:focus,.gm-wjs-input:focus{border-color:var(--gm-wjs-primary);outline:0}
-    .gm-wjs-day{display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px;margin-left:16px;font-size:13px;line-height:21px;color:var(--gm-wjs-text2)}
+    .gm-wjs-day{display:inline-flex;align-items:center;flex-wrap:wrap;gap:4px 8px;margin-left:16px;font-size:13px;line-height:21px;color:var(--gm-wjs-text2)}
+    .gm-wjs-day .gm-wjs-badge{height:20px;margin:0;line-height:20px}
+    .gm-wjs-day .gm-wjs-btn{margin-left:4px}
     .gm-wjs-vday{margin:8px;padding:16px;border:1px dashed var(--gm-wjs-primary);border-radius:4px;background:var(--gm-wjs-surface)}
     .gm-wjs-vday-title{font-size:14px;font-weight:700}
 
@@ -1104,13 +1106,19 @@
     const res = state.results[date];
     const jira = minutesSum([...res.ok.map((p) => p.worklog), ...res.diff.map((p) => p.worklog), ...res.missing]);
     const wtm = minutesSum(state.items.filter((i) => i.date === date));
-    const parts = [`Jira ${formatMinutes(jira)} · WTM ${formatMinutes(wtm)}`];
-    if (res.missing.length) parts.push(`${res.missing.length} chybí`);
-    if (res.diff.length) parts.push(`${res.diff.length} liší se`);
-    if (res.extra.length) parts.push(`${res.extra.length} není v Jiře`);
+    const badges = [];
+    if (res.diff.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-diff", title: "Liší se od Jiry" }, `≠ ${res.diff.length}`));
+    if (res.missing.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-missing", title: "Chybí ve WTM" }, `chybí ${res.missing.length}`));
+    if (res.extra.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-extra", title: "Ve WTM navíc, není v Jiře" }, `navíc ${res.extra.length}`));
+    if (!badges.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-ok", title: "Všechny položky dne sedí s Jirou" }, "✓ sedí"));
     const runnable = actions.filter((a) => !a.blocked);
-    const summary = h("span", { class: "gm-wjs-day" }, parts.join(" · "));
-    if (runnable.length) summary.append(h("button", { class: "gm-wjs-btn gm-wjs-btn-primary", disabled: state.busy, onclick: () => onDayAll(date) }, `Zapsat vše (${runnable.length})`));
+    const summary = h("span", { class: "gm-wjs-day" }, [h("span", {}, `Jira ${formatMinutes(jira)} · WTM ${formatMinutes(wtm)}`), ...badges]);
+    // The day header toggles the accordion; keep the bulk write from doing that too.
+    const onAll = (event) => {
+      event.stopPropagation();
+      onDayAll(date);
+    };
+    if (runnable.length) summary.append(h("button", { class: "gm-wjs-btn gm-wjs-btn-primary", disabled: state.busy, onclick: onAll }, `Zapsat vše (${runnable.length})`));
     headerEl.append(summary);
   }
 
