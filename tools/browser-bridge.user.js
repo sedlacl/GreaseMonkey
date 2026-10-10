@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Browser Bridge for Cursor Agent
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.3
+// @version      1.5
 // @description  Polls a local bridge server so a Cursor agent can execute JS and read results from your logged-in browser.
 // @author       Lukáš Sedláček
 // @match        *://*/*
@@ -105,7 +105,54 @@
       #${PANEL_ID} .gm-bridge__title {
         flex: 1 1 auto;
         font-weight: 600;
+        white-space: nowrap;
       }
+      #${PANEL_ID} .gm-bridge__link {
+        flex: none;
+        padding: 0;
+        border: 0;
+        background: none;
+        color: #94a3b8;
+        font: inherit;
+        font-size: 11px;
+        line-height: 1.4;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      #${PANEL_ID} .gm-bridge__link:hover { color: #f8fafc; }
+      #${PANEL_ID} .gm-bridge__update-main {
+        flex: 0 1 auto;
+        min-width: 0;
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: #86efac;
+      }
+      #${PANEL_ID} .gm-bridge__update-main:hover { color: #bbf7d0; }
+      #${PANEL_ID} .gm-bridge__update-main[hidden] { display: none; }
+      #${PANEL_ID} .gm-bridge__scripts {
+        display: none;
+        padding: 6px 10px;
+        border-bottom: 1px solid #334155;
+      }
+      #${PANEL_ID}[data-scripts="open"] .gm-bridge__scripts { display: block; }
+      #${PANEL_ID} .gm-bridge__script {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        padding: 3px 4px;
+        border: 0;
+        border-radius: 4px;
+        background: none;
+        color: #94a3b8;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      #${PANEL_ID} .gm-bridge__script[data-relevant="true"] { color: #86efac; }
+      #${PANEL_ID} .gm-bridge__script:hover { background: #1e293b; }
+      #${PANEL_ID} .gm-bridge__script span:first-child { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       #${PANEL_ID} .gm-bridge__meta {
         color: #94a3b8;
         font-size: 11px;
@@ -115,7 +162,11 @@
         border-bottom: 1px solid #334155;
         color: #64748b;
         font-size: 11px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
       }
+      #${PANEL_ID} .gm-bridge__bookkit { flex: 1 1 auto; }
       #${PANEL_ID} .gm-bridge__bookkit[data-present="true"] {
         color: #86efac;
       }
@@ -143,17 +194,91 @@
       <div class="gm-bridge__header">
         <span class="gm-bridge__dot"></span>
         <span class="gm-bridge__title">Browser Bridge</span>
+        <button type="button" class="gm-bridge__link gm-bridge__update-main" hidden></button>
+        <button type="button" class="gm-bridge__link gm-bridge__update-list" title="Userscripty ze serveru – klik otevře aktualizaci v Tampermonkey">skripty ▾</button>
         <span class="gm-bridge__meta">offline</span>
       </div>
       <div class="gm-bridge__extras">
         <span class="gm-bridge__bookkit" data-present="false">BookKit FT: —</span>
       </div>
+      <div class="gm-bridge__scripts"></div>
       <div class="gm-bridge__body"></div>
     `;
 
     panel.querySelector(".gm-bridge__header").addEventListener("click", () => {
       panel.dataset.collapsed = panel.dataset.collapsed === "true" ? "false" : "true";
     });
+
+    // Opening a .user.js URL makes Tampermonkey show its install / update page.
+    const scriptsBox = panel.querySelector(".gm-bridge__scripts");
+    const updateMain = panel.querySelector(".gm-bridge__update-main");
+    let relevantScripts = [];
+    const openScript = (script) => window.open(`${BRIDGE_URL}${script.path}`, "_blank");
+    const matchesPage = (pattern) => {
+      if (pattern === "*://*/*" || pattern === "<all_urls>") return false;
+      const re = new RegExp(`^${pattern.split("*").map((p) => p.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+      return re.test(location.href);
+    };
+    const loadScripts = async () => {
+      const health = await (await fetch(`${BRIDGE_URL}/health`, { cache: "no-store" })).json();
+      const list = health.userScripts || [];
+      for (const script of list) script.relevant = (script.matches || []).some(matchesPage);
+      relevantScripts = list.filter((script) => script.relevant);
+      // One script for this page gets a one-click link; several are in the list (marked ●).
+      const only = relevantScripts.length === 1 ? relevantScripts[0] : null;
+      updateMain.hidden = !only;
+      if (only) {
+        updateMain.textContent = `⟳ ${only.name}`;
+        updateMain.title = `Aktualizovat ${only.name}${only.version ? ` na v${only.version}` : ""} v Tampermonkey (otevře ${BRIDGE_URL}${only.path})`;
+      }
+      setToggleLabel();
+      return list;
+    };
+    const showList = async () => {
+      panel.dataset.scripts = "open";
+      panel.dataset.collapsed = "false";
+      setToggleLabel();
+      scriptsBox.textContent = "načítám…";
+      try {
+        const list = (await loadScripts()).sort((a, b) => Number(b.relevant) - Number(a.relevant));
+        scriptsBox.replaceChildren(
+          ...list.map((script) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "gm-bridge__script";
+            button.dataset.relevant = script.relevant ? "true" : "false";
+            button.title = `Otevřít ${BRIDGE_URL}${script.path} – Tampermonkey nabídne aktualizaci`;
+            const name = document.createElement("span");
+            name.textContent = `${script.relevant ? "● " : ""}${script.name}`;
+            const version = document.createElement("span");
+            version.textContent = script.version ? `v${script.version}` : "";
+            button.append(name, version);
+            button.addEventListener("click", () => openScript(script));
+            return button;
+          }),
+        );
+        if (!list.length) scriptsBox.textContent = "server nevrací žádné userscripty";
+      } catch (error) {
+        scriptsBox.textContent = `server nedostupný: ${error?.message || error}`;
+      }
+    };
+    // Both sit in the header, whose click collapses the panel.
+    updateMain.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (relevantScripts.length === 1) openScript(relevantScripts[0]);
+    });
+    const listToggle = panel.querySelector(".gm-bridge__update-list");
+    function setToggleLabel() {
+      listToggle.textContent = `${updateMain.hidden ? "skripty " : ""}${panel.dataset.scripts === "open" ? "▴" : "▾"}`;
+    }
+    listToggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (panel.dataset.scripts === "open") {
+        panel.dataset.scripts = "";
+        setToggleLabel();
+      } else showList();
+    });
+    loadScripts().catch(() => {});
 
     document.documentElement.appendChild(style);
     document.documentElement.appendChild(panel);

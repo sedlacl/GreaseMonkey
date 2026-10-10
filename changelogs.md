@@ -5,6 +5,66 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ---
 
+## wtm-jira-sync.user.js
+
+### 0.5.0 — 2026-10-10
+
+- Po zápisu do WTM už se neobnovuje celá stránka: háček zavolá `reload()` komponenty výkazu (stejný mechanismus jako změna měsíce), WTM vykreslí nové položky nativně a skript převezme nová data. Tlačítka zůstanou zamčená do příchodu nových dat; když komponentu nenajde, obnoví stránku jako dřív. Totéž po částečném selhání.
+
+### 0.4.2 — 2026-10-10
+
+- Hlavička dne: místo textu štítky stavu jako v liště – zelené „✓ sedí“, nebo barevné ≠ / chybí / navíc jen pro nenulové počty. „Zapsat vše“ už nerozbaluje/nesbaluje den.
+
+### 0.4.1 — 2026-10-10
+
+- Záložní párování pro položky WTM bez klíče ticketu: spáruje se worklog ze stejného dne se stejným labelem (W_ label nebo artefakt podle mapování); nejdřív se stejným časem (zelené „≈ KLÍČ“), zbytek jako rozdíl (oranžové „≠“ s „Upravit podle Jiry“). Položky s jiným klíčem ticketu se takto nepárují.
+- Štítky s nulovým počtem v liště jsou šedé.
+
+### 0.4.0 — 2026-10-10
+
+- Ovládání je lišta v hlavičce výkazu vedle jména (stav, počty, mapování, Nastavení, Obnovit) místo plovoucího panelu.
+- Mezipaměť Jiry: poslední 3 měsíce se ukážou hned po otevření a aktuální data se dotáhnou na pozadí; během dotahování nebo při nedostupné Jiře je zápis vypnutý s důvodem.
+- Průběh načítání: kolečko a stav „hledám tickety… / načítám worklogy 12/40“; worklogy se stahují po 4 paralelně.
+- Skript je aktivní jen na vlastní stránce Výkazy za měsíc; na ročním přehledu a jinde (i po přepnutí v aplikaci) lištu i značky odstraní.
+
+### 0.3.2 — 2026-10-10
+
+- Oprava: po smazání, vytvoření nebo úpravě položky přímo ve WTM se značky neaktualizovaly (stránka si měsíc znovu nenačte). Háček ve stránce si pamatuje dotaz na měsíc a po každé úspěšné změně položky ho do 0,3 s načte znovu sám.
+
+### 0.3.1 — 2026-10-10
+
+- Oprava: v Tampermonkey se panel zasekl na „Čekám na data WTM“ – zprávy z háčku ve stránce zahazovala kontrola `event.source` (sandbox má jiný objekt `window`). Nově se ověřuje původ stránky a náhodný kód relace; zprávy se posílají jen na původ stránky.
+
+### 0.3.0 — 2026-10-10
+
+- Import mapování label → artefakt ze souboru TOML (`mappings.toml`, `schema_version = 1`) v Nastavení: náhled přidaných, změněných, přeskočených (bez `subject_url`) a ponechaných labelů, uloží se až tlačítkem Uložit; panel ukazuje zdroj a revizi.
+- Metadata ze souboru: `blocked` a `valid_to` blokují zápis s důvodem, projekt, artefakt, poznámka a schvalování se zobrazí v Nastavení a u virtuálního řádku; URL `userGate/artifactInfo` se sjednotí na tvar z WTM.
+- Vzhled podle uu5g04 stránky WTM: Roboto, Material barvy, tlačítka, štítky, karta virtuálního řádku, panel jako Box, Nastavení jako uu5 Modal (zavření i Escape), toast jako Alert.
+- Uložené nastavení se samo převede na nový formát mapování.
+
+### 0.2.1 — 2026-10-10
+
+- Zabezpečení agenta: stránkový agent přijímá příkazy jen z téhož okna a původu a jen `createTimesheetItem` / `updateTimesheetItem`; klient ignoruje cizí zprávy.
+- Chyby zápisu: toast už nemizí s překreslením a drží 8 s; při částečném selhání se stránka nenačítá sama, ale nabídne „Načíst znovu“; timeout 20 s na odpověď WTM, po pozdním nebo částečném úspěchu zůstane zápis zablokovaný do obnovení stránky (ochrana před duplicitami).
+- Souběh načtení Jiry: zastaralá odpověď (jiný měsíc, dvojité „Obnovit“) se zahodí; při chybě nebo načítání se staré značky ze stránky odstraní.
+- highRate: úprava položky podle Jiry zachová původní příznak vysoké sazby.
+- Cizí výkaz: skript je aktivní jen na vlastní stránce `workerMonthlyDetail` (bez cizího `workerUuIdentity`); jinak panel hlásí „Cizí výkaz – skript je neaktivní“.
+- Předvyplnění mapování: label → artefakt se při prvních datech WTM doplní z položek výkazu a uloží. Dny bez nalezené sekce na stránce se hlásí v panelu, virtuální bloky jen pro dny bez položek WTM.
+
+### 0.2.0 — 2026-10-10
+
+- Nový skript: párování WTM ↔ Jira na stránce Výkazy za měsíc, zápis chybějících a rozdílných položek do WTM, nastavení label → artefakt.
+
+## tools/browser-bridge.user.js
+
+### 1.5 — 2026-10-10
+
+- Ovládání aktualizace v hlavičce sladěné se stylem overlaye (text místo tlačítek s rámečkem, bez ořezu šipky, nadpis se nezalamuje); verze skriptu je v tooltipu.
+
+### 1.4 — 2026-10-10
+
+- Tlačítko v hlavičce pro aktualizaci userscriptů v Tampermonkey ze serveru: když stránce odpovídá jeden skript (podle `@match`), je to rovnou „⟳ <název>“; šipka otevře seznam všech skriptů s verzí, relevantní nahoře. Server v `/health` vrací `userScripts` (název, verze, `@match`).
+
 ## bookkit-file-manager.user.js
 
 ### 1.4.12 — 2026-09-08

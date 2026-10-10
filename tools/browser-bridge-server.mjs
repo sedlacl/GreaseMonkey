@@ -18,6 +18,7 @@ const STATIC_SCRIPTS = new Map([
   ["/bookkit-fulltext-search.user.js", "bookkit-fulltext-search.user.js"],
   ["/bookkit-file-manager.user.js", "bookkit-file-manager.user.js"],
   ["/cursor-usage-statistics.user.js", "cursor-usage-statistics.user.js"],
+  ["/wtm-jira-sync.user.js", "wtm-jira-sync.user.js"],
   ["/tools/browser-bridge.user.js", "tools/browser-bridge.user.js"],
 ]);
 
@@ -106,6 +107,17 @@ async function serveStaticScript(res, pathname) {
   return true;
 }
 
+/** Name, version and @match patterns from the userscript header, for the bridge "update scripts" list. */
+async function readUserScriptMeta(urlPath, relativePath) {
+  try {
+    const head = (await fs.readFile(path.resolve(REPO_ROOT, relativePath), "utf8")).split("==/UserScript==")[0];
+    const values = (key) => [...head.matchAll(new RegExp(`^//\\s*@${key}\\s+(.+?)\\s*$`, "gm"))].map((m) => m[1]);
+    return { path: urlPath, name: values("name")[0] || urlPath, version: values("version")[0] || null, matches: [...values("match"), ...values("include")] };
+  } catch {
+    return { path: urlPath, name: urlPath, version: null, matches: [] };
+  }
+}
+
 function pruneResults() {
   const cutoff = Date.now() - RESULT_TTL_MS;
   for (const [id, entry] of results.entries()) {
@@ -135,6 +147,11 @@ const server = http.createServer(async (req, res) => {
         results: results.size,
         port: PORT,
         scripts: Array.from(STATIC_SCRIPTS.keys()),
+        userScripts: await Promise.all(
+          Array.from(STATIC_SCRIPTS.entries())
+            .filter(([urlPath]) => urlPath.endsWith(".user.js"))
+            .map(([urlPath, relativePath]) => readUserScriptMeta(urlPath, relativePath)),
+        ),
         diagnostics: diagnostics.length,
       });
       return;
