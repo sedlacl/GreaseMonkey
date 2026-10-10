@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.1.2
+// @version      0.1.3
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.1.2";
+  const SCRIPT_VERSION = "0.1.3";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -777,9 +777,109 @@
     render();
   }
 
-  // Temporary: replaced by the panel in Task 10.
+  // --- BROWSER: panel ---
+
+  const PANEL_ID = "gm-wjs-panel";
+
+  function monthTotals() {
+    const all = Object.values(state.results);
+    const count = (k) => all.reduce((s, r) => s + r[k].length, 0);
+    return { ok: count("ok"), diff: count("diff"), missing: count("missing"), extra: count("extra") };
+  }
+
   function renderPanel() {
-    console.info("[wtm-jira-sync] jira", state.jira.status, state.jira.error || "");
+    if (!document.body) return;
+    let panel = document.getElementById(PANEL_ID);
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = PANEL_ID;
+      panel.style.cssText = "position:fixed;top:56px;right:16px;z-index:99998;padding:8px 12px;border-radius:6px;background:#fff;border:1px solid #dde1e8;box-shadow:0 2px 8px rgba(0,0,0,.12);font:13px/20px system-ui,sans-serif;max-width:340px";
+      document.body.append(panel);
+    }
+    panel.replaceChildren();
+    const title = document.createElement("strong");
+    title.textContent = "WTM ← Jira ";
+    panel.append(title);
+    const status = document.createElement("span");
+    if (state.jira.status === "loading") status.textContent = "načítám Jiru…";
+    else if (state.jira.status === "error") {
+      status.style.color = "#b23b2e";
+      status.textContent = state.jira.error;
+      if (state.jira.unauthorized) {
+        const a = document.createElement("a");
+        a.href = `${state.settings.jiraBaseUrl}/login.jsp`;
+        a.target = "_blank";
+        a.textContent = " Přihlásit do Jiry";
+        status.append(a);
+      }
+    } else if (state.jira.status === "ok") {
+      const t = monthTotals();
+      status.textContent = `✓ ${t.ok} · ≠ ${t.diff} · chybí ${t.missing} · není v Jiře ${t.extra}`;
+    } else status.textContent = "čekám na data WTM (přepni měsíc nebo obnov stránku)";
+    panel.append(status, document.createElement("br"));
+    const button = (text, fn) => {
+      const b = document.createElement("button");
+      b.textContent = text;
+      b.style.cssText = "margin:4px 6px 0 0;padding:2px 10px;font:600 12px/18px system-ui,sans-serif;cursor:pointer";
+      b.addEventListener("click", fn);
+      panel.append(b);
+    };
+    button("Obnovit", () => currentYearMonth && loadJira(currentYearMonth));
+    button("Nastavení", openSettings);
+    if (!state.wtmAuth) {
+      const warn = document.createElement("div");
+      warn.style.color = "#9a6216";
+      warn.textContent = "Zápis do WTM bude možný po prvním volání WTM (obnov stránku).";
+      panel.append(warn);
+    }
+  }
+
+  function openSettings() {
+    const settings = loadSettings();
+    settings.mapping = seedMappingFromWtm(state.items, settings.mapping);
+    const overlay = document.createElement("div");
+    overlay.className = OWN_CLASS;
+    overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center";
+    const box = document.createElement("div");
+    box.style.cssText = "background:#fff;border-radius:8px;padding:16px;min-width:560px;max-width:90vw;max-height:80vh;overflow:auto;font:13px/20px system-ui,sans-serif";
+    box.innerHTML = "<h3 style='margin:0 0 8px'>Nastavení WTM ← Jira</h3><label>Jira: <input data-k='jira' style='width:320px'></label><h4 style='margin:12px 0 4px'>Label → artefakt</h4><table data-k='rows' style='width:100%;border-collapse:collapse'></table>";
+    box.querySelector("[data-k=jira]").value = settings.jiraBaseUrl;
+    const table = box.querySelector("[data-k=rows]");
+    const addRow = (label, url) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<td><input data-k='label' style='width:140px'></td><td><input data-k='url' style='width:100%'></td><td><button data-k='del'>✕</button></td>";
+      tr.querySelector("[data-k=label]").value = label;
+      tr.querySelector("[data-k=url]").value = url;
+      tr.querySelector("[data-k=del]").addEventListener("click", () => tr.remove());
+      table.append(tr);
+    };
+    for (const [label, url] of Object.entries(settings.mapping)) addRow(label, url);
+    const actionsBar = document.createElement("div");
+    actionsBar.style.marginTop = "12px";
+    const mk = (text, fn) => {
+      const b = document.createElement("button");
+      b.textContent = text;
+      b.style.marginRight = "8px";
+      b.addEventListener("click", fn);
+      actionsBar.append(b);
+    };
+    mk("Přidat řádek", () => addRow("W_", ""));
+    mk("Uložit", () => {
+      const mapping = {};
+      for (const tr of table.querySelectorAll("tr")) {
+        const label = tr.querySelector("[data-k=label]").value.trim();
+        const url = tr.querySelector("[data-k=url]").value.trim();
+        if (/^W_/.test(label) && url) mapping[label] = url;
+      }
+      state.settings = { jiraBaseUrl: box.querySelector("[data-k=jira]").value.trim() || DEFAULT_SETTINGS.jiraBaseUrl, mapping };
+      saveSettings(state.settings);
+      overlay.remove();
+      if (currentYearMonth) loadJira(currentYearMonth);
+    });
+    mk("Zavřít", () => overlay.remove());
+    box.append(actionsBar);
+    overlay.append(box);
+    document.body.append(overlay);
   }
 
   async function loadJira(yearMonth) {
