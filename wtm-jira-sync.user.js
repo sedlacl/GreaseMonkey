@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.1.0
+// @version      0.1.1
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.1.0";
+  const SCRIPT_VERSION = "0.1.1";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -517,9 +517,251 @@
     return cards;
   }
 
+  // --- BROWSER: render ---
+
+  const STYLE_ID = "gm-wjs-style";
+  const CSS = `
+    .gm-wjs-badge{display:inline-flex;align-items:center;gap:4px;margin-left:8px;padding:1px 7px;border-radius:4px;font:600 12px/18px system-ui,sans-serif;vertical-align:middle}
+    .gm-wjs-badge a{color:inherit;text-decoration:none}
+    .gm-wjs-ok{background:#e3f3ed;color:#1f7a5c}
+    .gm-wjs-diff{background:#fbf0dc;color:#9a6216}
+    .gm-wjs-extra{background:#fbe6e3;color:#b23b2e}
+    .gm-wjs-note{display:block;margin-top:4px;font:12px/16px system-ui,sans-serif;color:#9a6216}
+    .gm-wjs-btn{margin-left:8px;padding:2px 10px;border:1px solid currentColor;border-radius:4px;background:#fff;font:600 12px/18px system-ui,sans-serif;cursor:pointer}
+    .gm-wjs-btn[disabled]{opacity:.5;cursor:not-allowed}
+    .gm-wjs-row{margin:8px 0;padding:12px 16px;border:2px dashed #2f5bd3;border-radius:4px;background:repeating-linear-gradient(135deg,#f5f8ff 0 8px,#fff 8px 16px);font:14px/20px system-ui,sans-serif}
+    .gm-wjs-row .gm-wjs-time{font-weight:700;margin-right:8px}
+    .gm-wjs-row .gm-wjs-msg{display:block;margin-top:4px;color:#b23b2e;font-size:12px}
+    .gm-wjs-row select{margin-left:8px;font-size:12px}
+    .gm-wjs-day{margin-left:16px;font:600 13px/20px system-ui,sans-serif;color:#2f5bd3}
+    .gm-wjs-vday{margin:12px 0;padding:12px 16px;border:2px dashed #2f5bd3;border-radius:4px}
+  `;
+
+  function ensureStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = CSS;
+    document.head.appendChild(style);
+  }
+
+  function h(tag, attrs, children) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === "class") el.className = `${OWN_CLASS} ${v}`;
+      else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+      else if (v !== undefined && v !== null && v !== false) el.setAttribute(k, v === true ? "" : v);
+    }
+    if (!attrs || !attrs.class) el.classList.add(OWN_CLASS);
+    for (const c of [].concat(children || [])) el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+    return el;
+  }
+
+  function jiraLink(key) {
+    return h("a", { href: `${state.settings.jiraBaseUrl}/browse/${key}`, target: "_blank", rel: "noopener" }, key);
+  }
+
+  const state = {
+    items: [],
+    worklogs: [],
+    results: {},
+    settings: null,
+    jira: { status: "idle", error: null },
+    wtmAuth: false,
+    busy: false,
+    choices: {},
+    messages: {},
+  };
+
+  function rowActionsFor(date) {
+    const res = state.results[date];
+    if (!res) return [];
+    const dayItems = state.items.filter((i) => i.date === date);
+    const today = todayPrague();
+    const actions = [];
+    for (const w of res.missing) {
+      const resolved = resolveSubject(w.labels, state.settings.mapping);
+      const subject = state.choices[w.worklogId] || resolved.subject;
+      const blocked = !subject ? `Neznámý artefakt${resolved.label ? ` pro ${resolved.label}` : ""} – vyber ho` : checkWtmRules(w, dayItems, today);
+      actions.push({ type: "create", worklog: w, subject, label: resolved.label, blocked });
+    }
+    for (const p of res.diff) {
+      const blocked = p.item.state !== "active" ? "Položka je potvrzená" : checkWtmRules(p.worklog, dayItems, today, p.item.id);
+      actions.push({ type: "update", worklog: p.worklog, item: p.item, subject: null, blocked });
+    }
+    return actions.sort((a, b) => a.worklog.from.localeCompare(b.worklog.from));
+  }
+
+  function onAction(action) {
+    console.info("[wtm-jira-sync] action", action);
+  }
+
+  function onDayAll(date) {
+    console.info("[wtm-jira-sync] day all", date);
+  }
+
+  function minutesSum(list) {
+    return list.reduce((s, x) => s + durationMinutes(x.from, x.to), 0);
+  }
+
+  function renderVirtualRow(action) {
+    const w = action.worklog;
+    const rowId = `w${w.worklogId}`;
+    const children = [
+      h("span", { class: "gm-wjs-time" }, `${w.from} - ${w.to}`),
+      `${formatMinutes(durationMinutes(w.from, w.to))} · `,
+      jiraLink(w.key),
+      ` ${w.comment || ""} `,
+      h("span", { class: "gm-wjs-badge gm-wjs-diff" }, "chybí ve WTM"),
+    ];
+    if (!action.subject) {
+      const select = h("select", { onchange: (e) => { state.choices[w.worklogId] = e.target.value; render(); } }, [
+        h("option", { value: "" }, "— artefakt —"),
+        ...Object.entries(state.settings.mapping).map(([label, url]) => h("option", { value: url }, label)),
+      ]);
+      children.push(select);
+    } else {
+      const label = Object.keys(state.settings.mapping).find((l) => state.settings.mapping[l] === action.subject) || action.label || "";
+      children.push(h("span", { class: "gm-wjs-badge gm-wjs-ok" }, label));
+    }
+    children.push(h("button", { class: "gm-wjs-btn", disabled: state.busy || Boolean(action.blocked), title: action.blocked || "", onclick: () => onAction(action) }, "Zapsat do WTM"));
+    const msg = state.messages[rowId] || action.blocked;
+    if (msg) children.push(h("span", { class: "gm-wjs-msg" }, msg));
+    return h("div", { class: "gm-wjs-row", "data-from": w.from }, children);
+  }
+
+  function decorateCard(card, pairOrItem, kind, action) {
+    const anchor = card.timeEl;
+    if (kind === "ok") {
+      anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-ok" }, ["✓ ", jiraLink(pairOrItem.worklog.key)]));
+    } else if (kind === "extra") {
+      anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-extra" }, "není v Jiře"));
+    } else if (kind === "diff") {
+      const w = pairOrItem.worklog;
+      const badge = h("span", { class: "gm-wjs-badge gm-wjs-diff" }, ["≠ ", jiraLink(w.key)]);
+      const btn = h("button", { class: "gm-wjs-btn", disabled: state.busy || Boolean(action && action.blocked), title: (action && action.blocked) || "", onclick: () => onAction(action) }, "Upravit podle Jiry");
+      anchor.after(badge, btn);
+      const msg = state.messages[`i${pairOrItem.item.id}`] || (action && action.blocked);
+      card.el.append(h("span", { class: "gm-wjs-note" }, `Jira: ${w.from}–${w.to} · ${formatMinutes(durationMinutes(w.from, w.to))} · ${w.comment || "(bez komentáře)"}${msg ? ` – ${msg}` : ""}`));
+    }
+  }
+
+  function takeCard(cards, item) {
+    const idx = cards.findIndex((c) => c.from === item.from && c.to === item.to);
+    return idx < 0 ? null : cards.splice(idx, 1)[0];
+  }
+
+  function renderDaySummary(date, headerEl, actions) {
+    const res = state.results[date];
+    const jira = minutesSum([...res.ok.map((p) => p.worklog), ...res.diff.map((p) => p.worklog), ...res.missing]);
+    const wtm = minutesSum(state.items.filter((i) => i.date === date));
+    const parts = [`Jira ${formatMinutes(jira)} · WTM ${formatMinutes(wtm)}`];
+    if (res.missing.length) parts.push(`${res.missing.length} chybí`);
+    if (res.diff.length) parts.push(`${res.diff.length} liší se`);
+    if (res.extra.length) parts.push(`${res.extra.length} není v Jiře`);
+    const runnable = actions.filter((a) => !a.blocked);
+    const summary = h("span", { class: "gm-wjs-day" }, parts.join(" · "));
+    if (runnable.length) summary.append(h("button", { class: "gm-wjs-btn", disabled: state.busy, onclick: () => onDayAll(date) }, `Zapsat vše (${runnable.length})`));
+    headerEl.append(summary);
+  }
+
+  function render() {
+    if (!document.body || state.jira.status !== "ok" || !state.settings) return;
+    ensureStyle();
+    for (const el of document.querySelectorAll(`.${OWN_CLASS}`)) el.remove();
+    const sections = findDaySections(document.body);
+    const known = new Set(sections.map((s) => s.date));
+    for (const { date, headerEl, sectionEl } of sections) {
+      const res = state.results[date];
+      if (!res) continue;
+      const actions = rowActionsFor(date);
+      const cards = findItemCards(sectionEl);
+      for (const p of res.ok) {
+        const card = takeCard(cards, p.item);
+        if (card) decorateCard(card, p, "ok");
+      }
+      for (const p of res.diff) {
+        const card = takeCard(cards, p.item);
+        if (card) decorateCard(card, p, "diff", actions.find((a) => a.type === "update" && a.item.id === p.item.id));
+      }
+      for (const i of res.extra) {
+        const card = takeCard(cards, i);
+        if (card) decorateCard(card, i, "extra");
+      }
+      const allCards = findItemCards(sectionEl);
+      for (const action of actions.filter((a) => a.type === "create")) {
+        const row = renderVirtualRow(action);
+        const before = allCards.find((c) => c.from < action.worklog.from);
+        if (before) before.el.before(row);
+        else if (allCards.length) allCards[allCards.length - 1].el.after(row);
+        else sectionEl.append(row);
+      }
+      renderDaySummary(date, headerEl, actions);
+    }
+    for (const date of Object.keys(state.results).filter((d) => !known.has(d) && state.results[d].missing.length)) {
+      const actions = rowActionsFor(date);
+      const block = h("div", { class: "gm-wjs-vday" }, [h("strong", {}, `${date} – v Jiře, ve WTM nic`)]);
+      for (const action of actions) block.append(renderVirtualRow(action));
+      const after = sections.find((s) => s.date < date);
+      if (after) after.sectionEl.before(block);
+      else if (sections.length) sections[sections.length - 1].sectionEl.after(block);
+    }
+  }
+
+  function recompute() {
+    state.results = matchMonth(state.worklogs, state.items);
+    render();
+  }
+
+  // Temporary: replaced by the panel in Task 10.
+  function renderPanel() {
+    console.info("[wtm-jira-sync] jira", state.jira.status, state.jira.error || "");
+  }
+
+  async function loadJira(yearMonth) {
+    state.jira = { status: "loading", error: null };
+    renderPanel();
+    try {
+      state.worklogs = await fetchJiraMonth(monthRange(yearMonth), createJiraRequest(state.settings.jiraBaseUrl));
+      state.jira = { status: "ok", error: null };
+    } catch (e) {
+      state.jira = { status: "error", error: e.message, unauthorized: e.status === 401 };
+    }
+    renderPanel();
+    recompute();
+  }
+
+  let agent = null;
+  let currentYearMonth = null;
+
   function run() {
     if (window[SCRIPT_FLAG]) return;
     window[SCRIPT_FLAG] = true;
+    state.settings = loadSettings();
+    agent = createAgentClient(window, {
+      onMonth: (payload) => {
+        state.items = normalizeWtmItems(payload.items);
+        const ym = payload.yearMonth || (state.items[0] && state.items[0].date.replace(/-/g, "").slice(0, 6));
+        if (ym && ym !== currentYearMonth) {
+          currentYearMonth = ym;
+          loadJira(ym);
+        } else recompute();
+      },
+      onAuth: () => {
+        state.wtmAuth = true;
+        renderPanel();
+      },
+    });
+    injectAgent();
+    let pending = 0;
+    const observer = new MutationObserver((mutations) => {
+      if (mutations.every((m) => [...m.addedNodes, ...m.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains(OWN_CLASS)))) return;
+      clearTimeout(pending);
+      pending = setTimeout(render, 300);
+    });
+    const start = () => observer.observe(document.body, { childList: true, subtree: true });
+    if (document.body) start();
+    else document.addEventListener("DOMContentLoaded", start);
   }
 
   return {
