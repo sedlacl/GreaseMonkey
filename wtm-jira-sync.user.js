@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.1.1
+// @version      0.1.2
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.1.1";
+  const SCRIPT_VERSION = "0.1.2";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -592,14 +592,6 @@
     return actions.sort((a, b) => a.worklog.from.localeCompare(b.worklog.from));
   }
 
-  function onAction(action) {
-    console.info("[wtm-jira-sync] action", action);
-  }
-
-  function onDayAll(date) {
-    console.info("[wtm-jira-sync] day all", date);
-  }
-
   function minutesSum(list) {
     return list.reduce((s, x) => s + durationMinutes(x.from, x.to), 0);
   }
@@ -718,6 +710,66 @@
         } else document.body.append(block);
       }
     }
+  }
+
+  // --- BROWSER: actions ---
+
+  function actionKey(action) {
+    return action.type === "update" ? `i${action.item.id}` : `w${action.worklog.worklogId}`;
+  }
+
+  async function executeActions(actions) {
+    const result = { done: 0, failed: [] };
+    for (const action of actions) {
+      if (action.blocked) {
+        result.failed.push({ action, error: action.blocked });
+        continue;
+      }
+      const cmd = action.type === "create" ? "createTimesheetItem" : "updateTimesheetItem";
+      const dtoIn = action.type === "create" ? buildCreateDtoIn(action.worklog, action.subject) : buildUpdateDtoIn(action.item, action.worklog, null);
+      const res = await agent.call(cmd, dtoIn);
+      if (res.ok) result.done++;
+      else {
+        state.messages[actionKey(action)] = res.error;
+        result.failed.push({ action, error: res.error });
+      }
+    }
+    return result;
+  }
+
+  async function runBatch(actions) {
+    if (state.busy || !actions.length) return;
+    if (!state.wtmAuth) {
+      alert("WTM zatím neposlalo přihlášení – obnov stránku a zkus to znovu.");
+      return;
+    }
+    state.busy = true;
+    render();
+    const result = await executeActions(actions);
+    state.busy = false;
+    if (result.done) {
+      const failed = result.failed.length ? `, ${result.failed.length} selhalo` : "";
+      toast(`Zapsáno ${result.done}${failed}. Načítám stránku znovu…`);
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      toast(`Nic se nezapsalo: ${result.failed.map((f) => f.error).join("; ")}`);
+      render();
+    }
+  }
+
+  function onAction(action) {
+    runBatch([action]);
+  }
+
+  function onDayAll(date) {
+    runBatch(rowActionsFor(date).filter((a) => !a.blocked));
+  }
+
+  function toast(text) {
+    const el = h("div", { class: "gm-wjs-toast", role: "status" }, text);
+    el.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:99999;padding:10px 14px;border-radius:6px;background:#1b2230;color:#fff;font:14px/20px system-ui,sans-serif";
+    document.body.append(el);
+    setTimeout(() => el.remove(), 4000);
   }
 
   function recompute() {
