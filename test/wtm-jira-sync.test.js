@@ -147,3 +147,41 @@ test("checkWtmRules blocks invalid, old, out-of-month and overlapping entries", 
   assert.match(api.checkWtmRules({ date: "2026-10-09", from: "08:30", to: "09:30" }, day, "2026-10-10"), /Překryv s 08:00–09:00 CS-1/);
   assert.equal(api.checkWtmRules({ date: "2026-10-09", from: "08:30", to: "09:30" }, day, "2026-10-10", "a"), null);
 });
+
+test("extractMonthResponse accepts only the month list command", () => {
+  const body = JSON.stringify({ workerMonthlyTimesheet: { yearMonth: "202610" }, timesheetItemList: [{ id: "1" }] });
+  assert.deepEqual(api.extractMonthResponse("https://x/uu-specialistwtm-maing01/a-b/listWorkerTimesheetItemsByMonth", body), {
+    yearMonth: "202610", items: [{ id: "1" }],
+  });
+  assert.equal(api.extractMonthResponse("https://x/uu-specialistwtm-maing01/a-b/getSubjectInfo", body), null);
+  assert.equal(api.extractMonthResponse("https://x/listWorkerTimesheetItemsByMonth", "not json"), null);
+  assert.equal(api.extractMonthResponse("https://x/listWorkerTimesheetItemsByMonth", "{}"), null);
+});
+
+test("buildAgentSource embeds the agent and the extractor", () => {
+  const src = api.buildAgentSource();
+  assert.match(src, /listWorkerTimesheetItemsByMonth/);
+  assert.match(src, /gm-wjs-agent/);
+  assert.doesNotThrow(() => new Function(src));
+});
+
+test("createAgentClient round-trips a WTM call and forwards month/auth", async () => {
+  const listeners = [];
+  const win = {
+    addEventListener: (type, fn) => listeners.push(fn),
+    postMessage: (data) => setTimeout(() => listeners.forEach((fn) => fn({ data })), 0),
+  };
+  const seen = { month: null, auth: 0 };
+  const client = api.createAgentClient(win, { onMonth: (m) => (seen.month = m), onAuth: () => seen.auth++ });
+  // fake agent answering every command
+  win.addEventListener("message", (e) => {
+    if (e.data.source === api.MSG.toAgent) win.postMessage({ source: api.MSG.fromAgent, type: "wtm-result", payload: { id: e.data.id, ok: true, data: { id: "new" } } });
+  });
+  const res = await client.call("createTimesheetItem", { a: 1 });
+  assert.deepEqual(res, { id: res.id, ok: true, data: { id: "new" } });
+  win.postMessage({ source: api.MSG.fromAgent, type: "month", payload: { yearMonth: "202610", items: [] } });
+  win.postMessage({ source: api.MSG.fromAgent, type: "auth", payload: true });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(seen.month, { yearMonth: "202610", items: [] });
+  assert.equal(seen.auth, 1);
+});

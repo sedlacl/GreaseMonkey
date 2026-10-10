@@ -233,7 +233,157 @@
     return null;
   }
 
+  // --- PURE: wtm capture ---
+
+  const MSG = Object.freeze({ fromAgent: "gm-wjs-agent", toAgent: "gm-wjs-cmd", agentFlag: "__gmWjsAgent" });
+
+  function extractMonthResponse(url, bodyText) {
+    if (!/\/listWorkerTimesheetItemsByMonth(\?|$)/.test(String(url))) return null;
+    let json;
+    try {
+      json = JSON.parse(bodyText);
+    } catch (e) {
+      return null;
+    }
+    if (!json || !Array.isArray(json.timesheetItemList)) return null;
+    return { yearMonth: (json.workerMonthlyTimesheet && json.workerMonthlyTimesheet.yearMonth) || null, items: json.timesheetItemList };
+  }
+
+  function pageAgent(extractMonthResponse, MSG) {
+    if (window[MSG.agentFlag]) return;
+    window[MSG.agentFlag] = true;
+    const isWtm = (url) => /\/uu-specialistwtm-maing01\//.test(url);
+    let lastAuth = null;
+    const post = (type, payload) => window.postMessage({ source: MSG.fromAgent, type, payload }, "*");
+    const rememberAuth = (value) => {
+      if (!value || value === lastAuth) return;
+      lastAuth = value;
+      post("auth", true);
+    };
+
+    const XHR = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+    if (XHR) {
+      const open = XHR.open;
+      const send = XHR.send;
+      const setHeader = XHR.setRequestHeader;
+      XHR.open = function (method, url) {
+        this.__gmWjsUrl = String(url);
+        return open.apply(this, arguments);
+      };
+      XHR.setRequestHeader = function (name, value) {
+        if (/^authorization$/i.test(name) && isWtm(this.__gmWjsUrl || "")) rememberAuth(value);
+        return setHeader.apply(this, arguments);
+      };
+      XHR.send = function () {
+        this.addEventListener("load", () => {
+          try {
+            const m = extractMonthResponse(this.__gmWjsUrl || "", this.responseText);
+            if (m) post("month", m);
+          } catch (e) {
+            /* foreign response */
+          }
+        });
+        return send.apply(this, arguments);
+      };
+    }
+
+    const origFetch = window.fetch;
+    if (origFetch) {
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : (input && input.url) || "";
+        const headers = (init && init.headers) || (input && input.headers);
+        if (headers && isWtm(url)) {
+          rememberAuth(typeof headers.get === "function" ? headers.get("Authorization") : headers.Authorization || headers.authorization);
+        }
+        const promise = origFetch.apply(this, arguments);
+        if (/listWorkerTimesheetItemsByMonth/.test(url)) {
+          promise
+            .then((res) => res.clone().text())
+            .then((text) => {
+              const m = extractMonthResponse(url, text);
+              if (m) post("month", m);
+            })
+            .catch(() => {});
+        }
+        return promise;
+      };
+    }
+
+    window.addEventListener("message", async (event) => {
+      const data = event.data;
+      if (!data || data.source !== MSG.toAgent || data.type !== "wtm-call") return;
+      const reply = (body) => window.postMessage({ source: MSG.fromAgent, type: "wtm-result", payload: Object.assign({ id: data.id }, body) }, "*");
+      if (!lastAuth) {
+        reply({ ok: false, error: "Chybí přihlášení WTM – obnov stránku." });
+        return;
+      }
+      const base = location.pathname.match(/^\/uu-specialistwtm-maing01\/[^/]+/);
+      try {
+        const res = await origFetch.call(window, `${location.origin}${base[0]}/${data.cmd}`, {
+          method: "POST",
+          headers: { Authorization: lastAuth, "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(data.dtoIn),
+        });
+        const text = await res.text();
+        let json = null;
+        try {
+          json = JSON.parse(text);
+        } catch (e) {
+          json = null;
+        }
+        const errMap = (json && json.uuAppErrorMap) || {};
+        const errKey = Object.keys(errMap).find((k) => errMap[k] && errMap[k].type === "error");
+        if (!res.ok || errKey) reply({ ok: false, error: (errKey && (errMap[errKey].message || errKey)) || `HTTP ${res.status}` });
+        else reply({ ok: true, data: json });
+      } catch (e) {
+        reply({ ok: false, error: String((e && e.message) || e) });
+      }
+    });
+
+    post("ready", true);
+  }
+
+  function buildAgentSource() {
+    return `(${pageAgent.toString()})(${extractMonthResponse.toString()}, ${JSON.stringify(MSG)});`;
+  }
+
+  function createAgentClient(win, handlers) {
+    const pending = new Map();
+    let seq = 0;
+    win.addEventListener("message", (event) => {
+      const d = event.data;
+      if (!d || d.source !== MSG.fromAgent) return;
+      if (d.type === "month") handlers.onMonth(d.payload);
+      else if (d.type === "auth") handlers.onAuth();
+      else if (d.type === "wtm-result") {
+        const resolve = pending.get(d.payload.id);
+        if (resolve) {
+          pending.delete(d.payload.id);
+          resolve(d.payload);
+        }
+      }
+    });
+    return {
+      call(cmd, dtoIn) {
+        const id = `c${++seq}`;
+        return new Promise((resolve) => {
+          pending.set(id, resolve);
+          win.postMessage({ source: MSG.toAgent, type: "wtm-call", id, cmd, dtoIn }, "*");
+        });
+      },
+    };
+  }
+
   // --- BROWSER ---
+
+  // --- BROWSER: agent ---
+
+  function injectAgent() {
+    const script = document.createElement("script");
+    script.textContent = buildAgentSource();
+    (document.head || document.documentElement).appendChild(script);
+    script.remove();
+  }
 
   function run() {
     if (window[SCRIPT_FLAG]) return;
@@ -261,6 +411,7 @@
     buildCreateDtoIn,
     buildUpdateDtoIn,
     checkWtmRules,
+    MSG, extractMonthResponse, buildAgentSource, createAgentClient,
     run,
   };
 });
