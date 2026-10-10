@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.2.0", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.2.0");
+test("SCRIPT_VERSION is 0.2.1", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.2.1");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -50,13 +50,15 @@ test("normalizeWtmItems maps raw WTM items to Prague times", () => {
       subject: "https://example.test/artifactInfo?id=1",
       subjectName: "W_SLA",
       state: "active",
+      highRate: true,
     },
     { id: "a2", datetimeFrom: "2026-10-09T07:00:00.000Z", datetimeTo: "2026-10-09T07:30:00.000Z", description: "IDS-2", state: "confirmed" },
   ]);
   assert.deepEqual(items[0], {
     id: "a1", date: "2026-10-09", from: "07:45", to: "08:15", key: "CS-1", comment: "Analýza, Vývoj",
-    description: "CS-1 Analýza, Vývoj", subject: "https://example.test/artifactInfo?id=1", subjectName: "W_SLA", state: "active",
+    description: "CS-1 Analýza, Vývoj", subject: "https://example.test/artifactInfo?id=1", subjectName: "W_SLA", state: "active", highRate: true,
   });
+  assert.equal(items[1].highRate, false);
   assert.equal(items[1].key, "IDS-2");
   assert.equal(items[1].comment, "");
   assert.equal(items[1].subjectName, "");
@@ -138,6 +140,48 @@ test("buildCreateDtoIn and buildUpdateDtoIn", () => {
   assert.deepEqual(api.buildUpdateDtoIn(item, w, null), { id: "i1", ...api.buildCreateDtoIn(w, "old") });
 });
 
+test("buildUpdateDtoIn keeps highRate of the existing item", () => {
+  const w = W("CS-1", "2026-10-09", "07:45", "08:15", "Analýza");
+  const item = { ...I("i1", "CS-1", "2026-10-09", "08:00", "08:30"), highRate: true };
+  assert.equal(api.buildUpdateDtoIn(item, w, null).highRate, true);
+  assert.equal(api.buildUpdateDtoIn({ ...item, highRate: false }, w, null).highRate, false);
+  assert.equal(api.buildCreateDtoIn(w, "s").highRate, false);
+});
+
+test("isOwnMonthlyPage accepts only the own monthly page", () => {
+  const p = "/uu-specialistwtm-maing01/abc/workerMonthlyDetail";
+  assert.equal(api.isOwnMonthlyPage(p, ""), true);
+  assert.equal(api.isOwnMonthlyPage(p, "?yearMonth=202610"), true);
+  assert.equal(api.isOwnMonthlyPage(p, "?workerUuIdentity=1-2"), false);
+  assert.equal(api.isOwnMonthlyPage(p, "?yearMonth=202610&workerUuIdentity=1-2"), false);
+  assert.equal(api.isOwnMonthlyPage("/uu-specialistwtm-maing01/abc/other", ""), false);
+});
+
+test("planDayActions blocks confirmed diff items and unknown artifacts, honours choices", () => {
+  const d = "2026-10-09";
+  const today = "2026-10-10";
+  const confirmed = I("c1", "CS-1", d, "08:00", "09:00", "Jiný", "confirmed");
+  const wDiff = W("CS-1", d, "08:00", "09:00");
+  const wUnknown = { ...W("CS-2", d, "10:00", "10:30"), labels: ["W_NEW"] };
+  const wOk = W("CS-3", d, "11:00", "11:30");
+  const result = { ok: [], diff: [{ worklog: wDiff, item: confirmed }], missing: [wOk, wUnknown], extra: [] };
+  const mapping = { W_SLA: "sla" };
+  const plan = (choices) => api.planDayActions({ result, dayItems: [confirmed], mapping, choices, today });
+
+  const actions = plan({});
+  assert.deepEqual(actions.map((a) => a.worklog.from), ["08:00", "10:00", "11:00"]);
+  assert.equal(actions[0].type, "update");
+  assert.equal(actions[0].blocked, "Položka je potvrzená");
+  assert.match(actions[1].blocked, /Neznámý artefakt pro W_NEW/);
+  assert.equal(actions[2].type, "create");
+  assert.equal(actions[2].blocked, null);
+  assert.equal(actions[2].subject, "sla");
+
+  const chosen = plan({ [wUnknown.worklogId]: "picked" });
+  assert.equal(chosen[1].subject, "picked");
+  assert.equal(chosen[1].blocked, null);
+});
+
 test("checkWtmRules blocks invalid, old, out-of-month and overlapping entries", () => {
   const day = [I("a", "CS-1", "2026-10-09", "08:00", "09:00")];
   assert.equal(api.checkWtmRules({ date: "2026-10-09", from: "09:00", to: "09:30" }, day, "2026-10-10"), null);
@@ -169,7 +213,7 @@ test("createAgentClient round-trips a WTM call and forwards month/auth", async (
   const listeners = [];
   const win = {
     addEventListener: (type, fn) => listeners.push(fn),
-    postMessage: (data) => setTimeout(() => listeners.forEach((fn) => fn({ data })), 0),
+    postMessage: (data) => setTimeout(() => listeners.forEach((fn) => fn({ data, source: win })), 0),
   };
   const seen = { month: null, auth: 0 };
   const client = api.createAgentClient(win, { onMonth: (m) => (seen.month = m), onAuth: () => seen.auth++ });
