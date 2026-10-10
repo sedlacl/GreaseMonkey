@@ -7,6 +7,15 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.2.1 — 2026-10-10
+
+- Zabezpečení agenta: stránkový agent přijímá příkazy jen z téhož okna a původu a jen `createTimesheetItem` / `updateTimesheetItem`; klient ignoruje cizí zprávy.
+- Chyby zápisu: toast už nemizí s překreslením a drží 8 s; při částečném selhání se stránka nenačítá sama, ale nabídne „Načíst znovu“; timeout 20 s na odpověď WTM, po pozdním nebo částečném úspěchu zůstane zápis zablokovaný do obnovení stránky (ochrana před duplicitami).
+- Souběh načtení Jiry: zastaralá odpověď (jiný měsíc, dvojité „Obnovit“) se zahodí; při chybě nebo načítání se staré značky ze stránky odstraní.
+- highRate: úprava položky podle Jiry zachová původní příznak vysoké sazby.
+- Cizí výkaz: skript je aktivní jen na vlastní stránce `workerMonthlyDetail` (bez cizího `workerUuIdentity`); jinak panel hlásí „Cizí výkaz – skript je neaktivní“.
+- Předvyplnění mapování: label → artefakt se při prvních datech WTM doplní z položek výkazu a uloží. Dny bez nalezené sekce na stránce se hlásí v panelu, virtuální bloky jen pro dny bez položek WTM.
+
 ### 0.2.0 — 2026-10-10
 
 - Nový skript: párování WTM ↔ Jira na stránce Výkazy za měsíc, zápis chybějících a rozdílných položek do WTM, nastavení label → artefakt.
