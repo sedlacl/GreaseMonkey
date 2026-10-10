@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.3.1", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.3.1");
+test("SCRIPT_VERSION is 0.3.2", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.3.2");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -369,6 +369,50 @@ test("createAgentClient ignores messages with a wrong nonce or origin", async ()
   win.dispatch({ source: api.MSG.fromAgent, nonce: "n1", type: "auth", payload: true }, "https://evil.test");
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(seen, { month: 0, auth: 0 });
+});
+
+test("isTimesheetMutation matches page-side item changes only", () => {
+  const base = "https://uuapp.test/uu-specialistwtm-maing01/awid";
+  assert.equal(api.isTimesheetMutation(`${base}/deleteTimesheetItems`), true);
+  assert.equal(api.isTimesheetMutation(`${base}/createTimesheetItem`), true);
+  assert.equal(api.isTimesheetMutation(`${base}/updateTimesheetItem?x=1`), true);
+  assert.equal(api.isTimesheetMutation(`${base}/listWorkerTimesheetItemsByMonth`), false);
+  assert.equal(api.isTimesheetMutation(`${base}/getTimesheetItem`), false);
+  assert.equal(api.isTimesheetMutation(`${base}/loadConfigAndUserInfo`), false);
+});
+
+test("pageAgent refetches the month after a page-side delete", async () => {
+  const base = "https://uuapp.test/uu-specialistwtm-maing01/awid";
+  const monthUrl = `${base}/listWorkerTimesheetItemsByMonth`;
+  const lists = [[{ id: "a" }, { id: "b" }], [{ id: "a" }]];
+  const calls = [];
+  const response = (text) => ({ ok: true, status: 200, text: async () => text, clone() { return response(text); } });
+  const posted = [];
+  const saved = { window: globalThis.window, location: globalThis.location };
+  globalThis.location = { origin: "https://uuapp.test", pathname: "/uu-specialistwtm-maing01/awid/workerMonthlyDetail" };
+  globalThis.window = {
+    postMessage: (data) => posted.push(data),
+    addEventListener: () => {},
+    fetch: async (url, init) => {
+      calls.push({ url, body: init && init.body, auth: init && init.headers && init.headers.Authorization });
+      if (url === monthUrl) return response(JSON.stringify({ workerMonthlyTimesheet: { yearMonth: "202610" }, timesheetItemList: lists.shift() }));
+      return response("{}");
+    },
+  };
+  try {
+    api.pageAgent(api.extractMonthResponse, api.isTimesheetMutation, api.MSG, "n1");
+    const auth = { Authorization: "Bearer t" };
+    await window.fetch(monthUrl, { method: "POST", headers: auth, body: '{"yearMonth":"202610"}' });
+    await window.fetch(`${base}/deleteTimesheetItems`, { method: "POST", headers: auth, body: '{"itemList":[{"id":"b"}]}' });
+    await new Promise((r) => setTimeout(r, 400));
+  } finally {
+    globalThis.window = saved.window;
+    globalThis.location = saved.location;
+  }
+  const months = posted.filter((m) => m.type === "month");
+  assert.deepEqual(months.map((m) => m.payload.items.map((i) => i.id)), [["a", "b"], ["a"]]);
+  assert.ok(posted.every((m) => m.nonce === "n1"));
+  assert.deepEqual(calls[2], { url: monthUrl, body: '{"yearMonth":"202610"}', auth: "Bearer t" });
 });
 
 test("fetchJiraMonth pages the search and loads worklogs per issue", async () => {

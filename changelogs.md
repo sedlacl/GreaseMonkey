@@ -7,6 +7,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.3.2 — 2026-10-10
+
+- Oprava: po smazání, vytvoření nebo úpravě položky přímo ve WTM se značky neaktualizovaly (stránka si měsíc znovu nenačte). Háček ve stránce si pamatuje dotaz na měsíc a po každé úspěšné změně položky ho do 0,3 s načte znovu sám.
+
 ### 0.3.1 — 2026-10-10
 
 - Oprava: v Tampermonkey se panel zasekl na „Čekám na data WTM“ – zprávy z háčku ve stránce zahazovala kontrola `event.source` (sandbox má jiný objekt `window`). Nově se ověřuje původ stránky a náhodný kód relace; zprávy se posílají jen na původ stránky.

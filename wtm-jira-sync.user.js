@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.3.1
+// @version      0.3.2
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.3.1";
+  const SCRIPT_VERSION = "0.3.2";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -509,18 +509,47 @@
     return { yearMonth: (json.workerMonthlyTimesheet && json.workerMonthlyTimesheet.yearMonth) || null, items: json.timesheetItemList };
   }
 
-  function pageAgent(extractMonthResponse, MSG, nonce) {
+  // Page-side changes (delete/create/update) do not reload the month list; the agent refetches it.
+  function isTimesheetMutation(url) {
+    return /\/(?!list|get)[a-z]+TimesheetItems?(\?|$)/.test(String(url));
+  }
+
+  function pageAgent(extractMonthResponse, isTimesheetMutation, MSG, nonce) {
     if (window[MSG.agentFlag]) return;
     window[MSG.agentFlag] = true;
     const isWtm = (url) => /\/uu-specialistwtm-maing01\//.test(url);
     let lastAuth = null;
+    let lastMonth = null;
+    let refreshTimer = null;
     const post = (type, payload) => window.postMessage({ source: MSG.fromAgent, nonce, type, payload }, location.origin);
+    const isMonthUrl = (url) => /\/listWorkerTimesheetItemsByMonth(\?|$)/.test(url);
+    const rememberMonth = (url, body) => {
+      if (isMonthUrl(url) && typeof body === "string") lastMonth = { url, body };
+    };
+    const scheduleRefresh = () => {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(async () => {
+        if (!lastAuth || !lastMonth) return;
+        try {
+          const res = await origFetch.call(window, lastMonth.url, {
+            method: "POST",
+            headers: { Authorization: lastAuth, "Content-Type": "application/json", Accept: "application/json" },
+            body: lastMonth.body,
+          });
+          const m = extractMonthResponse(lastMonth.url, await res.text());
+          if (m) post("month", m);
+        } catch (e) {
+          /* the next page action retries */
+        }
+      }, 300);
+    };
     const rememberAuth = (value) => {
       if (!value || value === lastAuth) return;
       lastAuth = value;
       post("auth", true);
     };
 
+    const origFetch = window.fetch;
     const XHR = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
     if (XHR) {
       const open = XHR.open;
@@ -534,11 +563,14 @@
         if (/^authorization$/i.test(name) && isWtm(this.__gmWjsUrl || "")) rememberAuth(value);
         return setHeader.apply(this, arguments);
       };
-      XHR.send = function () {
+      XHR.send = function (body) {
+        const url = this.__gmWjsUrl || "";
+        rememberMonth(url, body);
         this.addEventListener("load", () => {
           try {
-            const m = extractMonthResponse(this.__gmWjsUrl || "", this.responseText);
+            const m = extractMonthResponse(url, this.responseText);
             if (m) post("month", m);
+            else if (isWtm(url) && isTimesheetMutation(url) && this.status >= 200 && this.status < 300) scheduleRefresh();
           } catch (e) {
             /* foreign response */
           }
@@ -547,7 +579,6 @@
       };
     }
 
-    const origFetch = window.fetch;
     if (origFetch) {
       window.fetch = function (input, init) {
         const url = typeof input === "string" ? input : (input && input.url) || "";
@@ -555,7 +586,11 @@
         if (headers && isWtm(url)) {
           rememberAuth(typeof headers.get === "function" ? headers.get("Authorization") : headers.Authorization || headers.authorization);
         }
+        if (isWtm(url)) rememberMonth(url, init && init.body);
         const promise = origFetch.apply(this, arguments);
+        if (isWtm(url) && isTimesheetMutation(url)) {
+          promise.then((res) => res.ok && scheduleRefresh()).catch(() => {});
+        }
         if (/listWorkerTimesheetItemsByMonth/.test(url)) {
           promise
             .then((res) => res.clone().text())
@@ -610,7 +645,7 @@
   }
 
   function buildAgentSource(nonce) {
-    return `(${pageAgent.toString()})(${extractMonthResponse.toString()}, ${JSON.stringify(MSG)}, ${JSON.stringify(String(nonce))});`;
+    return `(${pageAgent.toString()})(${extractMonthResponse.toString()}, ${isTimesheetMutation.toString()}, ${JSON.stringify(MSG)}, ${JSON.stringify(String(nonce))});`;
   }
 
   const CALL_TIMEOUT_MS = 20000;
@@ -1477,7 +1512,7 @@
     checkWtmRules,
     planDayActions,
     isOwnMonthlyPage,
-    MSG, extractMonthResponse, buildAgentSource, createAgentClient,
+    MSG, extractMonthResponse, isTimesheetMutation, pageAgent, buildAgentSource, createAgentClient,
     run,
   };
 });
