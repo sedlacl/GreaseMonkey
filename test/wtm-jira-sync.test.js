@@ -112,3 +112,38 @@ test("matchMonth groups by day across both sources", () => {
   assert.equal(res["2026-10-05"].missing.length, 1);
   assert.equal(res["2026-10-06"].extra.length, 1);
 });
+
+test("seedMappingFromWtm adds W_ subjects without overwriting", () => {
+  const items = [I("1", "CS-1", "2026-10-01", "08:00", "09:00"), { ...I("2", "X-1", "2026-10-01", "09:00", "10:00"), subjectName: "Projekt", subject: "p" }];
+  items[0].subject = "sla-url";
+  assert.deepEqual(api.seedMappingFromWtm(items, { W_DR: "dr-url" }), { W_DR: "dr-url", W_SLA: "sla-url" });
+  assert.deepEqual(api.seedMappingFromWtm(items, { W_SLA: "keep" }), { W_SLA: "keep" });
+});
+
+test("resolveSubject prefers a mapped W_ label", () => {
+  const m = { W_SLA: "sla" };
+  assert.deepEqual(api.resolveSubject(["AFLEX", "W_SLA"], m), { label: "W_SLA", subject: "sla" });
+  assert.deepEqual(api.resolveSubject(["W_RE_RE2"], m), { label: "W_RE_RE2", subject: null });
+  assert.deepEqual(api.resolveSubject(["AFLEX"], m), { label: null, subject: null });
+});
+
+test("buildCreateDtoIn and buildUpdateDtoIn", () => {
+  const w = W("CS-1", "2026-10-09", "07:45", "08:15", "Analýza");
+  assert.deepEqual(api.buildCreateDtoIn(w, "sla"), {
+    datetimeFrom: "2026-10-09T05:45:00.000Z", datetimeTo: "2026-10-09T06:15:00.000Z",
+    subject: "sla", category: "CS-1", description: "CS-1 Analýza", highRate: false,
+  });
+  const item = I("i1", "CS-1", "2026-10-09", "08:00", "08:30");
+  item.subject = "old";
+  assert.deepEqual(api.buildUpdateDtoIn(item, w, null), { id: "i1", ...api.buildCreateDtoIn(w, "old") });
+});
+
+test("checkWtmRules blocks invalid, old, out-of-month and overlapping entries", () => {
+  const day = [I("a", "CS-1", "2026-10-09", "08:00", "09:00")];
+  assert.equal(api.checkWtmRules({ date: "2026-10-09", from: "09:00", to: "09:30" }, day, "2026-10-10"), null);
+  assert.match(api.checkWtmRules({ date: "2026-10-09", from: "10:00", to: "10:00" }, day, "2026-10-10"), /Neplatný/);
+  assert.match(api.checkWtmRules({ date: "2026-10-01", from: "09:00", to: "09:30" }, [], "2026-10-10"), /7 dní/);
+  assert.match(api.checkWtmRules({ date: "2026-11-02", from: "09:00", to: "09:30" }, [], "2026-10-30"), /měsíc/);
+  assert.match(api.checkWtmRules({ date: "2026-10-09", from: "08:30", to: "09:30" }, day, "2026-10-10"), /Překryv s 08:00–09:00 CS-1/);
+  assert.equal(api.checkWtmRules({ date: "2026-10-09", from: "08:30", to: "09:30" }, day, "2026-10-10", "a"), null);
+});

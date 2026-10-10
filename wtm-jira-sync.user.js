@@ -183,6 +183,56 @@
     return out;
   }
 
+  // --- PURE: mapping & rules ---
+
+  const DEFAULT_MAPPING = Object.freeze({
+    W_RTO_PS: "https://uuapp.plus4u.net/uu-businessterritory-maing01/0e0e8e476f374ee0b6edd7f262ba0ff6/artifactInfo?id=6ab0d68c86377525f536a4fd",
+  });
+
+  function seedMappingFromWtm(items, current) {
+    const out = { ...current };
+    for (const i of items || []) {
+      if (/^W_/.test(i.subjectName) && i.subject && !out[i.subjectName]) out[i.subjectName] = i.subject;
+    }
+    return out;
+  }
+
+  function resolveSubject(labels, mapping) {
+    const wLabels = (labels || []).filter((l) => /^W_/.test(l));
+    const mapped = wLabels.find((l) => mapping[l]);
+    if (mapped) return { label: mapped, subject: mapping[mapped] };
+    return { label: wLabels[0] || null, subject: null };
+  }
+
+  function buildCreateDtoIn(worklog, subject) {
+    return {
+      datetimeFrom: pragueToUtcIso(worklog.date, worklog.from),
+      datetimeTo: pragueToUtcIso(worklog.date, worklog.to),
+      subject,
+      category: worklog.key,
+      description: buildWtmDescription(worklog.key, worklog.comment),
+      highRate: false,
+    };
+  }
+
+  function buildUpdateDtoIn(item, worklog, subject) {
+    return { id: item.id, ...buildCreateDtoIn(worklog, subject || item.subject) };
+  }
+
+  function checkWtmRules(entry, dayItems, today, ignoreItemId) {
+    const a = minutesOf(entry.from);
+    const b = minutesOf(entry.to);
+    if (b <= a) return "Neplatný časový rozsah";
+    const ageDays = Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${entry.date}T00:00:00Z`)) / 86400000);
+    if (ageDays > 7) return "Starší než 7 dní – WTM to odmítne";
+    const ym = entry.date.slice(0, 7);
+    const current = today.slice(0, 7);
+    if (ym !== current && ym !== previousYearMonthDash(current)) return "Mimo aktuální nebo předchozí měsíc";
+    const clash = (dayItems || []).find((i) => i.id !== ignoreItemId && minutesOf(i.from) < b && a < minutesOf(i.to));
+    if (clash) return `Překryv s ${clash.from}–${clash.to} ${clash.key}`;
+    return null;
+  }
+
   // --- BROWSER ---
 
   function run() {
@@ -205,6 +255,12 @@
     normalizeJiraWorklogs,
     matchDay,
     matchMonth,
+    DEFAULT_MAPPING,
+    seedMappingFromWtm,
+    resolveSubject,
+    buildCreateDtoIn,
+    buildUpdateDtoIn,
+    checkWtmRules,
     run,
   };
 });
