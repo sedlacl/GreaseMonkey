@@ -835,10 +835,11 @@
   }
 
   function openSettings() {
+    if (document.getElementById("gm-wjs-settings")) return;
     const settings = loadSettings();
     settings.mapping = seedMappingFromWtm(state.items, settings.mapping);
     const overlay = document.createElement("div");
-    overlay.className = OWN_CLASS;
+    overlay.id = "gm-wjs-settings";
     overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center";
     const box = document.createElement("div");
     box.style.cssText = "background:#fff;border-radius:8px;padding:16px;min-width:560px;max-width:90vw;max-height:80vh;overflow:auto;font:13px/20px system-ui,sans-serif";
@@ -920,6 +921,10 @@
     let pending = 0;
     const observer = new MutationObserver((mutations) => {
       if (mutations.every((m) => [...m.addedNodes, ...m.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains(OWN_CLASS)))) return;
+      if (mutations.every((m) => {
+        const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+        return el && el.closest && el.closest("#gm-wjs-settings, #gm-wjs-panel");
+      })) return;
       clearTimeout(pending);
       pending = setTimeout(render, 300);
     });
