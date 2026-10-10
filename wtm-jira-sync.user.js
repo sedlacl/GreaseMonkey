@@ -147,6 +147,42 @@
     return out.sort((a, b) => (a.date + a.from).localeCompare(b.date + b.from));
   }
 
+  // --- PURE: match ---
+
+  function byFrom(a, b) {
+    return a.from.localeCompare(b.from);
+  }
+
+  function pairBy(worklogs, items, predicate, out) {
+    for (const w of [...worklogs]) {
+      const idx = items.findIndex((i) => predicate(w, i));
+      if (idx < 0) continue;
+      out.push({ worklog: w, item: items[idx] });
+      items.splice(idx, 1);
+      worklogs.splice(worklogs.indexOf(w), 1);
+    }
+  }
+
+  function matchDay(worklogs, items) {
+    const W = [...worklogs].sort(byFrom);
+    const I = [...items].sort(byFrom);
+    const ok = [];
+    const diff = [];
+    pairBy(W, I, (w, i) => w.key === i.key && w.from === i.from && w.to === i.to && buildWtmDescription(w.key, w.comment) === i.description, ok);
+    pairBy(W, I, (w, i) => w.key === i.key && w.from === i.from && w.to === i.to, diff);
+    pairBy(W, I, (w, i) => w.key === i.key, diff);
+    return { ok, diff, missing: W, extra: I };
+  }
+
+  function matchMonth(worklogs, items) {
+    const dates = new Set([...worklogs.map((w) => w.date), ...items.map((i) => i.date)]);
+    const out = {};
+    for (const date of [...dates].sort()) {
+      out[date] = matchDay(worklogs.filter((w) => w.date === date), items.filter((i) => i.date === date));
+    }
+    return out;
+  }
+
   // --- BROWSER ---
 
   function run() {
@@ -167,6 +203,8 @@
     buildWtmDescription,
     normalizeWtmItems,
     normalizeJiraWorklogs,
+    matchDay,
+    matchMonth,
     run,
   };
 });

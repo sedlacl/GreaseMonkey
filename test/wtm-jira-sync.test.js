@@ -76,3 +76,39 @@ test("normalizeJiraWorklogs keeps only my worklogs inside the month", () => {
     { key: "CS-1", summary: "Ticket 1", labels: ["AFLEX", "W_SLA"], date: "2026-10-09", from: "07:45", to: "08:15", comment: "Analýza", worklogId: "10" },
   ]);
 });
+
+const W = (key, date, from, to, comment = "Analýza") => ({ key, summary: "", labels: ["W_SLA"], date, from, to, comment, worklogId: `${key}-${from}` });
+const I = (id, key, date, from, to, comment = "Analýza", state = "active") => ({
+  id, date, from, to, key, comment, description: comment ? `${key} ${comment}` : key, subject: "s", subjectName: "W_SLA", state,
+});
+
+test("matchDay classifies ok, diff, missing and extra", () => {
+  const d = "2026-10-09";
+  const res = api.matchDay(
+    [W("CS-1", d, "08:00", "09:00"), W("CS-2", d, "09:00", "10:00"), W("CS-3", d, "10:00", "10:30"), W("CS-4", d, "11:00", "11:15", "Vývoj")],
+    [I("i1", "CS-1", d, "08:00", "09:00"), I("i2", "CS-2", d, "09:15", "10:00"), I("i4", "CS-4", d, "11:00", "11:15", "Jiný"), I("i9", "CS-9", d, "12:00", "12:30")],
+  );
+  assert.deepEqual(res.ok.map((p) => p.item.id), ["i1"]);
+  assert.deepEqual(res.diff.map((p) => p.item.id).sort(), ["i2", "i4"]);
+  assert.deepEqual(res.missing.map((w) => w.key), ["CS-3"]);
+  assert.deepEqual(res.extra.map((i) => i.id), ["i9"]);
+});
+
+test("matchDay pairs repeated tickets in start order", () => {
+  const d = "2026-10-06";
+  const res = api.matchDay(
+    [W("CS-7", d, "08:00", "08:30"), W("CS-7", d, "15:00", "16:00")],
+    [I("a", "CS-7", d, "15:00", "16:00"), I("b", "CS-7", d, "08:30", "09:00")],
+  );
+  assert.deepEqual(res.ok.map((p) => p.item.id), ["a"]);
+  assert.deepEqual(res.diff.map((p) => [p.worklog.from, p.item.id]), [["08:00", "b"]]);
+  assert.equal(res.missing.length, 0);
+  assert.equal(res.extra.length, 0);
+});
+
+test("matchMonth groups by day across both sources", () => {
+  const res = api.matchMonth([W("CS-1", "2026-10-05", "08:00", "09:00")], [I("x", "CS-2", "2026-10-06", "08:00", "09:00")]);
+  assert.deepEqual(Object.keys(res).sort(), ["2026-10-05", "2026-10-06"]);
+  assert.equal(res["2026-10-05"].missing.length, 1);
+  assert.equal(res["2026-10-06"].extra.length, 1);
+});
