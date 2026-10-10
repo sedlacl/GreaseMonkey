@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.4.0", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.4.0");
+test("SCRIPT_VERSION is 0.4.1", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.4.1");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -113,6 +113,44 @@ test("matchMonth groups by day across both sources", () => {
   assert.deepEqual(Object.keys(res).sort(), ["2026-10-05", "2026-10-06"]);
   assert.equal(res["2026-10-05"].missing.length, 1);
   assert.equal(res["2026-10-06"].extra.length, 1);
+});
+
+test("matchDay falls back to day + label for WTM items without a ticket key", () => {
+  const d = "2026-10-01";
+  const mapping = { W_RTO_PS: { url: "https://bt.test/artifactInfo?id=rto" } };
+  const w = { ...W("CS-9768", d, "13:00", "19:15", "Schůzky"), labels: ["W_RTO_PS"] };
+  const wOther = { ...W("CS-1", d, "08:00", "09:00"), labels: ["W_RTO_PS"] };
+  const keyless = { ...I("i1", "", d, "13:00", "19:15", ""), subject: "https://bt.test/userGate/artifactInfo?id=rto", subjectName: "psd.rto Presale" };
+  const wordKey = { ...I("i2", "Schůzky", d, "08:00", "09:00", ""), subject: "https://bt.test/artifactInfo?id=other", subjectName: "Jiný" };
+  const res = api.matchDay([w, wOther], [keyless, wordKey], mapping);
+  assert.deepEqual(res.ok.map((p) => [p.worklog.key, p.item.id, p.loose]), [["CS-9768", "i1", true]]);
+  assert.deepEqual(res.missing.map((x) => x.key), ["CS-1"]);
+  assert.deepEqual(res.extra.map((x) => x.id), ["i2"]);
+});
+
+test("matchDay fallback with a different time is a diff that can be updated", () => {
+  const d = "2026-10-01";
+  const w = { ...W("CS-9768", d, "13:00", "19:15", "Schůzky"), labels: ["W_RTO_PS"] };
+  const item = { ...I("i1", "", d, "13:30", "19:00", ""), subjectName: "W_RTO_PS" };
+  const res = api.matchDay([w], [item], {});
+  assert.equal(res.ok.length, 0);
+  assert.deepEqual(res.diff.map((p) => [p.worklog.key, p.item.id, p.loose]), [["CS-9768", "i1", true]]);
+  assert.equal(res.missing.length + res.extra.length, 0);
+});
+
+test("matchDay does not loosely pair items that carry another ticket key", () => {
+  const d = "2026-10-01";
+  const w = W("CS-2", d, "08:00", "09:00");
+  const res = api.matchDay([w], [I("i1", "CS-3", d, "08:00", "09:00")], { W_SLA: { url: "s" } });
+  assert.equal(res.ok.length, 0);
+  assert.equal(res.missing.length, 1);
+  assert.equal(res.extra.length, 1);
+});
+
+test("matchMonth passes the mapping to the fallback", () => {
+  const w = W("CS-1", "2026-10-05", "08:00", "09:00");
+  const res = api.matchMonth([w], [I("x", "", "2026-10-05", "08:00", "09:00", "")], { W_SLA: { url: "s" } });
+  assert.equal(res["2026-10-05"].ok[0].loose, true);
 });
 
 test("seedMappingFromWtm adds W_ subjects without overwriting", () => {

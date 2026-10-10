@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.4.0
+// @version      0.4.1
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.4.0";
+  const SCRIPT_VERSION = "0.4.1";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -164,7 +164,16 @@
     }
   }
 
-  function matchDay(worklogs, items) {
+  const JIRA_KEY_RE = /^[A-Z][A-Z0-9]+-\d+$/;
+
+  // Fallback for WTM items entered without a ticket key: same day and the worklog's label / artifact.
+  function sameArtifact(worklog, item, mapping) {
+    if (item.subjectName && (worklog.labels || []).includes(item.subjectName)) return true;
+    const subject = mapping ? resolveSubject(worklog.labels, mapping).subject : null;
+    return Boolean(subject && item.subject && normalizeSubjectUrl(subject) === normalizeSubjectUrl(item.subject));
+  }
+
+  function matchDay(worklogs, items, mapping) {
     const W = [...worklogs].sort(byFrom);
     const I = [...items].sort(byFrom);
     const ok = [];
@@ -172,14 +181,21 @@
     pairBy(W, I, (w, i) => w.key === i.key && w.from === i.from && w.to === i.to && buildWtmDescription(w.key, w.comment) === i.description, ok);
     pairBy(W, I, (w, i) => w.key === i.key && w.from === i.from && w.to === i.to, diff);
     pairBy(W, I, (w, i) => w.key === i.key, diff);
+    const looseOk = [];
+    const looseDiff = [];
+    const keyless = (w, i) => !JIRA_KEY_RE.test(i.key) && sameArtifact(w, i, mapping);
+    pairBy(W, I, (w, i) => keyless(w, i) && w.from === i.from && w.to === i.to, looseOk);
+    pairBy(W, I, keyless, looseDiff);
+    ok.push(...looseOk.map((p) => ({ ...p, loose: true })));
+    diff.push(...looseDiff.map((p) => ({ ...p, loose: true })));
     return { ok, diff, missing: W, extra: I };
   }
 
-  function matchMonth(worklogs, items) {
+  function matchMonth(worklogs, items, mapping) {
     const dates = new Set([...worklogs.map((w) => w.date), ...items.map((i) => i.date)]);
     const out = {};
     for (const date of [...dates].sort()) {
-      out[date] = matchDay(worklogs.filter((w) => w.date === date), items.filter((i) => i.date === date));
+      out[date] = matchDay(worklogs.filter((w) => w.date === date), items.filter((i) => i.date === date), mapping);
     }
     return out;
   }
@@ -1064,12 +1080,14 @@
   function decorateCard(card, pairOrItem, kind, action) {
     const anchor = card.timeEl;
     if (kind === "ok") {
-      anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-ok" }, ["✓ ", jiraLink(pairOrItem.worklog.key)]));
+      const loose = pairOrItem.loose === true;
+      const title = loose ? "Spárováno podle dne a labelu – položka ve WTM nemá klíč ticketu" : "Sedí s Jirou";
+      anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-ok", title }, [loose ? "≈ " : "✓ ", jiraLink(pairOrItem.worklog.key)]));
     } else if (kind === "extra") {
       anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-extra" }, "není v Jiře"));
     } else if (kind === "diff") {
       const w = pairOrItem.worklog;
-      const badge = h("span", { class: "gm-wjs-badge gm-wjs-diff" }, ["≠ ", jiraLink(w.key)]);
+      const badge = h("span", { class: "gm-wjs-badge gm-wjs-diff", title: pairOrItem.loose ? "Spárováno podle dne a labelu – položka ve WTM nemá klíč ticketu" : "Liší se od Jiry" }, ["≠ ", jiraLink(w.key)]);
       const btn = h("button", { class: "gm-wjs-btn gm-wjs-btn-primary", disabled: state.busy || Boolean(action && action.blocked), title: (action && action.blocked) || "", onclick: () => onAction(action) }, "Upravit podle Jiry");
       anchor.after(badge, btn);
       const msg = state.messages[`i${pairOrItem.item.id}`] || (action && action.blocked);
@@ -1241,7 +1259,7 @@
   }
 
   function recompute() {
-    state.results = matchMonth(state.worklogs, state.items);
+    state.results = matchMonth(state.worklogs, state.items, state.settings && state.settings.mapping);
     render();
   }
 
@@ -1262,6 +1280,11 @@
   function progressText(progress) {
     if (!progress || progress.phase === "search") return "hledám tickety s worklogy…";
     return `načítám worklogy ${progress.done}/${progress.total}`;
+  }
+
+  // Zero counts are grey so the non-zero ones stand out.
+  function countBadge(count, colorClass, title, text) {
+    return make("span", { class: `gm-wjs-badge ${count ? colorClass : "gm-wjs-muted"}`, title }, text);
   }
 
   function loginLink() {
@@ -1289,10 +1312,10 @@
     else if (jira.status === "ok") {
       const t = monthTotals();
       status.push(
-        make("span", { class: "gm-wjs-badge gm-wjs-ok", title: "Sedí s Jirou" }, `✓ ${t.ok}`),
-        make("span", { class: "gm-wjs-badge gm-wjs-diff", title: "Liší se od Jiry" }, `≠ ${t.diff}`),
-        make("span", { class: "gm-wjs-badge gm-wjs-missing", title: "Chybí ve WTM" }, `chybí ${t.missing}`),
-        make("span", { class: "gm-wjs-badge gm-wjs-extra", title: "Ve WTM navíc, není v Jiře" }, `navíc ${t.extra}`),
+        countBadge(t.ok, "gm-wjs-ok", "Sedí s Jirou", `✓ ${t.ok}`),
+        countBadge(t.diff, "gm-wjs-diff", "Liší se od Jiry", `≠ ${t.diff}`),
+        countBadge(t.missing, "gm-wjs-missing", "Chybí ve WTM", `chybí ${t.missing}`),
+        countBadge(t.extra, "gm-wjs-extra", "Ve WTM navíc, není v Jiře", `navíc ${t.extra}`),
       );
       if (jira.refreshing) status.push(spinner(true), make("span", {}, `aktualizuji z Jiry – ${progressText(jira.progress)}`));
       else if (jira.refreshError) status.push(make("span", { class: "gm-wjs-warn" }, [`Jira nedostupná, data z ${formatCzDateTime(jira.cachedAt)}`, ...(jira.unauthorized ? [" · ", loginLink()] : [])]));
