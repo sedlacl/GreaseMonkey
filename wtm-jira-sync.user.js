@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.5.0
+// @version      0.6.0
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.5.0";
+  const SCRIPT_VERSION = "0.6.0";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -456,6 +456,136 @@
     return { added: added.sort(), changed: changed.sort(), same: same.sort(), notInFile: notInFile.sort(), merged: sorted };
   }
 
+  // --- PURE: mapping import (ManagementKit document "SP53 Standardy vykazování") ---
+
+  const UU5_BLOCK_TAG = /^<\/?(p|li|ul|ol|br|div|h\d)\b/i;
+  const W_LABEL_RE = /^W_[A-Z0-9_]+$/;
+
+  // Plain text of a uu5string cell; skips tags with quoted attributes that may contain <uu5json/>.
+  function uu5Text(value) {
+    const s = String(value ?? "").replace(/<uu5string\s*\/>/g, "");
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] !== "<") {
+        out += s[i];
+        continue;
+      }
+      const block = UU5_BLOCK_TAG.test(s.slice(i, i + 6));
+      let quote = null;
+      for (i++; i < s.length; i++) {
+        const c = s[i];
+        if (quote) {
+          if (c === "\\") i++;
+          else if (c === quote) quote = null;
+        } else if (c === '"' || c === "'") quote = c;
+        else if (c === ">") break;
+      }
+      if (block) out += " ";
+    }
+    return out
+      .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&")
+      .replace(/[\s​]+/g, " ")
+      .trim();
+  }
+
+  function parseUu5Json(value) {
+    if (typeof value !== "string") return value;
+    try {
+      return JSON.parse(value.replace(/^<uu5json\s*\/>/, ""));
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function dayBefore(d, m, y) {
+    return new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)) - 86400000).toISOString().slice(0, 10);
+  }
+
+  function sp53NoteRules(note, closedPage) {
+    const rules = {};
+    const blocking = closedPage || /nevykazovat/i.test(note);
+    const from = /\bod\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/i.exec(note);
+    if (blocking && from) rules.validTo = dayBefore(from[1], from[2], from[3]);
+    else if (blocking) rules.blocked = true;
+    if (/na povolen/i.test(note)) rules.requiresApproval = true;
+    return rules;
+  }
+
+  function collectSp53Tables(node, header, out) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const n of node) collectSp53Tables(n, header, out);
+      return;
+    }
+    const props = node.props || {};
+    const here = typeof props.header === "string" ? uu5Text(props.header) : header;
+    if (node.uu5Tag === "Uu5TilesBricks.Table") out.push({ header: here, props });
+    for (const key of Object.keys(node)) if (key !== "props") collectSp53Tables(node[key], here, out);
+  }
+
+  function mappingFromSp53Doc(doc) {
+    const entries = {};
+    const skipped = [];
+    const closed = {};
+    let updatedAt = null;
+    for (const page of (doc && doc.pages) || []) {
+      const closedPage = /uzavřen/i.test(page.name || "");
+      const stamps = [page.mts, ...((page.mainPanel && page.mainPanel.sectionList) || []).map((s) => s && s.sys && s.sys.mts)];
+      for (const mts of stamps) if (mts && (!updatedAt || mts > updatedAt)) updatedAt = mts;
+      const tables = [];
+      collectSp53Tables(page.mainPanel, "", tables);
+      for (const t of tables) {
+        const columns = parseUu5Json(t.props.columnList || t.props.columns) || [];
+        const noteIdx = columns.findIndex((c) => /pozn/i.test(uu5Text(c && c.header)));
+        let group = "";
+        for (const row of parseUu5Json(t.props.data) || []) {
+          const cells = (Array.isArray(row) ? row : (row && row.value) || []).map((c) => uu5Text(c && typeof c === "object" ? c.value : c));
+          let label = cells.find((c) => W_LABEL_RE.test(c));
+          if (!label) {
+            const fromCode = cells.map((c) => /\/(W_[A-Z0-9_]+)\b/.exec(c)).find(Boolean);
+            label = fromCode && fromCode[1];
+          }
+          if (!label) {
+            if (cells[0] && cells.slice(1).every((c) => !c)) group = cells[0];
+            continue;
+          }
+          const note = noteIdx >= 0 ? cells[noteIdx] || "" : "";
+          const rules = sp53NoteRules(note, closedPage);
+          const uriCell = cells.find((c) => /artifactInfo\?id=/.test(c));
+          const url = uriCell ? normalizeSubjectUrl(/https?:\/\/\S+/.exec(uriCell)[0]) : "";
+          if (!url) {
+            if (!closedPage) skipped.push({ label, reason: "chybí URI" });
+            if ((rules.blocked || rules.validTo) && !closed[label]) closed[label] = { ...(note ? { note } : {}), ...rules };
+            continue;
+          }
+          if (entries[label]) continue;
+          const entry = { url };
+          const project = group || t.header;
+          if (project) entry.project = project;
+          if (cells[0] && cells[0] !== label) entry.artifact = cells[0];
+          if (note) entry.note = note;
+          Object.assign(entry, rules, { fromFile: true });
+          entries[label] = entry;
+        }
+      }
+    }
+    // The closed list also keeps old codes that reuse a currently valid label (e.g. W_SLA); the open table wins.
+    for (const label of Object.keys(closed)) if (entries[label]) delete closed[label];
+    if (!Object.keys(entries).length && !Object.keys(closed).length) throw new Error("Dokument neobsahuje žádné labely W_");
+    return { entries, skipped, closed, meta: { revision: null, updatedAt, updatedBy: null } };
+  }
+
+  function applyClosedLabels(merged, closed) {
+    const out = { ...merged };
+    const affected = [];
+    for (const [label, rules] of Object.entries(closed || {})) {
+      if (!out[label]) continue;
+      out[label] = { ...out[label], ...rules };
+      affected.push(label);
+    }
+    return { merged: out, affected: affected.sort() };
+  }
+
   function buildCreateDtoIn(worklog, subject) {
     return {
       datetimeFrom: pragueToUtcIso(worklog.date, worklog.from),
@@ -504,8 +634,10 @@
     return actions.sort((a, b) => a.worklog.from.localeCompare(b.worklog.from));
   }
 
+  // The app root (".../uu-specialistwtm-maing01/<awid>/") renders the monthly detail by default.
   function isOwnMonthlyPage(pathname, search) {
-    if (!String(pathname).endsWith("/workerMonthlyDetail")) return false;
+    const p = String(pathname);
+    if (!p.endsWith("/workerMonthlyDetail") && !/\/uu-specialistwtm-maing01\/[^/]+\/?$/.test(p)) return false;
     return [...new URLSearchParams(search).keys()].every((k) => k === "yearMonth");
   }
 
@@ -626,6 +758,46 @@
       const data = event.data;
       if (!data || data.source !== MSG.toAgent || data.nonce !== nonce || data.type !== "wtm-call") return;
       const reply = (body) => window.postMessage({ source: MSG.fromAgent, nonce, type: "wtm-result", payload: Object.assign({ id: data.id }, body) }, location.origin);
+      if (data.cmd === "loadMngkitDoc") {
+        // Read-only: loads one ManagementKit document (all pages) with a call token from the page's own uu5 session.
+        try {
+          const u = new URL(String((data.dtoIn && data.dtoIn.url) || ""), location.origin);
+          const path = /^(\/uu-managementkit-maing02\/[0-9a-f]+)\/document$/.exec(u.pathname);
+          const oid = u.searchParams.get("oid") || "";
+          if (u.origin !== location.origin || !path || !/^[0-9a-f]{24}$/.test(oid)) {
+            reply({ ok: false, error: "Neplatná adresa dokumentu ManagementKit" });
+            return;
+          }
+          const baseUri = `${u.origin}${path[1]}`;
+          const session = (window.UU5 && UU5.Environment && UU5.Environment.getSession && UU5.Environment.getSession()) || (window.Uu5 && Uu5.Environment && Uu5.Environment.session);
+          if (!session || typeof session.getCallToken !== "function") {
+            reply({ ok: false, error: "Stránka zatím nemá přihlášení – obnov ji a zkus to znovu" });
+            return;
+          }
+          const token = String(await session.getCallToken(baseUri));
+          const headers = { Authorization: /^Bearer /.test(token) ? token : `Bearer ${token}`, Accept: "application/json" };
+          const get = async (query) => {
+            const res = await origFetch.call(window, `${baseUri}${query}`, { headers });
+            if (!res.ok) throw new Error(`ManagementKit odpověděl HTTP ${res.status}`);
+            return res.json();
+          };
+          const meta = await get(`/document/loadByOid?oid=${oid}`);
+          const eccDocOid = meta && meta.data && meta.data.uuEccData && meta.data.uuEccData.documentOid;
+          if (!eccDocOid) throw new Error("Dokument nemá obsah");
+          const base = `/document/ecc/document/loadByOid?oid=${oid}&uuEccData.documentOid=${eccDocOid}`;
+          const doc = await get(base);
+          const pages = [];
+          for (const p of doc.pageList || []) {
+            const r = await get(`${base}&uuEccData.pageOid=${p.pageOid}`);
+            const rp = r.requestedPage || {};
+            pages.push({ name: p.name, mts: rp.sys && rp.sys.mts, mainPanel: rp.mainPanel });
+          }
+          reply({ ok: true, data: { name: doc.name || meta.name || "", pages } });
+        } catch (e) {
+          reply({ ok: false, error: String((e && e.message) || e) });
+        }
+        return;
+      }
       if (data.cmd === "reloadMonth") {
         // The month list is a uu5g04 loader component; its reload() refetches and re-renders natively.
         const el = document.querySelector(".uu-specialistwtm-worker-monthly-detail-ready");
@@ -805,7 +977,12 @@
   // --- BROWSER: settings & transport ---
 
   const SETTINGS_KEY = "gm-wjs-settings";
-  const DEFAULT_SETTINGS = Object.freeze({ jiraBaseUrl: "http://jira.indsoft.local", mapping: { ...DEFAULT_MAPPING }, mappingSource: null });
+  const DEFAULT_SETTINGS = Object.freeze({
+    jiraBaseUrl: "http://jira.indsoft.local",
+    mapping: { ...DEFAULT_MAPPING },
+    mappingSource: null,
+    sp53DocUrl: "https://uuapp.plus4u.net/uu-managementkit-maing02/7ad2e0d945424b6695b21303f94d5e30/document?oid=679246c72eca8e6914203fa0&pageOid=679246c82eca8e6914203ff3",
+  });
 
   function storageGet(key = SETTINGS_KEY) {
     if (typeof GM_getValue === "function") return GM_getValue(key, null);
@@ -829,6 +1006,7 @@
       jiraBaseUrl: stored.jiraBaseUrl || DEFAULT_SETTINGS.jiraBaseUrl,
       mapping: normalizeMapping({ ...DEFAULT_SETTINGS.mapping, ...(stored.mapping || {}) }),
       mappingSource: stored.mappingSource || null,
+      sp53DocUrl: stored.sp53DocUrl || DEFAULT_SETTINGS.sp53DocUrl,
     };
   }
 
@@ -1389,6 +1567,7 @@
 
   function mappingSourceText(source) {
     if (!source) return "ručně / z WTM";
+    if (source.kind === "doc") return `dokument ${source.name || "SP53"}, importováno ${formatCzDateTime(source.importedAt)}`;
     const rev = source.revision !== null && source.revision !== undefined ? ` rev. ${source.revision}` : "";
     return `soubor ${source.fileName || ""}${rev}, importováno ${formatCzDateTime(source.importedAt)}`;
   }
@@ -1401,7 +1580,7 @@
       chips.push(make("span", { class: `gm-wjs-chip ${expired ? "gm-wjs-chip-danger" : "gm-wjs-chip-warning"}` }, `platí do ${formatCzDate(entry.validTo)}`));
     }
     if (entry.requiresApproval) chips.push(make("span", { class: "gm-wjs-chip gm-wjs-chip-info" }, `se schválením${entry.approvers ? ` (${[].concat(entry.approvers).join(", ")})` : ""}`));
-    if (source && entry.fromFile === false) chips.push(make("span", { class: "gm-wjs-chip gm-wjs-chip-muted" }, "není v souboru"));
+    if (source && entry.fromFile === false) chips.push(make("span", { class: "gm-wjs-chip gm-wjs-chip-muted" }, source.kind === "doc" ? "není v dokumentu" : "není v souboru"));
     const caption = [entry.project, entry.artifact].filter(Boolean).join(" · ");
     const title = [caption, entry.note, entry.allowedUsers ? `jen: ${[].concat(entry.allowedUsers).join(", ")}` : ""].filter(Boolean).join("\n");
     return make("td", { class: "gm-wjs-info", title: title || null }, [caption ? make("div", {}, caption) : null, chips.length ? make("div", {}, chips) : null]);
@@ -1456,6 +1635,29 @@
     const sourceLine = make("div", { class: "gm-wjs-text2" });
     const showSource = () => sourceLine.replaceChildren(`Zdroj: ${mappingSourceText(source)}`);
     const report = make("div");
+    const docInput = make("input", { class: "gm-wjs-input", "aria-label": "Dokument SP53" });
+    docInput.value = settings.sp53DocUrl;
+    // Shared preview for both import sources; nothing is stored until Uložit.
+    const showImport = (imported, nextSource, heading) => {
+      const plan = planMappingImport(collect(), imported.entries);
+      const closedRes = applyClosedLabels(plan.merged, imported.closed);
+      source = { ...nextSource, importedAt: new Date().toISOString() };
+      fillRows(closedRes.merged);
+      showSource();
+      const where = source.kind === "doc" ? "dokumentu" : "souboru";
+      const list = (title, labels) => (labels.length ? make("div", {}, `${title} (${labels.length}): ${labels.join(", ")}`) : null);
+      report.replaceChildren(make("div", { class: "gm-wjs-alert gm-wjs-alert-success" }, [
+        make("div", {}, make("strong", {}, heading)),
+        list("Přidáno", plan.added),
+        list("Změněno", plan.changed),
+        plan.same.length ? make("div", {}, `Beze změny: ${plan.same.length}`) : null,
+        list("Uzavřené v dokumentu – zablokováno", closedRes.affected),
+        imported.skipped.length ? make("div", {}, `Přeskočeno: ${imported.skipped.map((s) => `${s.label || "?"} (${s.reason})`).join(", ")}`) : null,
+        list(`Není v ${where} – zůstává, můžeš smazat`, plan.notInFile),
+        make("div", { class: "gm-wjs-text2" }, "Změny se uloží tlačítkem Uložit."),
+      ]));
+    };
+    const showImportError = (e) => report.replaceChildren(make("div", { class: "gm-wjs-alert gm-wjs-alert-danger" }, `Import selhal: ${e.message || e}`));
     const fileInput = make("input", { type: "file", accept: ".toml,text/plain", style: "display:none" });
     fileInput.addEventListener("change", async () => {
       const file = fileInput.files && fileInput.files[0];
@@ -1463,25 +1665,28 @@
       if (!file) return;
       try {
         const imported = mappingFromToml(parseToml(await file.text()));
-        const plan = planMappingImport(collect(), imported.entries);
-        source = { fileName: file.name, ...imported.meta, importedAt: new Date().toISOString() };
-        fillRows(plan.merged);
-        showSource();
-        const list = (title, labels) => (labels.length ? make("div", {}, `${title} (${labels.length}): ${labels.join(", ")}`) : null);
         const m = imported.meta;
-        report.replaceChildren(make("div", { class: "gm-wjs-alert gm-wjs-alert-success" }, [
-          make("div", {}, make("strong", {}, `Načteno ${file.name}${m.revision !== null ? ` · revize ${m.revision}` : ""}${m.updatedAt ? ` · ${formatCzDateTime(m.updatedAt)}` : ""}${m.updatedBy ? ` (${m.updatedBy})` : ""}`)),
-          list("Přidáno", plan.added),
-          list("Změněno", plan.changed),
-          plan.same.length ? make("div", {}, `Beze změny: ${plan.same.length}`) : null,
-          imported.skipped.length ? make("div", {}, `Přeskočeno: ${imported.skipped.map((s) => `${s.label || "?"} (${s.reason})`).join(", ")}`) : null,
-          list("Není v souboru – zůstává, můžeš smazat", plan.notInFile),
-          make("div", { class: "gm-wjs-text2" }, "Změny se uloží tlačítkem Uložit."),
-        ]));
+        showImport(imported, { kind: "file", fileName: file.name, ...m },
+          `Načteno ${file.name}${m.revision !== null ? ` · revize ${m.revision}` : ""}${m.updatedAt ? ` · ${formatCzDateTime(m.updatedAt)}` : ""}${m.updatedBy ? ` (${m.updatedBy})` : ""}`);
       } catch (e) {
-        report.replaceChildren(make("div", { class: "gm-wjs-alert gm-wjs-alert-danger" }, `Import selhal: ${e.message}`));
+        showImportError(e);
       }
     });
+    const importDoc = async () => {
+      const url = docInput.value.trim() || DEFAULT_SETTINGS.sp53DocUrl;
+      if (!agent) return showImportError(new Error("Háček ve stránce neběží – obnov stránku"));
+      report.replaceChildren(make("div", { class: "gm-wjs-alert" }, "Načítám dokument SP53…"));
+      const res = await agent.call("loadMngkitDoc", { url });
+      if (!res.ok) return showImportError(new Error(res.error || "dokument se nepodařilo načíst"));
+      try {
+        const imported = mappingFromSp53Doc(res.data);
+        const m = imported.meta;
+        showImport(imported, { kind: "doc", name: res.data.name, url, ...m },
+          `Načteno z dokumentu ${res.data.name || "SP53"}${m.updatedAt ? ` · změněno ${formatCzDateTime(m.updatedAt)}` : ""}`);
+      } catch (e) {
+        showImportError(e);
+      }
+    };
 
     const close = () => {
       overlay.remove();
@@ -1491,7 +1696,12 @@
       if (e.key === "Escape") close();
     };
     const save = () => {
-      state.settings = { jiraBaseUrl: jiraInput.value.trim() || DEFAULT_SETTINGS.jiraBaseUrl, mapping: collect(), mappingSource: source };
+      state.settings = {
+        jiraBaseUrl: jiraInput.value.trim() || DEFAULT_SETTINGS.jiraBaseUrl,
+        mapping: collect(),
+        mappingSource: source,
+        sp53DocUrl: docInput.value.trim() || DEFAULT_SETTINGS.sp53DocUrl,
+      };
       saveSettings(state.settings);
       close();
       renderPanel();
@@ -1506,10 +1716,12 @@
           make("h4", {}, "Label → artefakt"),
           make("button", { class: "gm-wjs-btn gm-wjs-btn-m", onclick: () => addRow("W_", {}).focus() }, "Přidat řádek"),
           make("button", { class: "gm-wjs-btn gm-wjs-btn-m gm-wjs-btn-primary", title: `Např. ${MAPPINGS_HINT}`, onclick: () => fileInput.click() }, "Importovat ze souboru…"),
+          make("button", { class: "gm-wjs-btn gm-wjs-btn-m gm-wjs-btn-primary", title: "Načte seznam kódů z dokumentu ManagementKit níže", onclick: importDoc }, "Importovat z dokumentu SP53"),
           fileInput,
         ]),
         sourceLine,
         make("div", { class: "gm-wjs-text2" }, `Soubor mapování (TOML, schema_version 1), např. ${MAPPINGS_HINT}`),
+        make("label", { class: "gm-wjs-field" }, [make("span", {}, "Dokument SP53"), docInput]),
         report,
         make("table", { class: "gm-wjs-table" }, [
           make("thead", {}, make("tr", {}, [make("th", {}, "Label"), make("th", {}, "URL artefaktu (subject)"), make("th", {}, "Info"), make("th", {}, "")])),
@@ -1664,6 +1876,9 @@
     parseToml,
     mappingFromToml,
     planMappingImport,
+    uu5Text,
+    mappingFromSp53Doc,
+    applyClosedLabels,
     buildCreateDtoIn,
     buildUpdateDtoIn,
     checkWtmRules,

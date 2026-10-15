@@ -7,6 +7,11 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.6.0 — 2026-10-15
+
+- Druhá možnost importu mapování: „Importovat z dokumentu SP53“ v Nastavení načte dokument „SP53 Standardy vykazování“ z ManagementKitu (token z přihlášení stránky, jen čtení) a z jeho tabulek vytáhne labely W_, URI artefaktů, projekt a poznámky. „od DD.MM.YYYY nevykazovat“ se převede na platnost, „NEVYKAZOVAT“ a stránka uzavřených kódů na blokaci (jen u labelů, které nejsou mezi platnými), „na povolení“ na schvalování. Stejný náhled změn jako u souboru; adresa dokumentu je v Nastavení.
+- Oprava: skript je aktivní i na kořenové adrese aplikace WTM, která výkaz za měsíc ukazuje jako výchozí stránku (dřív tam lišta i značky chyběly).
+
 ### 0.5.0 — 2026-10-10
 
 - Po zápisu do WTM už se neobnovuje celá stránka: háček zavolá `reload()` komponenty výkazu (stejný mechanismus jako změna měsíce), WTM vykreslí nové položky nativně a skript převezme nová data. Tlačítka zůstanou zamčená do příchodu nových dat; když komponentu nenajde, obnoví stránku jako dřív. Totéž po částečném selhání.

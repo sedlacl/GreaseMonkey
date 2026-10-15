@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.5.0", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.5.0");
+test("SCRIPT_VERSION is 0.6.0", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.6.0");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -194,6 +194,13 @@ test("isOwnMonthlyPage accepts only the own monthly page", () => {
   assert.equal(api.isOwnMonthlyPage(p, "?workerUuIdentity=1-2"), false);
   assert.equal(api.isOwnMonthlyPage(p, "?yearMonth=202610&workerUuIdentity=1-2"), false);
   assert.equal(api.isOwnMonthlyPage("/uu-specialistwtm-maing01/abc/other", ""), false);
+});
+
+test("isOwnMonthlyPage accepts the app root, which shows the monthly detail by default", () => {
+  assert.equal(api.isOwnMonthlyPage("/uu-specialistwtm-maing01/99923616732453117-8031926f783d4aaba733af73c1974840/", ""), true);
+  assert.equal(api.isOwnMonthlyPage("/uu-specialistwtm-maing01/abc", "?yearMonth=202610"), true);
+  assert.equal(api.isOwnMonthlyPage("/uu-specialistwtm-maing01/abc/", "?workerUuIdentity=1-2"), false);
+  assert.equal(api.isOwnMonthlyPage("/uu-specialistwtm-maing01/", ""), false);
 });
 
 test("planDayActions blocks confirmed diff items and unknown artifacts, honours choices", () => {
@@ -476,6 +483,155 @@ test("pageAgent reloadMonth calls the page's own month loader", async () => {
   assert.deepEqual(results[0], { id: "c1", ok: true });
   assert.equal(results[1].ok, false);
   assert.match(results[1].error, /nenalezena/);
+});
+
+// Fictional data in the shape of the "SP53 Standardy vykazování" ManagementKit document (Uu5TilesBricks.Table).
+const uu5json = (v) => `<uu5json/>${JSON.stringify(v)}`;
+const table = (columns, rows) => ({ uu5Tag: "Uu5TilesBricks.Table", props: { columnList: uu5json(columns.map((header) => ({ header }))), data: uu5json(rows) } });
+const section = (header, children) => ({ content: [{ uu5Tag: "Uu5Bricks.Section", props: { header }, children }] });
+const SP53_DOC = {
+  name: "Standardy vykazování (test)",
+  pages: [
+    {
+      name: "Seznam kódů",
+      mts: "2026-10-01T08:00:00.000Z",
+      mainPanel: {
+        sectionList: [
+          section("Projekty - vykazování", [table(
+            ["<uu5string />Projekt/DU", "Kódy", "<uu5string />Label v JIRA*/<br/>Název v uuBT", "URI dokumentu v uuBT", "Poznámka", "Původní URI"],
+            [
+              [{ value: '<uu5string /><p><Plus4U5.Bricks.Plus4ULink uri="ues:T:ALFA" style="<uu5json/>{\\"fontWeight\\":\\"bold\\"}">Projekt Alfa</Plus4U5.Bricks.Plus4ULink><strong> ​</strong>- ALFA</p><ul><li><UuTBricks.Artifact.Link baseUri="https://bt.test" oid="1" altText="Projekt" stateSize="s"/></li></ul>', style: {} }, { value: "" }, { value: "" }, { value: "" }, { value: "" }, { value: "" }],
+              [{ value: '<uu5string /><p style="<uu5json/>{\\"marginLeft\\":\\"24px\\"}">Artefakt A</p>' }, { value: "UNI-BT:T.ALFA/W_A" }, { value: "W_A" }, { value: "https://bt.test/userGate/artifactInfo?id=a1" }, { value: "" }, { value: "https://mk.test/document?oid=1" }],
+              ["Release 1", "UNI-BT:T.ALFA/W_B", "W_B", "https://bt.test/artifactInfo?id=b1", "od 01.10.2026 nevykazovat", ""],
+              ["Presale C", "-", '<uu5string /><Uu5Bricks.Link href="https://mk.test/document?oid=3" target="_blank">W_C</Uu5Bricks.Link>', "https://bt.test/artifactInfo?id=c1", "Na povolení od Lukáše", ""],
+              ["Presale D", "UNI-BT:T.ALFA/W_D", "W_D", "", "NEVYKAZOVAT! presale jinde", ""],
+              ["Role E", "UNI-BT:T.ALFA/W_E (role)", "", "presalové role", "", ""],
+            ],
+          )]),
+          section('<uu5string/><Uu5Bricks.Link href="UNI-BT:T.S" target="_blank">Servis projekt</Uu5Bricks.Link>', [table(
+            ["Artefakt", "Kód", "<uu5string />Label v JIRA*/<br/>Název v uuBT", "URI dokumentu v uuBT", "Poznámka", "Původní URI"],
+            [["Provoz", "UNI-BT:T.S/W_OP", "W_OP", "https://bt.test/artifactInfo?id=op", "<uu5string /><p>Pro tým</p><ul><li>Údržba &amp; logy</li></ul>", ""]],
+          )]),
+        ],
+      },
+    },
+    {
+      name: "Pokyny pro vykazování",
+      mainPanel: { sectionList: [section("Návod", [table(["Krok"], [["<uu5string /><p>Přihlas se na WTM</p>"]])])] },
+    },
+    {
+      name: "Seznam kódů - uzavřené",
+      mts: "2026-10-05T08:00:00.000Z",
+      mainPanel: {
+        sectionList: [section("Nevykazovat - přehled", [table(
+          ["Vývojové projekty", "Kód", "Popis*", "Poznámka"],
+          [
+            { value: ["Starý projekt", "UNI-BT:T.OLD/W_OLD", { value: "W_OLD", style: {} }, { value: "NEVYKAZOVAT", style: {} }], style: {} },
+            ["Migrace HW Realizace", "UNI-BT:T/W_RE", "W_HW_RE", "NEVYKAZOVAT od 16.02.2026 včetně"],
+          ],
+        )])],
+      },
+    },
+  ],
+};
+
+test("uu5Text strips uu5 markup, nested uu5json attributes and entities", () => {
+  assert.equal(api.uu5Text('<uu5string /><p style="<uu5json/>{\\"a\\":\\"b\\"}">Ahoj</p><ul><li>světe &amp; spol.</li></ul>'), "Ahoj světe & spol.");
+  assert.equal(api.uu5Text('<uu5string /><Uu5Bricks.Link href="x">W_OP</Uu5Bricks.Link>'), "W_OP");
+  assert.equal(api.uu5Text("prostý​ text"), "prostý text");
+  assert.equal(api.uu5Text(null), "");
+});
+
+test("mappingFromSp53Doc reads labels, artifacts and rules from the document tables", () => {
+  const out = api.mappingFromSp53Doc(SP53_DOC);
+  assert.deepEqual(out.entries, {
+    W_A: { url: "https://bt.test/artifactInfo?id=a1", project: "Projekt Alfa - ALFA", artifact: "Artefakt A", fromFile: true },
+    W_B: { url: "https://bt.test/artifactInfo?id=b1", project: "Projekt Alfa - ALFA", artifact: "Release 1", note: "od 01.10.2026 nevykazovat", validTo: "2026-09-30", fromFile: true },
+    W_C: { url: "https://bt.test/artifactInfo?id=c1", project: "Projekt Alfa - ALFA", artifact: "Presale C", note: "Na povolení od Lukáše", requiresApproval: true, fromFile: true },
+    W_OP: { url: "https://bt.test/artifactInfo?id=op", project: "Servis projekt", artifact: "Provoz", note: "Pro tým Údržba & logy", fromFile: true },
+  });
+  assert.deepEqual(out.skipped, [{ label: "W_D", reason: "chybí URI" }, { label: "W_E", reason: "chybí URI" }]);
+  assert.deepEqual(out.closed, {
+    W_D: { note: "NEVYKAZOVAT! presale jinde", blocked: true },
+    W_OLD: { note: "NEVYKAZOVAT", blocked: true },
+    W_HW_RE: { note: "NEVYKAZOVAT od 16.02.2026 včetně", validTo: "2026-02-15" },
+  });
+  assert.deepEqual(out.meta, { revision: null, updatedAt: "2026-10-05T08:00:00.000Z", updatedBy: null });
+});
+
+test("mappingFromSp53Doc never treats a currently valid label as closed", () => {
+  const doc = JSON.parse(JSON.stringify(SP53_DOC));
+  const closedTable = doc.pages[2].mainPanel.sectionList[0].content[0].children[0];
+  const rows = JSON.parse(closedTable.props.data.replace("<uu5json/>", ""));
+  rows.push(["Starý servis", "UNI-BT:T.S.OLD/W_OP", "W_OP", "NEVYKAZOVAT"]);
+  closedTable.props.data = `<uu5json/>${JSON.stringify(rows)}`;
+  const out = api.mappingFromSp53Doc(doc);
+  assert.equal(out.closed.W_OP, undefined);
+  assert.equal(out.entries.W_OP.blocked, undefined);
+});
+
+test("mappingFromSp53Doc rejects a document without label tables", () => {
+  assert.throws(() => api.mappingFromSp53Doc({ name: "x", pages: [] }), /žádné labely/);
+});
+
+test("applyClosedLabels blocks existing labels that the document lists as closed", () => {
+  const merged = { W_A: { url: "a", fromFile: true }, W_OLD: { url: "old", fromFile: false } };
+  const res = api.applyClosedLabels(merged, { W_OLD: { note: "NEVYKAZOVAT", blocked: true }, W_GONE: { blocked: true } });
+  assert.deepEqual(res.affected, ["W_OLD"]);
+  assert.deepEqual(res.merged.W_OLD, { url: "old", fromFile: false, note: "NEVYKAZOVAT", blocked: true });
+  assert.deepEqual(res.merged.W_A, { url: "a", fromFile: true });
+  assert.equal(merged.W_OLD.blocked, undefined);
+});
+
+test("pageAgent loadMngkitDoc reads all document pages with a uu5 call token", async () => {
+  const base = "https://uuapp.test/uu-managementkit-maing02/abc123";
+  const docUrl = `${base}/document?oid=0123456789abcdef01234567&pageOid=x`;
+  const calls = [];
+  const tokens = [];
+  const json = (body) => ({ ok: true, status: 200, json: async () => body });
+  const posted = [];
+  let onMessage = null;
+  const saved = { window: globalThis.window, location: globalThis.location, document: globalThis.document, UU5: globalThis.UU5 };
+  globalThis.location = { origin: "https://uuapp.test", pathname: "/uu-specialistwtm-maing01/awid/workerMonthlyDetail" };
+  globalThis.document = { querySelector: () => null };
+  globalThis.UU5 = { Environment: { getSession: () => ({ getCallToken: async (uri) => { tokens.push(uri); return "Bearer tok"; } }) } };
+  globalThis.window = {
+    UU5: globalThis.UU5,
+    postMessage: (data) => posted.push(data),
+    addEventListener: (type, fn) => (onMessage = fn),
+    fetch: async (url, init) => {
+      calls.push({ url, auth: init && init.headers && init.headers.Authorization });
+      if (!url.includes("/ecc/")) return json({ name: "Doc", data: { uuEccData: { documentOid: "ecc1" } } });
+      if (url.includes("uuEccData.pageOid=p2")) return json({ requestedPage: { sys: { mts: "2026-10-02T00:00:00.000Z" }, mainPanel: { sectionList: ["two"] } } });
+      if (url.includes("uuEccData.pageOid=p1")) return json({ requestedPage: { sys: { mts: "2026-10-01T00:00:00.000Z" }, mainPanel: { sectionList: ["one"] } } });
+      return json({ name: "Doc", pageList: [{ pageOid: "p1", name: "Seznam kódů" }, { pageOid: "p2", name: "Seznam kódů - uzavřené" }] });
+    },
+  };
+  const send = (id, url) => onMessage({ origin: "https://uuapp.test", data: { source: api.MSG.toAgent, nonce: "n1", type: "wtm-call", id, cmd: "loadMngkitDoc", dtoIn: { url } } });
+  try {
+    api.pageAgent(api.extractMonthResponse, api.isTimesheetMutation, api.MSG, "n1");
+    await send("c1", docUrl);
+    await send("c2", "https://evil.test/uu-managementkit-maing02/abc123/document?oid=0123456789abcdef01234567");
+  } finally {
+    Object.assign(globalThis, saved);
+  }
+  assert.deepEqual(tokens, [base]);
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every((c) => c.auth === "Bearer tok" && c.url.startsWith(base)));
+  const results = posted.filter((m) => m.type === "wtm-result").map((m) => m.payload);
+  assert.deepEqual(results[0], {
+    id: "c1",
+    ok: true,
+    data: {
+      name: "Doc",
+      pages: [
+        { name: "Seznam kódů", mts: "2026-10-01T00:00:00.000Z", mainPanel: { sectionList: ["one"] } },
+        { name: "Seznam kódů - uzavřené", mts: "2026-10-02T00:00:00.000Z", mainPanel: { sectionList: ["two"] } },
+      ],
+    },
+  });
+  assert.equal(results[1].ok, false);
+  assert.match(results[1].error, /Neplatná adresa/);
 });
 
 test("fetchJiraMonth pages the search and loads worklogs per issue", async () => {
