@@ -16,6 +16,9 @@ Full history of every script: **[changelogs.md](changelogs.md)**
 
 ## Installation
 
+<details>
+<summary><b>How to install</b> – Tampermonkey in Chrome, install links, import from URL</summary>
+
 **New to Chrome + Tampermonkey?** Read the short Czech setup guide first:
 
 **[Jak nainstalovat Tampermonkey v Chrome →](HOW-TO-INSTALL-TAMPERMONKEY.md)**
@@ -28,6 +31,10 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 
 - Settings (Nastaveni)
 - Import from URL
+
+</details>
+
+## Addons
 
 <table>
 <thead>
@@ -76,7 +83,20 @@ Works in <code>uu-bookkit-maing01</code> books where the built-in search is too 
 <td valign="top"><a href="https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/indsoft-jira-manictime.user.js">Install</a></td>
 </tr>
 <tr>
-<td>IndSoft JIRA - Attachment preview</td>
+<td><details>
+<summary><b>IndSoft JIRA - Attachment preview</b> – open Jira attachments in a new tab</summary>
+<br>
+Adds an eye button <b>Náhled</b> to attachments on IndSoft, Unicorn (<code>jira.unicorn.com</code>) and ČEPS (<code>jira-dc.ceps.cz</code>) Jira issues – in the corner of the tile in the thumbnail view, next to the file name in the list view. Clicking the file name still downloads it.
+<ul>
+<li><b>Formats</b> – HTML, text (txt, log, csv, sql, xml, json, yaml, md, jsonata, scripts…; JSON is formatted), images including SVG and PDF, up to 10 MB.</li>
+<li><b>Own address</b> – the preview tab is <code>…/browse/&lt;issue&gt;?viewAttachment=&lt;file name&gt;</code>, so it can be reloaded and shared, and it always shows the newest upload of that name. Back returns to the issue.</li>
+<li><b>Live dashboards</b> – an open preview checks for a newer upload every 30 s while visible and redraws itself.</li>
+<li><b>Safe HTML</b> – HTML runs in a sandboxed frame without access to Jira or your login; scripts from a CDN (e.g. D3) are fetched and inlined, because Unicorn Jira's CSP also applies to that frame.</li>
+</ul>
+<p><img src="docs/images/jira-attachment-preview-tiles.png" alt="Jira attachment tiles with the eye button Náhled in the corner" width="560"><br><sub>Eye button on the attachment tiles</sub></p>
+<p><img src="docs/images/jira-attachment-preview-dashboard.png" alt="HTML attachment with an inline script rendered in the preview tab" width="560"><br><sub>HTML dashboard with its script in the preview tab (<code>?viewAttachment=demo-dashboard.html</code>)</sub></p>
+<p><img src="docs/images/jira-attachment-preview-json.png" alt="Compact JSON attachment shown formatted in the preview tab" width="320"><br><sub>JSON attachment, formatted</sub></p>
+</details></td>
 <td valign="top"><a href="https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jira-attachment-preview.user.js">Install</a></td>
 </tr>
 <tr>
@@ -118,8 +138,6 @@ Use `Cursor Usage Statistics` on the Cursor usage dashboard to see spend KPIs (t
 Use `uuBookKit – FileManager` on the BookKit attachments page to show file sizes on tiles, sort by size, and optionally run a heuristic unused-attachment check across book pages. After a clean scan, `Select candidates` adds heuristically identified unused attachments to the native bulk-action selection. The usage scan may miss non-standard references; partial page failures do not mark attachments as unused.
 
 WTM ← Jira sync (`wtm-jira-sync.user.js`): na stránce WTM „Výkazy za měsíc“ spáruje položky s tvými worklogy v Jiře (`jira.indsoft.local`). Zelená = sedí, oranžová = liší se (tlačítko „Upravit podle Jiry“), virtuální řádek = chybí ve WTM („Zapsat do WTM“, „Zapsat vše“ za den, „Zapsat vše“ v liště za celý měsíc), červená = ve WTM navíc (mažeš ručně). Jira je zdroj pravdy, skript do Jiry nezapisuje a ve WTM nic nemaže. Artefakt WTM se bere z W_ labelu ticketu podle tabulky v Nastavení; tabulku lze naimportovat ze souboru `mappings.toml` (TOML, `schema_version = 1`, pole `label`, `subject_url`, volitelně `valid_to`, `blocked`, `note`, `project`, `artifact`). Label po `valid_to` nebo s `blocked = true` zápis zablokuje. Druhou možností je import přímo z dokumentu „SP53 Standardy vykazování“ v ManagementKitu (tlačítko „Importovat z dokumentu SP53“). Potřebuje být přihlášený do Jiry ve stejném prohlížeči.
-
-Use `IndSoft JIRA - Attachment preview` on IndSoft, Unicorn (`jira.unicorn.com`) and ČEPS (`jira-dc.ceps.cz`) Jira issues to open HTML, text, image and PDF attachments (up to 10 MB) in a new tab via the eye button on the attachment tile (next to the file name in the list view); the preview tab has its own `?viewAttachment=<file name>` address, so it can be reloaded and shared, and it always shows the newest upload of that name. An open preview checks for a newer upload every 30 s while visible and redraws itself, so an HTML attachment works as a live dashboard; Back returns to the issue. HTML dashboards run their scripts in a sandboxed frame without access to Jira; scripts from a CDN are fetched and inlined, because Unicorn Jira's CSP also applies to that frame.
 
 ## Changelog
 
