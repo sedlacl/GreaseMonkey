@@ -19,6 +19,7 @@ const STATIC_SCRIPTS = new Map([
   ["/bookkit-file-manager.user.js", "bookkit-file-manager.user.js"],
   ["/cursor-usage-statistics.user.js", "cursor-usage-statistics.user.js"],
   ["/wtm-jira-sync.user.js", "wtm-jira-sync.user.js"],
+  ["/jira-attachment-preview.user.js", "jira-attachment-preview.user.js"],
   ["/tools/browser-bridge.user.js", "tools/browser-bridge.user.js"],
 ]);
 
