@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 const PORT = Number(process.env.BROWSER_BRIDGE_PORT || 8766);
 const HOST = process.env.BROWSER_BRIDGE_HOST || "127.0.0.1";
 const RESULT_TTL_MS = 5 * 60 * 1000;
+// A tab polls every 500 ms; a hidden one is throttled by the browser to about once a minute.
+const TAB_TTL_MS = 90 * 1000;
+const UNCLAIMED_TTL_MS = 2 * 60 * 1000;
+const CLAIMED_TTL_MS = 10 * 60 * 1000;
 const DIAG_LIMIT = Number(process.env.BROWSER_BRIDGE_DIAG_LIMIT || 300);
 const DIAG_TTL_MS = Number(process.env.BROWSER_BRIDGE_DIAG_TTL_MS || 30 * 60 * 1000);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,9 +27,15 @@ const STATIC_SCRIPTS = new Map([
   ["/tools/browser-bridge.user.js", "tools/browser-bridge.user.js"],
 ]);
 
-/** @type {Map<string, { id: string, type: string, payload: unknown, created: number }>} */
+/**
+ * Each command is handed to exactly one tab (claimedBy) and never re-delivered,
+ * so a slow command cannot run again in the same or another tab.
+ * @type {Map<string, { id: string, type: string, payload: unknown, created: number, target?: { url?: string, tabId?: string }, claimedBy?: string, claimedAt?: number }>}
+ */
 const pending = new Map();
-/** @type {Map<string, { id: string, ok: boolean, result?: unknown, error?: string, finished: number }>} */
+/** @type {Map<string, { tabId: string, url: string, title: string, visible: boolean, lastSeen: number }>} */
+const tabs = new Map();
+/** @type {Map<string, { id: string, ok: boolean, result?: unknown, error?: string, tab?: { tabId: string, url: string }, finished: number }>} */
 const results = new Map();
 /** @type {Array<{ id: string, received: number, source: string, event: string, version?: string, url?: string, timestamp: number, data?: unknown }>} */
 const diagnostics = [];
@@ -70,7 +80,7 @@ function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   });
   res.end(JSON.stringify(payload));
@@ -120,10 +130,34 @@ async function readUserScriptMeta(urlPath, relativePath) {
 }
 
 function pruneResults() {
-  const cutoff = Date.now() - RESULT_TTL_MS;
+  const now = Date.now();
+  const cutoff = now - RESULT_TTL_MS;
   for (const [id, entry] of results.entries()) {
     if (entry.finished < cutoff) results.delete(id);
   }
+  for (const [id, command] of pending.entries()) {
+    const age = now - (command.claimedAt || command.created);
+    if (age > (command.claimedBy ? CLAIMED_TTL_MS : UNCLAIMED_TTL_MS)) pending.delete(id);
+  }
+  for (const [tabId, tab] of tabs.entries()) {
+    if (now - tab.lastSeen > TAB_TTL_MS) tabs.delete(tabId);
+  }
+}
+
+function normalizeTarget(target) {
+  if (!target || typeof target !== "object") return undefined;
+  const normalized = {};
+  if (typeof target.url === "string" && target.url) normalized.url = target.url;
+  if (typeof target.tabId === "string" && target.tabId) normalized.tabId = target.tabId;
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
+function commandMatchesTab(command, tab) {
+  const target = command.target;
+  if (!target) return true;
+  if (target.tabId && target.tabId !== tab.tabId) return false;
+  if (target.url && !tab.url.includes(target.url)) return false;
+  return true;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -145,6 +179,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         ok: true,
         pending: pending.size,
+        tabs: tabs.size,
         results: results.size,
         port: PORT,
         scripts: Array.from(STATIC_SCRIPTS.keys()),
@@ -198,11 +233,42 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 200, []);
         return;
       }
+      // Bridge userscript < 1.6 sends no tab id or URL; it only gets untargeted commands.
+      const tab = {
+        tabId: url.searchParams.get("tab") || "",
+        url: url.searchParams.get("url") || "",
+        title: url.searchParams.get("title") || "",
+        visible: url.searchParams.get("visible") === "1",
+        lastSeen: Date.now(),
+      };
+      if (tab.tabId) tabs.set(tab.tabId, tab);
+      const claimed = Array.from(pending.values())
+        .filter((command) => !command.claimedBy && commandMatchesTab(command, tab))
+        .sort((left, right) => left.created - right.created);
+      for (const command of claimed) {
+        command.claimedBy = tab.tabId || "legacy";
+        command.claimedAt = Date.now();
+      }
+      sendJson(res, 200, claimed);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/tabs") {
       sendJson(
         res,
         200,
-        Array.from(pending.values()).sort((left, right) => left.created - right.created),
+        Array.from(tabs.values())
+          .sort((left, right) => right.lastSeen - left.lastSeen)
+          .map((tab) => ({ ...tab, lastSeenMsAgo: Date.now() - tab.lastSeen })),
       );
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname.startsWith("/pending/")) {
+      const id = decodeURIComponent(url.pathname.slice("/pending/".length));
+      const command = pending.get(id);
+      pending.delete(id);
+      sendJson(res, 200, { ok: true, removed: Boolean(command), claimedBy: command?.claimedBy || null });
       return;
     }
 
@@ -219,6 +285,7 @@ const server = http.createServer(async (req, res) => {
         ok: Boolean(body.ok),
         result: body.result,
         error: body.error,
+        tab: body.tab && typeof body.tab === "object" ? { tabId: String(body.tab.tabId || ""), url: String(body.tab.url || "") } : undefined,
         finished: Date.now(),
       });
       sendJson(res, 200, { ok: true });
@@ -232,6 +299,7 @@ const server = http.createServer(async (req, res) => {
         id,
         type: body.type || "eval",
         payload: body.payload ?? {},
+        target: normalizeTarget(body.target),
         created: Date.now(),
       });
       sendJson(res, 200, { id });

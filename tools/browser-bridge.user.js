@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Browser Bridge for Cursor Agent
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.5
+// @version      1.6
 // @description  Polls a local bridge server so a Cursor agent can execute JS and read results from your logged-in browser.
 // @author       Lukáš Sedláček
 // @match        *://*/*
@@ -17,6 +17,8 @@
   const FLAG = "__gmBrowserBridge";
   const PANEL_ID = "gm-browser-bridge-panel";
   const LOG_LIMIT = 40;
+  // Identifies this page load, so the CLI can target it with --tab (or by URL with --url).
+  const TAB_ID = Math.random().toString(36).slice(2, 10);
 
   // Captcha / third-party iframes also match *://*/* and would steal /pending commands.
   try {
@@ -200,6 +202,7 @@
       </div>
       <div class="gm-bridge__extras">
         <span class="gm-bridge__bookkit" data-present="false">BookKit FT: —</span>
+        <span class="gm-bridge__tab" title="ID záložky pro --tab v browser-bridge-cli"></span>
       </div>
       <div class="gm-bridge__scripts"></div>
       <div class="gm-bridge__body"></div>
@@ -286,6 +289,7 @@
     const body = panel.querySelector(".gm-bridge__body");
     const meta = panel.querySelector(".gm-bridge__meta");
     const bookkit = panel.querySelector(".gm-bridge__bookkit");
+    panel.querySelector(".gm-bridge__tab").textContent = `tab ${TAB_ID}`;
 
     function refreshBookKitVersion() {
       const version = window.__gmBookKitFulltextVersion;
@@ -374,8 +378,19 @@
     }
   }
 
+  function tabInfo() {
+    return { tabId: TAB_ID, url: location.href };
+  }
+
   async function pollOnce() {
-    const response = await fetch(`${BRIDGE_URL}/pending?top=1`, { cache: "no-store" });
+    const params = new URLSearchParams({
+      top: "1",
+      tab: TAB_ID,
+      url: location.href,
+      title: document.title.slice(0, 120),
+      visible: document.visibilityState === "visible" ? "1" : "0",
+    });
+    const response = await fetch(`${BRIDGE_URL}/pending?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
     ui.setStatus("online", "online");
@@ -393,14 +408,14 @@
         await fetch(`${BRIDGE_URL}/result`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: command.id, ok: true, result: result.result }),
+          body: JSON.stringify({ id: command.id, ok: true, result: result.result, tab: tabInfo() }),
         });
         ui.log("ok", `done ${label}: ${summarizeResult(result.result)}`);
       } catch (error) {
         await fetch(`${BRIDGE_URL}/result`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: command.id, ok: false, error: String(error?.message || error) }),
+          body: JSON.stringify({ id: command.id, ok: false, error: String(error?.message || error), tab: tabInfo() }),
         });
         ui.log("err", `fail ${label}: ${error?.message || error}`);
       }

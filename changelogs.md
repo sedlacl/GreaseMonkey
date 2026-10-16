@@ -103,6 +103,13 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## tools/browser-bridge.user.js
 
+### 1.6 — 2026-10-16
+
+- Cílení na záložku: `browser-bridge-cli.mjs eval|click|fill|snapshot … --url <část URL>` pošle příkaz jen do záložky, jejíž adresa ten text obsahuje; `--tab <id>` do konkrétní záložky (id je v panelu bridge a ve výpisu `tabs`). Nový příkaz `tabs` vypíše připojené záložky s viditelností a adresou.
+- Oprava: příkaz se provede jen jednou a v jediné záložce. Server ho dřív vracel při každém dotazu všem záložkám, dokud nepřišel výsledek, takže ho provedla každá otevřená záložka a pomalý příkaz se v jedné záložce spouštěl opakovaně.
+- Když na příkaz žádná záložka neodpoví do timeoutu (`--timeout <ms>`, výchozí 30 s), CLI ho ze serveru stáhne a napíše proč (žádná záložka neodpovídá / záložka ho převzala, ale neodpověděla).
+- Výsledek obsahuje záložku, ve které příkaz běžel. Vyžaduje restart `browser-bridge-server.mjs`; starší userscript (1.5) dostává jen příkazy bez cílení.
+
 ### 1.5 — 2026-10-10
 
 - Ovládání aktualizace v hlavičce sladěné se stylem overlaye (text místo tlačítek s rámečkem, bez ořezu šipky, nadpis se nezalamuje); verze skriptu je v tooltipu.
