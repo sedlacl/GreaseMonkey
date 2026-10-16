@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.6.0", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.6.0");
+test("SCRIPT_VERSION is 0.6.1", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.6.1");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {

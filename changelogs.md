@@ -7,6 +7,11 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.6.1 — 2026-10-16
+
+- „Zapsat vše (N)“ v liště v hlavičce výkazu: zapíše a upraví ve WTM najednou všechny nezablokované položky celého měsíce podle Jiry. Před zápisem se zeptá (počet nových a úprav, seznam dnů).
+- „Zapsat vše (N)“ i u dnů, které jsou v Jiře, ale ve WTM ještě nemají žádnou položku (dřív tam šlo zapisovat jen po jednom řádku).
+
 ### 0.6.0 — 2026-10-15
 
 - Druhá možnost importu mapování: „Importovat z dokumentu SP53“ v Nastavení načte dokument „SP53 Standardy vykazování“ z ManagementKitu (token z přihlášení stránky, jen čtení) a z jeho tabulek vytáhne labely W_, URI artefaktů, projekt a poznámky. „od DD.MM.YYYY nevykazovat“ se převede na platnost, „NEVYKAZOVAT“ a stránka uzavřených kódů na blokaci (jen u labelů, které nejsou mezi platnými), „na povolení“ na schvalování. Stejný náhled změn jako u souboru; adresa dokumentu je v Nastavení.

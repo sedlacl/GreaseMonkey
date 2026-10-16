@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.6.0
+// @version      0.6.1
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.6.0";
+  const SCRIPT_VERSION = "0.6.1";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -1135,7 +1135,8 @@
     .gm-wjs-day .gm-wjs-badge{height:20px;margin:0;line-height:20px}
     .gm-wjs-day .gm-wjs-btn{margin-left:4px}
     .gm-wjs-vday{margin:8px;padding:16px;border:1px dashed var(--gm-wjs-primary);border-radius:4px;background:var(--gm-wjs-surface)}
-    .gm-wjs-vday-title{font-size:14px;font-weight:700}
+    .gm-wjs-vday-title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:700}
+    .gm-wjs-vday-title .gm-wjs-btn{margin-left:0}
 
     #gm-wjs-panel{display:flex;align-items:center;flex-wrap:wrap;gap:4px 16px;flex:1;min-width:0;margin-left:24px;font-size:13px;line-height:21px;color:var(--gm-wjs-text2)}
     .gm-wjs-panel-title{font-size:14px;font-weight:700;color:var(--gm-wjs-text);white-space:nowrap}
@@ -1363,14 +1364,14 @@
     const emptyBlocks = [];
     const hasItems = (d) => state.items.some((i) => i.date === d);
     const notFound = Object.keys(state.results).filter((d) => !known.has(d) && hasItems(d)).sort();
-    const notFoundText = notFound.join(",");
-    if (notFoundText !== state.missingDays) {
-      state.missingDays = notFoundText;
-      renderPanel();
-    }
+    state.missingDays = notFound.join(",");
     for (const date of Object.keys(state.results).filter((d) => !known.has(d) && !hasItems(d) && state.results[d].missing.length)) {
       const actions = rowActionsFor(date).filter((a) => a.type === "create");
-      const block = h("div", { class: "gm-wjs-vday" }, [h("div", { class: "gm-wjs-vday-title" }, `${formatCzDate(date)} – v Jiře, ve WTM nic`)]);
+      const runnable = actions.filter((a) => !a.blocked);
+      const block = h("div", { class: "gm-wjs-vday" }, [h("div", { class: "gm-wjs-vday-title" }, [
+        h("span", {}, `${formatCzDate(date)} – v Jiře, ve WTM nic`),
+        runnable.length ? h("button", { class: "gm-wjs-btn gm-wjs-btn-primary", disabled: state.busy, onclick: () => onDayAll(date) }, `Zapsat vše (${runnable.length})`) : null,
+      ])]);
       for (const action of actions) block.append(renderVirtualRow(action));
       const after = sections.find((s) => s.date < date);
       if (after) after.sectionEl.before(block);
@@ -1387,6 +1388,8 @@
         } else document.body.append(block);
       }
     }
+    // The panel's "Zapsat vše" count and lock follow busy state and artifact choices, which change through render().
+    renderPanel();
   }
 
   // --- BROWSER: actions ---
@@ -1460,6 +1463,21 @@
 
   function onDayAll(date) {
     runBatch(rowActionsFor(date).filter((a) => !a.blocked));
+  }
+
+  function monthActions() {
+    return Object.keys(state.results).sort().flatMap((date) => rowActionsFor(date).filter((a) => !a.blocked));
+  }
+
+  function onMonthAll() {
+    const actions = monthActions();
+    if (!actions.length) return;
+    const days = [...new Set(actions.map((a) => a.worklog.date))].map(formatCzDate);
+    const creates = actions.filter((a) => a.type === "create").length;
+    const updates = actions.length - creates;
+    const parts = [creates ? `nové: ${creates}` : "", updates ? `úpravy: ${updates}` : ""].filter(Boolean).join(", ");
+    if (!window.confirm(`Zapsat do WTM všechny položky měsíce podle Jiry (${parts})?\n\nDny: ${days.join(", ")}`)) return;
+    runBatch(actions);
   }
 
   // Not an OWN_CLASS element: render() wipes those, and the toast must survive it.
@@ -1543,11 +1561,13 @@
     for (const d of state.missingDays ? state.missingDays.split(",") : []) info.push(make("span", { class: "gm-wjs-warn" }, `Den ${formatCzDate(d)} nenalezen na stránce`));
     if (!state.wtmAuth && !state.foreign) info.push(make("span", { class: "gm-wjs-warn", title: "Háček ve stránce zatím nezachytil přihlášení WTM." }, "Zápis po obnovení stránky"));
     const busy = jira.status === "loading" || jira.refreshing;
+    const pending = jira.status === "ok" && !state.foreign && state.settings ? monthActions().length : 0;
     panel.replaceChildren(
       make("span", { class: "gm-wjs-panel-title" }, ["WTM ← Jira ", make("small", {}, `v${SCRIPT_VERSION}`)]),
       make("span", { class: "gm-wjs-panel-status" }, status),
       make("span", { class: "gm-wjs-panel-info" }, info),
       make("span", { class: "gm-wjs-panel-actions" }, [
+        pending ? make("button", { class: "gm-wjs-btn gm-wjs-btn-m gm-wjs-btn-primary", title: "Zapíše a upraví ve WTM všechny nezablokované položky měsíce podle Jiry", disabled: state.busy || busy, onclick: onMonthAll }, `Zapsat vše (${pending})`) : null,
         make("button", { class: "gm-wjs-btn gm-wjs-btn-m", onclick: openSettings }, "Nastavení"),
         make("button", { class: "gm-wjs-btn gm-wjs-btn-m", disabled: busy || !currentYearMonth, onclick: () => currentYearMonth && loadJira(currentYearMonth) }, "Obnovit"),
       ]),
