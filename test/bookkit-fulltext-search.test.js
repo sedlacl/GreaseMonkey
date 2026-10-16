@@ -659,3 +659,54 @@ test("parseBookRegistryImport accepts payload object, array and URL strings", ()
   assert.throws(() => parseBookRegistryImport("{"), /platný JSON/);
   assert.throws(() => parseBookRegistryImport("[]"), /žádný platný BookKit/);
 });
+
+test("shouldAutoIndexBook indexes only a never-indexed current book", () => {
+  const { shouldAutoIndexBook } = require("../bookkit-fulltext-search.user.js");
+  const book = { bookId: "https://uuapp.plus4u.net/uu-bookkit-maing01/a", baseUri: "https://uuapp.plus4u.net/uu-bookkit-maing01/a" };
+  const base = { enabled: true, book, indexRecord: null, isBusy: false, attemptedBookIds: new Set(), dismissedBookIds: [] };
+
+  assert.equal(shouldAutoIndexBook(base), true);
+  assert.equal(shouldAutoIndexBook({ ...base, enabled: false }), false);
+  assert.equal(shouldAutoIndexBook({ ...base, isBusy: true }), false);
+  assert.equal(shouldAutoIndexBook({ ...base, indexRecord: { documents: [{ id: "x" }] } }), false);
+  assert.equal(shouldAutoIndexBook({ ...base, dismissedBookIds: [book.bookId] }), false);
+  assert.equal(shouldAutoIndexBook({ ...base, attemptedBookIds: new Set([book.bookId]) }), false);
+});
+
+test("planIndexRefresh reloads only changed pages and forces a full reload once a day", () => {
+  const { planIndexRefresh, createPageRevisionMap } = require("../bookkit-fulltext-search.user.js");
+  const now = Date.UTC(2026, 9, 16, 12);
+  const pageRevisions = createPageRevisionMap([
+    { code: "a", sys: { rev: 1, mts: "2026-10-01T00:00:00.000Z" } },
+    { code: "b", sys: { rev: 2, mts: "2026-10-02T00:00:00.000Z" } },
+  ]);
+  const indexRecord = { documents: [{ id: "x" }], indexedAt: now - 1000, structureSignature: "s", pageRevisions };
+
+  assert.equal(planIndexRefresh({ indexRecord, structureSignature: "s", pageRevisions, now }).mode, "none");
+  assert.deepEqual(planIndexRefresh({ indexRecord, structureSignature: "s", pageRevisions: { ...pageRevisions, b: "3|later", c: "1|new" }, now }).changedCodes, ["b", "c"]);
+  assert.equal(planIndexRefresh({ indexRecord, structureSignature: "s", pageRevisions: { a: pageRevisions.a }, now }).mode, "incremental");
+  assert.equal(planIndexRefresh({ indexRecord, structureSignature: "moved", pageRevisions, now }).mode, "incremental");
+  assert.equal(planIndexRefresh({ indexRecord: { ...indexRecord, indexedAt: now - 25 * 60 * 60 * 1000 }, structureSignature: "s", pageRevisions, now }).mode, "full");
+  assert.equal(planIndexRefresh({ indexRecord: { ...indexRecord, documents: [] }, structureSignature: "s", pageRevisions, now }).mode, "full");
+});
+
+test("rankGroupsByUsage lifts pages opened from fulltext results", () => {
+  const { rankGroupsByUsage, recordPageClick, normalizePageClicks } = require("../bookkit-fulltext-search.user.js");
+  const groups = [
+    { key: "book::best-match", score: 120 },
+    { key: "book::often-opened", score: 110 },
+    { key: "book::other", score: 105 },
+  ];
+
+  assert.deepEqual(rankGroupsByUsage(groups, {}).map((group) => group.key), ["book::best-match", "book::often-opened", "book::other"]);
+
+  let clicks = recordPageClick({}, "book::often-opened", 1);
+  assert.deepEqual(clicks, { "book::often-opened": { count: 1, lastClickedAt: 1 } });
+  const ranked = rankGroupsByUsage(groups, clicks);
+  assert.deepEqual(ranked.map((group) => group.key), ["book::often-opened", "book::best-match", "book::other"]);
+  assert.equal(ranked[0].clickCount, 1);
+
+  clicks = recordPageClick(clicks, "book::often-opened", 2);
+  assert.equal(clicks["book::often-opened"].count, 2);
+  assert.deepEqual(Object.keys(normalizePageClicks({ a: { count: 1, lastClickedAt: 1 }, b: { count: 1, lastClickedAt: 2 }, c: { count: 0 } }, 1)), ["b"]);
+});

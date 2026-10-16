@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         uuBookKit Fulltext Search
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.8.0
+// @version      1.11.1
 // @description  Adds a cached fulltext search for uuBookKit pages and sections using BookKit JSON commands.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-bookkit-maing01/*
@@ -26,7 +26,7 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmBookKitFulltextSearch";
-  const SCRIPT_VERSION = "1.8.0";
+  const SCRIPT_VERSION = "1.11.1";
   const BOOK_REGISTRY_EXPORT_VERSION = 1;
   const BRIDGE_DIAG_URL = "http://127.0.0.1:8766/diagnostics";
   const DIAG_SOURCE = "bookkit-fulltext";
@@ -47,6 +47,10 @@
   const DISMISSED_BOOKS_KEY = "gm-bookkit-fulltext-dismissed";
   const BOOK_REGISTRY_BACKUP_KEY = "gm-bookkit-fulltext-book-registry";
   const SEARCH_HISTORY_KEY = "gm-bookkit-fulltext-search-history";
+  const AUTO_INDEX_KEY = "gm-bookkit-fulltext-auto-index";
+  const PAGE_CLICKS_KEY = "gm-bookkit-fulltext-page-clicks";
+  const PAGE_CLICKS_LIMIT = 2000;
+  const AUTO_INDEX_RETRY_DELAYS_MS = [2000, 5000, 15000];
   const SEARCH_HISTORY_LIMIT = 100;
   const INDEX_STALE_MS = 24 * 60 * 60 * 1000;
   const FRESHNESS_PROBE_MS = 5 * 60 * 1000;
@@ -469,6 +473,85 @@
     }
   }
 
+  function loadAutoIndexEnabled() {
+    if (typeof localStorage === "undefined") return true;
+    try {
+      return localStorage.getItem(AUTO_INDEX_KEY) !== "false";
+    } catch {
+      return true;
+    }
+  }
+
+  function saveAutoIndexEnabled(enabled) {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(AUTO_INDEX_KEY, enabled ? "true" : "false");
+    } catch {
+      // ignore storage quota / privacy mode errors
+    }
+  }
+
+  // Auto-index books without an index, except a dismissed seed or a book already
+  // attempted in this page session (a failed run is not retried in a loop).
+  function shouldAutoIndexBook({ enabled, book, indexRecord, isBusy, attemptedBookIds, dismissedBookIds }) {
+    if (!enabled || isBusy || !book?.bookId || !book.baseUri) return false;
+    if (indexRecord?.documents?.length) return false;
+    if ((dismissedBookIds || []).includes(book.bookId)) return false;
+    if (attemptedBookIds?.has?.(book.bookId)) return false;
+    return true;
+  }
+
+  function normalizePageClicks(clicks, limit = PAGE_CLICKS_LIMIT) {
+    const entries = Object.entries(clicks && typeof clicks === "object" ? clicks : {})
+      .filter(([key, entry]) => key && Number(entry?.count) > 0)
+      .sort((left, right) => (Number(right[1].lastClickedAt) || 0) - (Number(left[1].lastClickedAt) || 0))
+      .slice(0, limit);
+    return Object.fromEntries(entries.map(([key, entry]) => [key, { count: Math.floor(Number(entry.count)), lastClickedAt: Number(entry.lastClickedAt) || 0 }]));
+  }
+
+  function loadPageClicks() {
+    if (typeof localStorage === "undefined") return {};
+    try {
+      return normalizePageClicks(JSON.parse(localStorage.getItem(PAGE_CLICKS_KEY) || "{}"));
+    } catch {
+      return {};
+    }
+  }
+
+  function savePageClicks(clicks) {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(PAGE_CLICKS_KEY, JSON.stringify(normalizePageClicks(clicks)));
+    } catch {
+      // ignore storage quota / privacy mode errors
+    }
+  }
+
+  function recordPageClick(clicks, key, now = Date.now()) {
+    const previous = clicks?.[key];
+    return normalizePageClicks({ ...clicks, [key]: { count: (Number(previous?.count) || 0) + 1, lastClickedAt: now } });
+  }
+
+  // Exact-match and MiniSearch scores live on different scales, so usage multiplies
+  // the relevance score instead of adding to it: 1 click ×1.25, 3 ×1.5, 7 ×1.75.
+  function getUsageBoost(count) {
+    return 1 + 0.25 * Math.log2(1 + (Number(count) || 0));
+  }
+
+  function rankGroupsByUsage(groups, clicks) {
+    return (groups || [])
+      .map((group, order) => {
+        const clickCount = Number(clicks?.[group.key]?.count) || 0;
+        return { ...group, clickCount, rankScore: (group.score ?? 0) * getUsageBoost(clickCount), order };
+      })
+      .sort((left, right) => right.rankScore - left.rankScore || left.order - right.order)
+      .map(({ order, ...group }) => group);
+  }
+
+  function isAuthError(message) {
+    return /not authorized|unauthorized|unauthenticated|\b40[13]\b/iu.test(String(message || ""));
+  }
+
   function normalizeSearchHistory(history, limit = SEARCH_HISTORY_LIMIT) {
     const normalized = [];
     const seen = new Set();
@@ -770,6 +853,35 @@
         return `${code}\t${item.previous || ""}\t${item.next || ""}\t${item.indent ?? ""}\t${label}`;
       })
       .join("\n");
+  }
+
+  function createPageRevisionMap(itemList) {
+    const revisions = {};
+    for (const item of itemList || []) {
+      if (!item?.code) continue;
+      revisions[item.code] = `${item.sys?.rev ?? ""}|${item.sys?.mts || ""}`;
+    }
+    return revisions;
+  }
+
+  // listPages revisions catch new, removed, renamed and most edited pages, but a section
+  // edit does not always bump its page, so a full reload still runs once per INDEX_STALE_MS.
+  function planIndexRefresh({ indexRecord, structureSignature, pageRevisions, now }) {
+    if (!indexRecord?.documents?.length) return { mode: "full", reason: "missing", changedCodes: [] };
+    const fullIndexedAt = indexRecord.fullIndexedAt || indexRecord.indexedAt || 0;
+    if (now - fullIndexedAt > INDEX_STALE_MS) return { mode: "full", reason: "stale", changedCodes: [] };
+    if (!pageRevisions || !indexRecord.pageRevisions) {
+      return structureSignature && structureSignature !== indexRecord.structureSignature
+        ? { mode: "full", reason: "structure", changedCodes: [] }
+        : { mode: "none", reason: "current", changedCodes: [] };
+    }
+
+    const changedCodes = Object.keys(pageRevisions).filter((code) => indexRecord.pageRevisions[code] !== pageRevisions[code]);
+    const removedCount = Object.keys(indexRecord.pageRevisions).filter((code) => !(code in pageRevisions)).length;
+    if (changedCodes.length || removedCount || structureSignature !== indexRecord.structureSignature) {
+      return { mode: "incremental", reason: "changed", changedCodes, removedCount };
+    }
+    return { mode: "none", reason: "current", changedCodes: [] };
   }
 
   function hashFingerprint(text) {
@@ -1374,9 +1486,22 @@
       }
 
       #${TRIGGERS_WRAP_ID} .gm-bookkit-fulltext__nav-trigger {
+        position: relative;
         width: 32px;
         min-width: 32px;
         padding: 0;
+      }
+
+      #${TRIGGERS_WRAP_ID} .gm-bookkit-fulltext__nav-trigger--indexing::after {
+        content: "";
+        position: absolute;
+        inset: 2px;
+        border: 2px solid currentColor;
+        border-right-color: transparent;
+        border-radius: 50%;
+        opacity: 0.8;
+        pointer-events: none;
+        animation: gm-bookkit-fulltext-spin 0.9s linear infinite;
       }
 
       #${TRIGGERS_WRAP_ID}.gm-bookkit-fulltext__triggers--header .gm-bookkit-fulltext__toolbar-btn {
@@ -1575,6 +1700,15 @@
         gap: 8px;
         align-items: center;
         justify-content: flex-end;
+      }
+
+      .gm-bookkit-fulltext__auto-index {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        cursor: pointer;
+        white-space: nowrap;
       }
 
       .gm-bookkit-fulltext__search-input {
@@ -1779,8 +1913,50 @@
       }
 
       .gm-bookkit-fulltext__result-title {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 8px;
         font-weight: 700;
         margin-bottom: 4px;
+      }
+
+      .gm-bookkit-fulltext__result--preferred {
+        background: #f5f9ff;
+        border-color: #bfdbfe;
+        box-shadow: inset 4px 0 0 #2563eb;
+      }
+
+      .gm-bookkit-fulltext__usage {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex: none;
+        padding: 1px 4px 1px 8px;
+        border-radius: 999px;
+        background: #dbeafe;
+        color: #1e3a8a;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .gm-bookkit-fulltext__usage-reset {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 1;
+      }
+
+      .gm-bookkit-fulltext__usage-reset:hover,
+      .gm-bookkit-fulltext__usage-reset:focus-visible {
+        background: #1e3a8a;
+        color: #fff;
+        outline: none;
       }
 
       .gm-bookkit-fulltext__result-path {
@@ -1897,6 +2073,9 @@
       context: parseBookContextFromUrl(window.location.href),
       books: [],
       dismissedBookIds: loadDismissedBookIds(),
+      pageClicks: loadPageClicks(),
+      autoIndexEnabled: loadAutoIndexEnabled(),
+      autoIndexAttemptedBookIds: new Set(),
       manageIndexByBookId: {},
       manageUi: null,
       manageFilter: "",
@@ -1922,6 +2101,7 @@
       statusMessage: "",
       freshnessMessage: "",
       isBusy: false,
+      indexingMessage: "",
       navFilter: "",
       topNav: null,
       freshnessCache: {},
@@ -2313,9 +2493,31 @@
         }
       }, 0);
     });
-    ui.results.addEventListener("click", (event) => {
-      if (event.target.closest(".gm-bookkit-fulltext__result")) {
-        commitSearchHistory(state);
+    const handleResultActivation = (event) => {
+      const resetButton = event.target.closest(".gm-bookkit-fulltext__usage-reset");
+      if (resetButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.type !== "auxclick") resetPageClicks(state, resetButton.dataset.resetKey);
+        return;
+      }
+      const result = event.target.closest(".gm-bookkit-fulltext__result");
+      if (!result) return;
+      if (event.type === "auxclick" && event.button !== 1) return;
+      commitSearchHistory(state);
+      if (result.dataset.clickKey) {
+        state.pageClicks = recordPageClick(state.pageClicks, result.dataset.clickKey);
+        savePageClicks(state.pageClicks);
+      }
+    };
+    ui.results.addEventListener("click", handleResultActivation);
+    ui.results.addEventListener("auxclick", handleResultActivation);
+    ui.results.addEventListener("keydown", (event) => {
+      const resetButton = event.target.closest(".gm-bookkit-fulltext__usage-reset");
+      if (resetButton && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        event.stopPropagation();
+        resetPageClicks(state, resetButton.dataset.resetKey);
       }
     });
     ui.buildButton.addEventListener("click", () => {
@@ -2336,6 +2538,19 @@
     return ui;
   }
 
+  function resetPageClicks(state, key) {
+    if (key) {
+      const { [key]: _removed, ...rest } = state.pageClicks || {};
+      state.pageClicks = rest;
+    } else {
+      state.pageClicks = {};
+    }
+    savePageClicks(state.pageClicks);
+    if (state.ui && !state.ui.modal.hidden) {
+      void renderResults(state);
+    }
+  }
+
   function createManageModal(state) {
     if (state.manageUi?.modal) return state.manageUi;
 
@@ -2351,9 +2566,14 @@
         <div class="gm-bookkit-fulltext__toolbar gm-bookkit-fulltext__toolbar--manage">
           <input type="search" class="gm-bookkit-fulltext__search-input" placeholder="Filtrovat BookKity..." />
           <div class="gm-bookkit-fulltext__manage-toolbar-actions">
+            <label class="gm-bookkit-fulltext__auto-index" title="Při první návštěvě BookKitu bez indexu se index sestaví sám na pozadí; zastaralý index se při návštěvě aktualizuje.">
+              <input type="checkbox" class="gm-bookkit-fulltext__auto-index-input" />
+              <span>Automaticky indexovat a aktualizovat</span>
+            </label>
             <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__export-registry">Export</button>
             <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__import-registry">Import</button>
             <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__rebuild-all">Rebuild all</button>
+            <button type="button" class="gm-bookkit-fulltext__action gm-bookkit-fulltext__reset-clicks" title="Vynuluje počítadla otevření výsledků fulltextu, pořadí pak určuje jen shoda s dotazem.">Vynulovat oblíbenost</button>
           </div>
         </div>
         <div class="gm-bookkit-fulltext__status">
@@ -2375,6 +2595,8 @@
       exportButton: modal.querySelector(".gm-bookkit-fulltext__export-registry"),
       importButton: modal.querySelector(".gm-bookkit-fulltext__import-registry"),
       rebuildAllButton: modal.querySelector(".gm-bookkit-fulltext__rebuild-all"),
+      autoIndexInput: modal.querySelector(".gm-bookkit-fulltext__auto-index-input"),
+      resetClicksButton: modal.querySelector(".gm-bookkit-fulltext__reset-clicks"),
       statusLeft: modal.querySelector(".gm-bookkit-fulltext__status > div:first-child"),
       statusRight: modal.querySelector(".gm-bookkit-fulltext__status > div:last-child"),
       list: modal.querySelector(".gm-bookkit-fulltext__manage-list"),
@@ -2402,6 +2624,25 @@
         setBusy(state, false);
         setManageStatus(state, `Import selhal: ${error.message}`);
       });
+    });
+    ui.autoIndexInput.checked = state.autoIndexEnabled;
+    ui.autoIndexInput.addEventListener("change", () => {
+      state.autoIndexEnabled = ui.autoIndexInput.checked;
+      saveAutoIndexEnabled(state.autoIndexEnabled);
+      setManageStatus(state, state.autoIndexEnabled ? "BookKity se budou indexovat a aktualizovat automaticky." : "Automatická indexace vypnuta.");
+      if (state.autoIndexEnabled) {
+        void maybeAutoIndexCurrentBook(state);
+      }
+    });
+    ui.resetClicksButton.addEventListener("click", () => {
+      const count = Object.keys(state.pageClicks || {}).length;
+      if (!count) {
+        setManageStatus(state, "Žádná počítadla otevření k vynulování.");
+        return;
+      }
+      if (!window.confirm(`Vynulovat počítadla otevření u ${count} stránek?`)) return;
+      resetPageClicks(state);
+      setManageStatus(state, `Počítadla otevření vynulována (${count} stránek).`);
     });
     ui.rebuildAllButton.addEventListener("click", () => {
       rebuildAllIndexes(state).catch((error) => {
@@ -2997,14 +3238,17 @@
       return;
     }
 
-    const groupedResults = groupSearchResultsByPage(results);
+    const groupedResults = rankGroupsByUsage(groupSearchResultsByPage(results), state.pageClicks);
 
     ui.results.innerHTML = groupedResults
       .map((group) => {
         const title = searchScope === "all" && group.bookTitle ? `${group.bookTitle}\\${group.pageTitle || ""}` : group.pageTitle || "";
+        const usageHtml = group.clickCount
+          ? `<span class="gm-bookkit-fulltext__usage" title="Preferovaný výsledek: z fulltextu otevřeno ${group.clickCount}×, proto je výš"><span aria-hidden="true">★</span>${group.clickCount}×<span class="gm-bookkit-fulltext__usage-reset" role="button" tabindex="0" data-reset-key="${escapeHtml(group.key)}" title="Vynulovat počítadlo" aria-label="Vynulovat počítadlo">×</span></span>`
+          : "";
         return `
-          <a class="gm-bookkit-fulltext__result" href="${escapeHtml(group.url)}">
-            <div class="gm-bookkit-fulltext__result-title">${escapeHtml(title)}</div>
+          <a class="gm-bookkit-fulltext__result${group.clickCount ? " gm-bookkit-fulltext__result--preferred" : ""}" href="${escapeHtml(group.url)}" data-click-key="${escapeHtml(group.key)}">
+            <div class="gm-bookkit-fulltext__result-title"><span>${escapeHtml(title)}</span>${usageHtml}</div>
             <div class="gm-bookkit-fulltext__result-path">${escapeHtml(group.path || "")}</div>
             <div class="gm-bookkit-fulltext__result-hits">
               ${group.hits.map((hit) => renderResultHit(hit, query)).join("")}
@@ -3156,6 +3400,18 @@
   async function loadBookStructure(baseUri) {
     const json = await fetchBookKitJson(baseUri, "getBookStructure", {});
     return json?.data || json?.body || json;
+  }
+
+  async function loadPageRevisions(baseUri) {
+    const itemList = [];
+    for (let pageIndex = 0; pageIndex < 100; pageIndex += 1) {
+      const json = await fetchBookKitJson(baseUri, "listPages", pageIndex ? { pageInfo: { pageIndex, pageSize: 1000 } } : {});
+      const data = json?.data || json;
+      itemList.push(...(data?.itemList || []));
+      const total = Number(data?.pageInfo?.total) || 0;
+      if (!data?.itemList?.length || itemList.length >= total) break;
+    }
+    return createPageRevisionMap(itemList);
   }
 
   async function loadPage(baseUri, code) {
@@ -3328,6 +3584,7 @@
       void loadRegistry(state).then(async () => {
         await ensureBookTitlesReady(state, { renderResults: false });
         ensureTrigger(state);
+        await maybeAutoIndexCurrentBook(state);
       });
       return;
     }
@@ -3374,20 +3631,40 @@
   async function buildIndexForBook(state, targetBook, options = {}) {
     if (!targetBook?.baseUri || !state.db) return;
 
+    const showsNavProgress = options.source === "dropdown" || options.source === "auto";
+    const incremental = options.mode === "incremental";
     if (!options.keepBusy) {
       setBusy(state, true);
     }
+    setIndexingIndicator(state, `Indexuji ${targetBook.title || targetBook.baseUri}…`);
     setStatus(state, `Načítám strukturu knihy ${targetBook.title || targetBook.baseUri}…`);
     if (options.source === "manage") {
       setManageStatus(state, `Indexuji ${targetBook.title || targetBook.baseUri}…`);
     }
-    if (options.source === "dropdown") {
+    if (showsNavProgress) {
       setNavProgress(state, `Načítám strukturu knihy ${targetBook.title || targetBook.baseUri}…`, 8);
     }
 
     try {
-      const structure = await loadBookStructure(targetBook.baseUri);
+      const structure = options.prefetched?.structure || (await loadBookStructure(targetBook.baseUri));
       const pages = createPageListFromStructure(structure, targetBook.baseUri);
+      let pageRevisions = options.prefetched?.pageRevisions || null;
+      if (!pageRevisions) {
+        try {
+          pageRevisions = await loadPageRevisions(targetBook.baseUri);
+        } catch {
+          // Without revisions the next refresh falls back to a full reload.
+        }
+      }
+      const existingIndexRecord = await idbGet(state.db, INDEXES_STORE, targetBook.bookId);
+      const reusableRevisions = incremental && pageRevisions ? existingIndexRecord?.pageRevisions || {} : {};
+      const existingDocumentsByPage = new Map();
+      for (const document of incremental ? existingIndexRecord?.documents || [] : []) {
+        if (!existingDocumentsByPage.has(document.pageCode)) existingDocumentsByPage.set(document.pageCode, []);
+        existingDocumentsByPage.get(document.pageCode).push(document);
+      }
+      // Pages without searchable text have no documents, so the revision alone decides.
+      const isPageUnchanged = (page) => Boolean(reusableRevisions[page.code]) && reusableRevisions[page.code] === pageRevisions?.[page.code];
       let resolvedTitle = resolveBookTitle(targetBook, state.context);
       if (needsBookTitleRefresh(resolvedTitle)) {
         try {
@@ -3401,8 +3678,17 @@
       }
 
       const allDocuments = [];
+      const pagesToLoad = [];
+      for (const page of pages) {
+        if (isPageUnchanged(page)) {
+          // Page title and path come from the structure, so a move or rename is applied without loadPage.
+          allDocuments.push(...(existingDocumentsByPage.get(page.code) || []).map((document) => ({ ...document, pageTitle: page.title, path: page.path })));
+        } else {
+          pagesToLoad.push(page);
+        }
+      }
       await runWorkerPool(
-        pages,
+        pagesToLoad,
         async (page) => {
           const loadPageResult = await loadPage(targetBook.baseUri, page.code);
           const documents = createSearchDocuments(targetBook, page, loadPageResult);
@@ -3410,12 +3696,13 @@
         },
         INDEX_CONCURRENCY,
         (done, total, page) => {
-          const progressMessage = `Indexuji ${done}/${total}: ${page.title}`;
+          const progressMessage = incremental ? `Aktualizuji změněné stránky ${done}/${total}: ${page.title}` : `Indexuji ${done}/${total}: ${page.title}`;
+          setIndexingIndicator(state, progressMessage);
           setStatus(state, progressMessage);
           if (options.source === "manage") {
             setManageStatus(state, progressMessage);
           }
-          if (options.source === "dropdown") {
+          if (showsNavProgress) {
             setNavProgress(state, progressMessage, getProgressPercent(done, total));
           }
         },
@@ -3423,7 +3710,6 @@
 
       const now = Date.now();
       const structureSignature = fingerprintStructure(structure);
-      const existingIndexRecord = await idbGet(state.db, INDEXES_STORE, targetBook.bookId);
       const nextBook = buildBookRecord(targetBook, {
         title: resolvedTitle,
         pageCount: pages.length,
@@ -3440,7 +3726,9 @@
         lastVisitedAt: nextBook.lastVisitedAt || now,
         createdAt: existingIndexRecord?.createdAt || now,
         indexedAt: now,
+        fullIndexedAt: incremental && pageRevisions ? existingIndexRecord?.fullIndexedAt || existingIndexRecord?.indexedAt || now : now,
         structureSignature,
+        pageRevisions: pageRevisions || null,
         documents: allDocuments,
       };
 
@@ -3458,12 +3746,17 @@
 
       invalidateSearchCaches(state);
       delete state.freshnessCache[targetBook.bookId];
-      setStatus(state, `Index hotový: ${allDocuments.length} sekcí z ${pages.length} stránek.`);
+      setStatus(
+        state,
+        incremental
+          ? `Index aktualizován: znovu načteno ${pagesToLoad.length} z ${pages.length} stránek, ${allDocuments.length} sekcí.`
+          : `Index hotový: ${allDocuments.length} sekcí z ${pages.length} stránek.`,
+      );
       setFreshnessStatus(state, "struktura aktuální");
       if (options.source === "manage") {
         setManageStatus(state, `Index hotový pro ${nextBook.title || nextBook.baseUri}.`, `${allDocuments.length} sekcí z ${pages.length} stránek`);
       }
-      if (options.source === "dropdown") {
+      if (showsNavProgress) {
         setNavProgress(state, `Index hotový: ${allDocuments.length} sekcí z ${pages.length} stránek.`, 100);
         hideNavProgress(state, 2500);
       }
@@ -3472,6 +3765,8 @@
         pageCount: pages.length,
         docCount: allDocuments.length,
         source: options.source || "search",
+        mode: incremental ? "incremental" : "full",
+        loadedPageCount: pagesToLoad.length,
       });
       const certMatches = allDocuments.filter((document) => /update-ca-certificates/i.test(document.text || ""));
       dbg(
@@ -3490,13 +3785,84 @@
       renderManageList(state);
       await renderResults(state);
     } catch (error) {
-      if (options.source === "dropdown") {
+      if (showsNavProgress) {
         setNavProgress(state, `Indexace selhala: ${error.message}`, 100);
       }
       throw error;
     } finally {
+      setIndexingIndicator(state, "");
       if (!options.keepBusy) {
         setBusy(state, false);
+      }
+    }
+  }
+
+  async function maybeAutoIndexCurrentBook(state) {
+    const book = state.context?.bookId && state.context.bookId === state.selectedBook?.bookId ? state.selectedBook : null;
+    if (!state.db || !book) return;
+
+    if (!state.indexRecord?.documents?.length) {
+      if (
+        !shouldAutoIndexBook({
+          enabled: state.autoIndexEnabled,
+          book,
+          indexRecord: state.indexRecord,
+          isBusy: state.isBusy,
+          attemptedBookIds: state.autoIndexAttemptedBookIds,
+          dismissedBookIds: state.dismissedBookIds,
+        })
+      ) {
+        return;
+      }
+      state.autoIndexAttemptedBookIds.add(book.bookId);
+      sendDiag("index.autoStarted", { awid: book.awid, mode: "full" });
+      await runAutoIndexWithRetry(state, book, () => buildIndexForBook(state, book, { source: "auto" }));
+      return;
+    }
+
+    if (!state.autoIndexEnabled || state.isBusy || state.autoIndexAttemptedBookIds.has(book.bookId)) return;
+    state.autoIndexAttemptedBookIds.add(book.bookId);
+    await runAutoIndexWithRetry(state, book, async () => {
+      setFreshnessStatus(state, "kontroluji změny…");
+      const [structure, pageRevisions] = await Promise.all([loadBookStructure(book.baseUri), loadPageRevisions(book.baseUri).catch(() => null)]);
+      const plan = planIndexRefresh({
+        indexRecord: state.indexRecord,
+        structureSignature: fingerprintStructure(structure),
+        pageRevisions,
+        now: Date.now(),
+      });
+      if (plan.mode === "none") {
+        setFreshnessStatus(state, "index aktuální");
+        return;
+      }
+      sendDiag("index.autoStarted", { awid: book.awid, mode: plan.mode, reason: plan.reason, changedPageCount: plan.changedCodes.length });
+      await buildIndexForBook(state, book, { source: "auto", mode: plan.mode, prefetched: { structure, pageRevisions } });
+    });
+  }
+
+  async function runAutoIndexWithRetry(state, book, run) {
+    // Right after page load the uuApp login may not be finished yet and the first
+    // calls run anonymously ("not authorized"), so auth errors are retried.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await run();
+        return;
+      } catch (error) {
+        setBusy(state, false);
+        const message = String(error?.message || error);
+        const canRetry = isAuthError(message) && attempt < AUTO_INDEX_RETRY_DELAYS_MS.length;
+        sendDiag("index.autoFailed", { awid: book.awid, error: message, attempt, willRetry: canRetry });
+        if (!canRetry) {
+          setFreshnessStatus(state, "");
+          setStatus(state, `Automatická indexace selhala: ${message}`);
+          return;
+        }
+        setStatus(state, "Čekám na přihlášení, indexaci zkusím znovu…");
+        await new Promise((resolve) => window.setTimeout(resolve, AUTO_INDEX_RETRY_DELAYS_MS[attempt]));
+        if (state.context?.bookId !== book.bookId) return;
+        while (state.isBusy) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+        }
       }
     }
   }
@@ -3692,6 +4058,20 @@
     }
   }
 
+  function applyIndexingIndicator(state) {
+    const button = state.topNav?.navButton;
+    if (!button) return;
+    const message = state.indexingMessage || "";
+    button.classList.toggle("gm-bookkit-fulltext__nav-trigger--indexing", Boolean(message));
+    button.title = message || "BookKity";
+    button.setAttribute("aria-label", message ? `BookKity – ${message}` : "BookKity");
+  }
+
+  function setIndexingIndicator(state, message) {
+    state.indexingMessage = message || "";
+    applyIndexingIndicator(state);
+  }
+
   function setNavProgress(state, message, percent) {
     const nav = state.topNav;
     if (!nav?.progressWrap || !nav.progressText || !nav.progressFill) return;
@@ -3794,6 +4174,7 @@
     toolbar.append(manageButton, rebuildButton);
 
     state.topNav = { navMenu, filterInput, list, navButton, progressWrap, progressText, progressFill, progressHideTimer: 0 };
+    applyIndexingIndicator(state);
 
     navButton.addEventListener("click", async (event) => {
       event.stopPropagation();
@@ -3876,6 +4257,7 @@
       await loadRegistry(state);
       ensureTrigger(state);
       void ensureBookTitlesReady(state, { renderResults: false });
+      void maybeAutoIndexCurrentBook(state);
 
       if (state.indexRecord?.indexedAt && Date.now() - state.indexRecord.indexedAt > INDEX_STALE_MS && !state.indexRecord.structureSignature) {
         setStatus(state, `Index je starší než 24 hodin, zvaž aktualizaci.`);
@@ -3987,6 +4369,13 @@
     promoteSearchHistory,
     loadDismissedBookIds,
     saveDismissedBookIds,
+    shouldAutoIndexBook,
+    createPageRevisionMap,
+    planIndexRefresh,
+    normalizePageClicks,
+    recordPageClick,
+    getUsageBoost,
+    rankGroupsByUsage,
     run,
   };
 });

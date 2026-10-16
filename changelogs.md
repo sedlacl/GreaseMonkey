@@ -111,6 +111,35 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 - Tlačítko v hlavičce pro aktualizaci userscriptů v Tampermonkey ze serveru: když stránce odpovídá jeden skript (podle `@match`), je to rovnou „⟳ <název>“; šipka otevře seznam všech skriptů s verzí, relevantní nahoře. Server v `/health` vrací `userScripts` (název, verze, `@match`).
 
+## bookkit-fulltext-search.user.js
+
+### 1.11.1 — 2026-10-16
+
+- Oprava: kniha, které jsi index smazal přes „Odstranit index“, se při další návštěvě znovu automaticky zaindexuje. Dřív ji skript schválně přeskakoval, což vypadalo, jako by automatická indexace nefungovala. Kdo ji nechce, vypne přepínač ve Správě BookKitů.
+
+### 1.11.0 — 2026-10-16
+
+- Oblíbenost výsledků: každé otevření výsledku z fulltextu (klik i prostřední tlačítko) se u stránky započítá. Stránky, které otevíráš častěji, jsou při dalším hledání výš: skóre shody se násobí podle počtu otevření (1× ×1,25, 3× ×1,5, 7× ×1,75). Výsledek se objeví jen tehdy, když odpovídá dotazu.
+- Preferovaný výsledek má modrý pruh vlevo, jemně modré pozadí a odznak „★ N×“ s počtem otevření; křížkem v odznaku se počítadlo stránky vynuluje. Všechna počítadla najednou vynuluje „Vynulovat oblíbenost“ ve Správě BookKitů.
+- Počítadla jsou v `localStorage` prohlížeče (nejvýš 2000 naposledy otevřených stránek).
+
+### 1.10.0 — 2026-10-16
+
+- Automatická aktualizace: při návštěvě BookKitu s indexem skript porovná strukturu knihy a revize stránek (`listPages`, jedno levné volání). Když se něco změnilo, index se na pozadí aktualizuje.
+- Aktualizace znovu načte jen nové stránky a stránky se změněnou revizí. Ostatní převezme z indexu, jen jim podle struktury opraví název a cestu. Smazané stránky z indexu vypadnou.
+- BookKit při úpravě sekce revizi stránky nezvedne vždy, proto se jednou za 24 h načte celý index znovu.
+- Ikona ☰ vedle Fulltextu se během indexace točí a v tooltipu ukazuje průběh.
+- Přepínač ve Správě BookKitů je teď „Automaticky indexovat a aktualizovat“ a platí pro obojí. Ruční Rebuild a Refresh index načítají vždy všechno.
+
+### 1.9.1 — 2026-10-16
+
+- Oprava automatické indexace: hned po načtení stránky ještě nebývá dokončené přihlášení a BookKit první volání odmítl („Logged user is not authorized to run use case“). Při chybě autorizace se indexace zkusí znovu po 2, 5 a 15 s.
+
+### 1.9.0 — 2026-10-16
+
+- Automatická indexace: při první návštěvě BookKitu, který ještě nemá lokální index, se index sestaví sám na pozadí (průběh je v menu BookKitů vedle tlačítka Fulltext). Přepínač „Automaticky indexovat nové BookKity“ je ve Správě BookKitů, výchozí stav je zapnuto.
+- Po selhání se to v téže záložce znovu nezkouší. Smazaný index („Odstranit index“) se při další návštěvě knihy sestaví znovu; kdo to nechce, vypne přepínač.
+
 ## bookkit-file-manager.user.js
 
 ### 1.4.12 — 2026-09-08
