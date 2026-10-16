@@ -94,7 +94,7 @@ Adds an eye button <b>Náhled</b> to attachments on IndSoft, Unicorn (<code>jira
 <li><b>Safe HTML</b> – HTML runs in a sandboxed frame without access to Jira or your login; scripts from a CDN (e.g. D3) are fetched and inlined, because Unicorn Jira's CSP also applies to that frame.</li>
 </ul>
 <p><img src="docs/images/jira-attachment-preview-tiles.png" alt="Jira attachment tiles with the eye button Náhled in the corner" width="560"><br><sub>Eye button on the attachment tiles</sub></p>
-<p><img src="docs/images/jira-attachment-preview-dashboard.png" alt="HTML attachment with an inline script rendered in the preview tab" width="560"><br><sub>HTML dashboard with its script in the preview tab (<code>?viewAttachment=demo-dashboard.html</code>)</sub></p>
+<p><img src="docs/images/jira-attachment-preview-dashboard.png" alt="Preview tab with its own address ?viewAttachment=demo-dashboard.html showing an HTML dashboard rendered by its inline script" width="680"><br><sub>Preview tab with its own address – an HTML dashboard rendered by its script</sub></p>
 <p><img src="docs/images/jira-attachment-preview-json.png" alt="Compact JSON attachment shown formatted in the preview tab" width="320"><br><sub>JSON attachment, formatted</sub></p>
 </details></td>
 <td valign="top"><a href="https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jira-attachment-preview.user.js">Install</a></td>
