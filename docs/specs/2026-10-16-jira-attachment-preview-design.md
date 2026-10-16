@@ -4,15 +4,15 @@ Datum: 2026-10-16 · Autor: Lukáš Sedláček
 
 ## Cíl
 
-Na issue v IndSoft Jira (`jira.indsoft.local`) přidat ke podporované příloze tlačítko **Náhled**. Náhled otevře nový panel prohlížeče a soubor v něm zobrazí. Panel má vlastní adresu s názvem souboru, takže jde obnovit (F5) i poslat dál a po nahrání nové verze ukáže novou verzi. Otevřený panel si novou verzi načte sám. Z HTML přílohy se tak dá udělat dashboard, který se aktualizuje nahráním souboru. Klik na název přílohy dál stahuje soubor jako dnes.
+Na issue v IndSoft Jira (`jira.indsoft.local`) v Jiře Unicorn (`jira.unicorn.com`) a v Jiře ČEPS (`jira-dc.ceps.cz`) přidat ke podporované příloze tlačítko **Náhled**. Náhled otevře nový panel prohlížeče a soubor v něm zobrazí. Panel má vlastní adresu s názvem souboru, takže jde obnovit (F5) i poslat dál a po nahrání nové verze ukáže novou verzi. Otevřený panel si novou verzi načte sám. Z HTML přílohy se tak dá udělat dashboard, který se aktualizuje nahráním souboru. Klik na název přílohy dál stahuje soubor jako dnes.
 
 První ověření je HTML dashboard na [IDSM-6362](http://jira.indsoft.local/browse/IDSM-6362): grafy se vykreslí (stránka používá vložený JavaScript a D3 z CDN).
 
 ## Rozsah
 
 - Nový soubor `jira-attachment-preview.user.js`. Žádný doprovodný shim.
-- Hostitel: `*://jira.indsoft.local/*`. Tlačítko vznikne jen u odkazů na přílohy v modulu Attachments na issue (náhledy i seznam).
-- Mimo rozsah: jiné instance Jiry, mazání a nahrávání příloh, změna popisu issue, náhled v komentářích a v activity streamu.
+- Hostitel: `*://jira.indsoft.local/*`, `https://jira.unicorn.com/*` a `https://jira-dc.ceps.cz/*` (stejné DOM modulu příloh i REST; ČEPS posílá jen CSP `frame-ancestors 'self'`). Tlačítko vznikne jen u odkazů na přílohy v modulu Attachments na issue (náhledy i seznam).
+- Mimo rozsah: další instance Jiry, mazání a nahrávání příloh, změna popisu issue, náhled v komentářích a v activity streamu.
 
 ## Ovládání
 
@@ -41,7 +41,7 @@ Rozhoduje přípona (poslední suffix, bez ohledu na velikost písmen). Když p�
 | Režim | Přípony | MIME, když přípona neřekne |
 | --- | --- | --- |
 | HTML | `html`, `htm` | `text/html` |
-| Text | `txt`, `log`, `csv`, `tsv`, `sql`, `xml`, `json`, `jsonl`, `ndjson`, `md`, `markdown`, `yml`, `yaml`, `ini`, `conf`, `properties`, `css`, `js`, `mjs`, `cjs`, `ts`, `sh`, `ps1`, `bat`, `py`, `java`, `cs`, `diff`, `patch`, `toml` | `text/plain`, `text/csv`, `text/xml`, `text/markdown`, `text/css`, `text/javascript`, `application/json`, `application/xml`, `application/javascript`, `application/x-sql`, `text/x-sql` |
+| Text | `txt`, `log`, `csv`, `tsv`, `sql`, `xml`, `json`, `jsonl`, `ndjson`, `md`, `markdown`, `yml`, `yaml`, `ini`, `conf`, `properties`, `css`, `js`, `mjs`, `cjs`, `ts`, `sh`, `ps1`, `bat`, `py`, `java`, `cs`, `diff`, `patch`, `toml`, `jsonata` | `text/plain`, `text/csv`, `text/xml`, `text/markdown`, `text/css`, `text/javascript`, `application/json`, `application/xml`, `application/javascript`, `application/x-sql`, `text/x-sql` |
 | Obrázek | `png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `bmp`, `ico` | `image/*` |
 | PDF | `pdf` | `application/pdf` |
 
@@ -55,6 +55,7 @@ Obsah běží v izolovaném `iframe` v novém panelu, ne jako dokument horní ú
 - `allow-same-origin` ani `allow-top-navigation` v atributu nejsou. Skripty tedy běží (vložený kód i D3 a fonty z absolutních adres), ale dokument má vlastní neprůhledný původ a nedosáhne na DOM ani cookies Jiry.
 - Rám má `color-scheme: light dark`, takže `prefers-color-scheme` uvnitř odpovídá tématu systému.
 - HTML se do rámu předá vlastností `iframe.srcdoc`. Nesmí se složit jako text do HTML obálky.
+- Rám `srcdoc` dědí CSP stránky. Jira Unicorn posílá `script-src 'unsafe-eval' 'unsafe-inline' jira.unicorn.com 'self'`, takže skript z CDN by v rámu neběžel (ověřeno na AFLEX-3853). Skript proto před vložením HTML rozebere (`DOMParser`, nic se nespustí), každý `<script src>` s adresou http(s) stáhne (`fetch` bez cookies) a vloží jako inline skript; `integrity`, `crossorigin` a `async` odpadnou, `defer` skripty se přesunou na konec `<body>`. Skript, který se stáhnout nepodaří, zůstane s `src`. Styly, fonty a obrázky CSP Unicornu neomezuje.
 - Horní panel se nesmí navigovat na blob URL přílohy. Taková adresa by zdědila původ Jiry a skripty by běžely s jejím přihlášením.
 - Obálku panelu skládá skript z DOM. Jediný rám vyplní okno. Obálka má původ Jiry, ale obsahuje jen DOM skriptu; skripty stránky issue se nespustí, protože je parser vkládá do odpojeného stromu.
 - Hotovo je až tehdy, když náhled dashboardu z IDSM-6362 grafy opravdu vykreslí. Když je v tom zabrání CSP Jiry, způsob vložení se upraví dřív, než se doplněk označí za funkční.
@@ -106,6 +107,6 @@ Prohlížeč, přihlášená IndSoft Jira, issue IDSM-6362:
 
 ## Dokumentace
 
-- `@version 1.1.0`
+- `@version 1.2.0`
 - Nová sekce nahoře v `changelogs.md`
 - Řádek v tabulce Installation v `README.md` a krátká věta v Notes

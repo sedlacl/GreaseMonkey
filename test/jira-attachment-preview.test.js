@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../jira-attachment-preview.user.js");
 
-test("SCRIPT_VERSION is 1.1.0", () => {
-  assert.equal(api.SCRIPT_VERSION, "1.1.0");
+test("SCRIPT_VERSION is 1.2.0", () => {
+  assert.equal(api.SCRIPT_VERSION, "1.2.0");
 });
 
 test("classifyAttachment: known extension decides, case-insensitive, last suffix", () => {
@@ -12,6 +12,7 @@ test("classifyAttachment: known extension decides, case-insensitive, last suffix
   assert.equal(api.classifyAttachment({ filename: "06-ts-list-incident.json" }), "text");
   assert.equal(api.classifyAttachment({ filename: "07-manual-test-output-excerpt.txt" }), "text");
   assert.equal(api.classifyAttachment({ filename: "query.sql" }), "text");
+  assert.equal(api.classifyAttachment({ filename: "prepareAflexDtoIn.navrh.jsonata", mimeType: "application/octet-stream" }), "text");
   assert.equal(api.classifyAttachment({ filename: "screenshot-1.png" }), "image");
   assert.equal(api.classifyAttachment({ filename: "diagram.SVG" }), "image");
   assert.equal(api.classifyAttachment({ filename: "spec.pdf" }), "pdf");

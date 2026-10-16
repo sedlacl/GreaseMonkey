@@ -95,7 +95,11 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (url.pathname === "/browse/IDSM-6362") {
-    res.writeHead(200, { "Content-Type": "text/html;charset=UTF-8", "Content-Security-Policy": "frame-ancestors 'self'" });
+    // the script-src of jira.unicorn.com: the srcdoc frame inherits it, so the dashboard's CDN script must come inline
+    res.writeHead(200, {
+      "Content-Type": "text/html;charset=UTF-8",
+      "Content-Security-Policy": "script-src 'unsafe-eval' 'unsafe-inline' 'self'; frame-ancestors 'self'; object-src 'none'",
+    });
     res.end(issuePage());
     return;
   }

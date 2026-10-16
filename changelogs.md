@@ -7,6 +7,12 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## jira-attachment-preview.user.js
 
+### 1.2.0 — 2026-10-16
+
+- Funguje i na Jiře Unicorn (`https://jira.unicorn.com`) a ČEPS (`https://jira-dc.ceps.cz`).
+- Jira Unicorn povoluje skripty jen vložené nebo ze své adresy a tohle omezení platí i pro rám s HTML přílohou. Skripty, které dashboard načítá z CDN (např. D3), proto skript stáhne a vloží přímo do HTML; jinak by se grafy nevykreslily.
+- Soubory `.jsonata` mají náhled jako text.
+
 ### 1.1.0 — 2026-10-16
 
 - Panel náhledu hledá přílohu podle názvu: adresa je `…/browse/<issue>?viewAttachment=<název souboru>`. F5 i sdílený odkaz po nahrání nové verze souboru ukážou novou verzi, i když má v Jiře jiné id.

@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         IndSoft JIRA - Attachment preview
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.1.0
-// @description  Adds a "Náhled" eye button to supported issue attachments (HTML, text, images, PDF) and opens the file by name in a reloadable new tab that picks up new uploads; HTML runs in a sandboxed frame.
+// @version      1.2.0
+// @description  Adds a "Náhled" eye button to supported attachments on IndSoft, Unicorn and ČEPS Jira issues (HTML, text, images, PDF) and opens the file by name in a reloadable new tab that picks up new uploads; HTML runs in a sandboxed frame.
 // @author       Lukáš Sedláček
 // @match        *://jira.indsoft.local/*
+// @match        https://jira.unicorn.com/*
+// @match        https://jira-dc.ceps.cz/*
 // @grant        none
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jira-attachment-preview.user.js
@@ -26,7 +28,7 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmJiraAttachmentPreview";
-  const SCRIPT_VERSION = "1.1.0";
+  const SCRIPT_VERSION = "1.2.0";
   const STYLE_ID = "gm-jira-attachment-preview-style";
   const BUTTON_CLASS = "gm-jap-btn";
   const OVERLAY_CLASS = "gm-jap-overlay";
@@ -53,7 +55,7 @@
     text: [
       "txt", "log", "csv", "tsv", "sql", "xml", "json", "jsonl", "ndjson", "md", "markdown", "yml", "yaml",
       "ini", "conf", "properties", "css", "js", "mjs", "cjs", "ts", "sh", "ps1", "bat", "py", "java", "cs",
-      "diff", "patch", "toml",
+      "diff", "patch", "toml", "jsonata",
     ],
     image: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico"],
     pdf: ["pdf"],
@@ -518,6 +520,45 @@
     return bytes;
   }
 
+  /**
+   * The srcdoc frame inherits Jira's CSP. jira.unicorn.com allows scripts only inline or from Jira,
+   * so scripts from a CDN (D3…) are fetched here and put inline. Deferred ones move to the end of
+   * <body>, which keeps them after the document. A script that cannot be fetched keeps its src.
+   */
+  async function inlineExternalScripts(html) {
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    const scripts = [...parsed.querySelectorAll("script[src]")].filter((script) => /^https?:\/\//iu.test(script.getAttribute("src")));
+    if (!scripts.length) {
+      return html;
+    }
+    const inlined = await Promise.all(
+      scripts.map(async (script) => {
+        try {
+          const response = await fetch(script.getAttribute("src"), { credentials: "omit" });
+          if (!response.ok) {
+            return false;
+          }
+          const code = await response.text();
+          for (const attribute of ["src", "integrity", "crossorigin", "async"]) {
+            script.removeAttribute(attribute);
+          }
+          script.textContent = code.replace(/<\/script/giu, "<\\/script");
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    scripts.forEach((script, index) => {
+      if (inlined[index] && script.hasAttribute("defer")) {
+        script.removeAttribute("defer");
+        parsed.body.appendChild(script);
+      }
+    });
+    const doctype = parsed.doctype ? `<!DOCTYPE ${parsed.doctype.name}>\n` : "";
+    return doctype + parsed.documentElement.outerHTML;
+  }
+
   function renderHtml(doc, text) {
     const frame = doc.createElement("iframe");
     frame.className = "gm-jap-frame";
@@ -603,7 +644,7 @@
     } else {
       const text = decodeText(bytes, mimeType);
       if (kind === "html") {
-        renderHtml(doc, text);
+        renderHtml(doc, await inlineExternalScripts(text));
       } else {
         renderText(doc, shouldFormatJson({ filename: meta.filename, mimeType }) ? formatJsonPreview(text) : text);
       }
