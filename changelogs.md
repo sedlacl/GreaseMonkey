@@ -7,6 +7,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.6.2 — 2026-10-16
+
+- Oprava: tlačítka (hlavně „Zapsat vše“) na první klik často nereagovala. Skript od 0.6.1 překresloval stránku i lištu dokola každých 300 ms, takže se tlačítko pod kurzorem během kliku vyměnilo. Vlastní překreslení už další překreslení nespouští.
+
 ### 0.6.1 — 2026-10-16
 
 - „Zapsat vše (N)“ v liště v hlavičce výkazu: zapíše a upraví ve WTM najednou všechny nezablokované položky celého měsíce podle Jiry. Před zápisem se zeptá (počet nových a úprav, seznam dnů).
