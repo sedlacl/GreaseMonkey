@@ -120,6 +120,11 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## bookkit-fulltext-search.user.js
 
+### 1.11.2 — 2026-10-16
+
+- Menu ☰ ukazuje průběh indexace vždy, i když indexaci spustil „Refresh index“ nebo „Rebuild all“ ve Správě BookKitů (dřív jen u Rebuildu z menu a u automatické indexace).
+- Preferovaný výsledek má modrý pruh vlevo jako okraj místo vnitřního stínu a kroužek indexace kolem ☰ je umístěný přes `top/right/bottom/left` místo `inset` (stejný vzhled, správně i na screenshotech z html2canvas).
+
 ### 1.11.1 — 2026-10-16
 
 - Oprava: kniha, které jsi index smazal přes „Odstranit index“, se při další návštěvě znovu automaticky zaindexuje. Dřív ji skript schválně přeskakoval, což vypadalo, jako by automatická indexace nefungovala. Kdo ji nechce, vypne přepínač ve Správě BookKitů.

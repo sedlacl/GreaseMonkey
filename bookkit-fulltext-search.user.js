@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         uuBookKit Fulltext Search
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.11.1
+// @version      1.11.2
 // @description  Adds a cached fulltext search for uuBookKit pages and sections using BookKit JSON commands.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-bookkit-maing01/*
@@ -26,7 +26,7 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmBookKitFulltextSearch";
-  const SCRIPT_VERSION = "1.11.1";
+  const SCRIPT_VERSION = "1.11.2";
   const BOOK_REGISTRY_EXPORT_VERSION = 1;
   const BRIDGE_DIAG_URL = "http://127.0.0.1:8766/diagnostics";
   const DIAG_SOURCE = "bookkit-fulltext";
@@ -1495,7 +1495,10 @@
       #${TRIGGERS_WRAP_ID} .gm-bookkit-fulltext__nav-trigger--indexing::after {
         content: "";
         position: absolute;
-        inset: 2px;
+        top: 2px;
+        right: 2px;
+        bottom: 2px;
+        left: 2px;
         border: 2px solid currentColor;
         border-right-color: transparent;
         border-radius: 50%;
@@ -1924,7 +1927,8 @@
       .gm-bookkit-fulltext__result--preferred {
         background: #f5f9ff;
         border-color: #bfdbfe;
-        box-shadow: inset 4px 0 0 #2563eb;
+        border-left: 4px solid #2563eb;
+        padding-left: 13px;
       }
 
       .gm-bookkit-fulltext__usage {
@@ -3631,7 +3635,6 @@
   async function buildIndexForBook(state, targetBook, options = {}) {
     if (!targetBook?.baseUri || !state.db) return;
 
-    const showsNavProgress = options.source === "dropdown" || options.source === "auto";
     const incremental = options.mode === "incremental";
     if (!options.keepBusy) {
       setBusy(state, true);
@@ -3641,9 +3644,8 @@
     if (options.source === "manage") {
       setManageStatus(state, `Indexuji ${targetBook.title || targetBook.baseUri}…`);
     }
-    if (showsNavProgress) {
-      setNavProgress(state, `Načítám strukturu knihy ${targetBook.title || targetBook.baseUri}…`, 8);
-    }
+    // The ☰ menu shows progress whatever started the run (menu, Správa, automatic refresh).
+    setNavProgress(state, `Načítám strukturu knihy ${targetBook.title || targetBook.baseUri}…`, 8);
 
     try {
       const structure = options.prefetched?.structure || (await loadBookStructure(targetBook.baseUri));
@@ -3702,9 +3704,7 @@
           if (options.source === "manage") {
             setManageStatus(state, progressMessage);
           }
-          if (showsNavProgress) {
-            setNavProgress(state, progressMessage, getProgressPercent(done, total));
-          }
+          setNavProgress(state, progressMessage, getProgressPercent(done, total));
         },
       );
 
@@ -3756,10 +3756,8 @@
       if (options.source === "manage") {
         setManageStatus(state, `Index hotový pro ${nextBook.title || nextBook.baseUri}.`, `${allDocuments.length} sekcí z ${pages.length} stránek`);
       }
-      if (showsNavProgress) {
-        setNavProgress(state, `Index hotový: ${allDocuments.length} sekcí z ${pages.length} stránek.`, 100);
-        hideNavProgress(state, 2500);
-      }
+      setNavProgress(state, `Index hotový: ${allDocuments.length} sekcí z ${pages.length} stránek.`, 100);
+      hideNavProgress(state, 2500);
       sendDiag("index.refreshed", {
         awid: nextBook.awid,
         pageCount: pages.length,
@@ -3785,9 +3783,7 @@
       renderManageList(state);
       await renderResults(state);
     } catch (error) {
-      if (showsNavProgress) {
-        setNavProgress(state, `Indexace selhala: ${error.message}`, 100);
-      }
+      setNavProgress(state, `Indexace selhala: ${error.message}`, 100);
       throw error;
     } finally {
       setIndexingIndicator(state, "");
