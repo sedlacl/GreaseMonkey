@@ -710,3 +710,14 @@ test("rankGroupsByUsage lifts pages opened from fulltext results", () => {
   assert.equal(clicks["book::often-opened"].count, 2);
   assert.deepEqual(Object.keys(normalizePageClicks({ a: { count: 1, lastClickedAt: 1 }, b: { count: 1, lastClickedAt: 2 }, c: { count: 0 } }, 1)), ["b"]);
 });
+
+test("extractSearchText reads a uu5string header with escaped quotes without markup noise", () => {
+  const { extractSearchText } = require("../bookkit-fulltext-search.user.js");
+  const markup =
+    '<uu5string/><UU5.Bricks.Section contentEditable colorSchema=null header="<uu5string/><UU5.Bricks.Div style=\\"margin-top:-36px;\\"><UU5.Bricks.Icon style=\\"color:#1976d2\\" icon=\\"mdi-lightbulb-on\\"/> What you will find here</UU5.Bricks.Div>"><UU5.RichText.Block uu5string="<uu5string/><UU5.Bricks.P>CLAUDE.md — Configuration</UU5.Bricks.P>"/></UU5.Bricks.Section>';
+  const text = extractSearchText(markup);
+
+  assert.match(text, /What you will find here/);
+  assert.match(text, /CLAUDE\.md — Configuration/);
+  assert.doesNotMatch(text, /style=|margin-top|\|<|">/);
+});

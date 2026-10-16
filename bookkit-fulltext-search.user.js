@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         uuBookKit Fulltext Search
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.11.2
+// @version      1.11.3
 // @description  Adds a cached fulltext search for uuBookKit pages and sections using BookKit JSON commands.
 // @author       Lukáš Sedláček
 // @match        *://*/uu-bookkit-maing01/*
@@ -26,7 +26,7 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmBookKitFulltextSearch";
-  const SCRIPT_VERSION = "1.11.2";
+  const SCRIPT_VERSION = "1.11.3";
   const BOOK_REGISTRY_EXPORT_VERSION = 1;
   const BRIDGE_DIAG_URL = "http://127.0.0.1:8766/diagnostics";
   const DIAG_SOURCE = "bookkit-fulltext";
@@ -58,6 +58,8 @@
   const BOOKKIT_MATCHER = /^(https?:\/\/[^/]+\/uu-bookkit-maing01\/((?:\d+-)?[a-z0-9]{32}))(?:\/book\/(?:page\?code=([^&#]+)|intro)|\/?.*)?$/iu;
   const SEARCHABLE_ATTRIBUTE_PATTERN = /\b(?:header|content|label|value|title|alt|name|subtitle|description|text|code)\s*=\s*(?:"([^"]*)"|'([^']*)')/giu;
   const UU5STRING_ATTRIBUTE_PATTERN = /\buu5string\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/giu;
+  // An attribute such as header="<uu5string/>…" holds nested markup with backslash-escaped quotes.
+  const UU5STRING_VALUED_ATTRIBUTE_PATTERN = /\b([A-Za-z][\w.-]*)\s*=\s*"(<uu5string\s*\/?>(?:[^"\\]|\\.)*)"/gu;
   const STRUCTURED_DATA_ATTRIBUTE_PATTERN = /\bdata\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/giu;
   const COMPONENT_NOISE_PATTERN =
     /\b(?:uu5string|UU5(?:\.[A-Za-z0-9_]+)+|Uu5(?:\.[A-Za-z0-9_]+)+|Plus4U5(?:\.[A-Za-z0-9_]+)+|UuDcc(?:\.[A-Za-z0-9_]+)+|UuBookKit(?:\.[A-Za-z0-9_]+)+|UuContentKit(?:\.[A-Za-z0-9_]+)+|UuTerritory(?:\.[A-Za-z0-9_]+)+)\b/gu;
@@ -286,8 +288,22 @@
     return expanded;
   }
 
+  function escapeAttributeText(value) {
+    return String(value || "").replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  }
+
+  // HTML parsers do not treat \" as an escape, so header="<uu5string/><Div style=\"…\">Title</Div>"
+  // would end at style=\ and leak markup into the text. Replace such values by their plain text first.
+  function flattenUu5StringValuedAttributes(markup) {
+    return String(markup || "").replace(UU5STRING_VALUED_ATTRIBUTE_PATTERN, (full, name, value) => {
+      if (/^uu5string$/iu.test(name)) return full;
+      const text = collectTextNodesFromHtml(decodeEscapedAttributeValue(value), { includeStructuredData: false });
+      return `${name}="${escapeAttributeText(normalizeWhitespace(stripTechnicalNoise(text).replace(/\n+/gu, " ")))}"`;
+    });
+  }
+
   function collectTextNodesFromHtml(markup, options = {}) {
-    const html = expandUu5StringAttributes(markup);
+    const html = flattenUu5StringValuedAttributes(expandUu5StringAttributes(markup));
     if (!html) return "";
 
     const structuredDataChunks = options.includeStructuredData === false ? [] : extractStructuredDataText(html);

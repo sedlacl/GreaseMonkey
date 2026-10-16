@@ -120,6 +120,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## bookkit-fulltext-search.user.js
 
+### 1.11.3 — 2026-10-16
+
+- Oprava: do textu a úryvků propadal kus značkování, např. `< style=\ What you will find here">`. Nadpis sekce (`header`) může být celý uu5string s escapovanými uvozovkami (`style=\"…\"`) a prohlížeč atribut ukončil na první z nich. Skript teď takové atributy nejdřív převede na čistý text. Už zaindexované stránky se opraví při příští aktualizaci, nejpozději při denním plném načtení knihy.
+
 ### 1.11.2 — 2026-10-16
 
 - Menu ☰ ukazuje průběh indexace vždy, i když indexaci spustil „Refresh index“ nebo „Rebuild all“ ve Správě BookKitů (dřív jen u Rebuildu z menu a u automatické indexace).
