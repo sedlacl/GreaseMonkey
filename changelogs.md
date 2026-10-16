@@ -5,6 +5,25 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ---
 
+## jira-attachment-preview.user.js
+
+### 1.0.2 — 2026-10-16
+
+- Oprava: v panelu náhledu se občas objevil banner Jiry („The Tomcat server.xml has an incorrect configuration“) a HTML dashboard měl jednou světlé, jindy tmavé téma. Tampermonkey totiž skript spustí až po prvních skriptech Jiry a jejich handlery po načtení zapisovaly do náhledu. Události načtení se k nim už nedostanou a cizí prvky skript z náhledu odstraní.
+- HTML příloha v náhledu se teď vždy řídí světlým nebo tmavým tématem systému, stejně jako při samostatném otevření.
+
+### 1.0.1 — 2026-10-16
+
+- Oprava: panel náhledu zůstal v Chromu prázdný, protože prohlížeč stránku vůbec nevykreslil. Skript přerušil načítání issue (`window.stop()`) dřív, než parser došel k `<body>`, a Chrome pak s vykreslením čekal donekonečna. Skript teď místo přerušení vymění celý dokument; zbytek stránky Jiry se načte mimo dokument, takže se její skripty nespustí a vykreslení nic neblokuje.
+
+### 1.0.0 — 2026-10-16
+
+- Nový skript pro IndSoft Jira (`jira.indsoft.local`): u podporovaných příloh issue je tlačítko s okem „Náhled“: v zobrazení náhledů velké oko v rohu dlaždice, v seznamu malé za názvem. Otevře soubor v novém panelu; klik na název dál soubor stahuje.
+- Panel náhledu má vlastní adresu `…/browse/<issue>?viewAttachment=<id>`, takže jde obnovit (F5) i poslat odkaz dál.
+- HTML běží v izolovaném rámu (`sandbox` bez `allow-same-origin`): vložené skripty i D3 z CDN fungují, ale na Jiru ani její přihlášení nedosáhnou.
+- Text (txt, log, csv, sql, xml, json, yaml, md, skripty…) je v `<pre>` podle `charset` odpovědi, JSON se naformátuje. Obrázky (i SVG, bez skriptů) se zobrazí, PDF otevře vestavěný prohlížeč.
+- Limit 10 MB; větší příloha nebo chyba načtení ukáže v novém panelu vysvětlující větu.
+
 ## wtm-jira-sync.user.js
 
 ### 0.6.2 — 2026-10-16

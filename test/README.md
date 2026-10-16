@@ -22,3 +22,9 @@ npm run test-jsonata-java-checker
 That test loads the local `jsonata-java-checker.js`, injects a mock TamperMonkey `GM_xmlhttpRequest`, clicks the `Java check` button, and asserts that the button reaches the `OK` state with the expected request payload.
 
 If Chrome is installed in a non-default location, set `CHROME_PATH` before running the script.
+
+Run the end-to-end attachment preview test (fake Jira issue page served locally, real Chrome; the HTML case loads D3 from cdnjs):
+
+```powershell
+npm run test-jira-attachment-preview
+```

@@ -30,6 +30,7 @@ If direct install is blocked by the browser, use the same URL in the addon page:
 | Identity login password manager bridge          | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/identity-login-password-manager.user.js)             |
 | JSONATA JAVA Checker                            | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jsonata-java-checker.user.js)                        |
 | IndSoft JIRA - ManiTime copy tag                | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/indsoft-jira-manictime.user.js)                      |
+| IndSoft JIRA - Attachment preview               | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/jira-attachment-preview.user.js)                     |
 | Message Registry - Auto refresh                 | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-autorefresh.user.js)                |
 | Message Registry - Preview downloads            | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.user.js)          |
 | Message Registry - Preview downloads (UUCloud1) | [Install](https://raw.githubusercontent.com/sedlacl/GreaseMonkey/refs/heads/main/message-registry-preview-downloads.uucloud1.user.js) |
@@ -51,6 +52,8 @@ Use `uuBookKit Fulltext Search` in `uu-bookkit-maing01` books where the built-in
 Use `uuBookKit – FileManager` on the BookKit attachments page to show file sizes on tiles, sort by size, and optionally run a heuristic unused-attachment check across book pages. After a clean scan, `Select candidates` adds heuristically identified unused attachments to the native bulk-action selection. The usage scan may miss non-standard references; partial page failures do not mark attachments as unused.
 
 WTM ← Jira sync (`wtm-jira-sync.user.js`): na stránce WTM „Výkazy za měsíc“ spáruje položky s tvými worklogy v Jiře (`jira.indsoft.local`). Zelená = sedí, oranžová = liší se (tlačítko „Upravit podle Jiry“), virtuální řádek = chybí ve WTM („Zapsat do WTM“, „Zapsat vše“ za den, „Zapsat vše“ v liště za celý měsíc), červená = ve WTM navíc (mažeš ručně). Jira je zdroj pravdy, skript do Jiry nezapisuje a ve WTM nic nemaže. Artefakt WTM se bere z W_ labelu ticketu podle tabulky v Nastavení; tabulku lze naimportovat ze souboru `mappings.toml` (TOML, `schema_version = 1`, pole `label`, `subject_url`, volitelně `valid_to`, `blocked`, `note`, `project`, `artifact`). Label po `valid_to` nebo s `blocked = true` zápis zablokuje. Druhou možností je import přímo z dokumentu „SP53 Standardy vykazování“ v ManagementKitu (tlačítko „Importovat z dokumentu SP53“). Potřebuje být přihlášený do Jiry ve stejném prohlížeči.
+
+Use `IndSoft JIRA - Attachment preview` on IndSoft Jira issues to open HTML, text, image and PDF attachments (up to 10 MB) in a new tab via the eye button on the attachment tile (next to the file name in the list view); the preview tab has its own `?viewAttachment=<id>` address, so it can be reloaded. HTML dashboards run their scripts in a sandboxed frame without access to Jira.
 
 ## Changelog
 

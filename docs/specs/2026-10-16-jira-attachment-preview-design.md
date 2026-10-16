@@ -4,7 +4,7 @@ Datum: 2026-10-16 · Autor: Lukáš Sedláček
 
 ## Cíl
 
-Na issue v IndSoft Jira (`jira.indsoft.local`) přidat ke podporované příloze tlačítko **Náhled**. Náhled otevře nový panel prohlížeče a soubor v něm zobrazí. Klik na název přílohy dál stahuje soubor jako dnes.
+Na issue v IndSoft Jira (`jira.indsoft.local`) přidat ke podporované příloze tlačítko **Náhled**. Náhled otevře nový panel prohlížeče a soubor v něm zobrazí. Panel má vlastní adresu, takže jde obnovit (F5) i poslat dál. Klik na název přílohy dál stahuje soubor jako dnes.
 
 První ověření je HTML dashboard na [IDSM-6362](http://jira.indsoft.local/browse/IDSM-6362): grafy se vykreslí (stránka používá vložený JavaScript a D3 z CDN).
 
@@ -16,20 +16,21 @@ První ověření je HTML dashboard na [IDSM-6362](http://jira.indsoft.local/bro
 
 ## Ovládání
 
-- U každé podporované přílohy je tlačítko s ikonou oka, přístupné z klávesnice, viditelné bez najetí myší.
+- U každé podporované přílohy je tlačítko s ikonou oka, přístupné z klávesnice, viditelné bez najetí myší. Je to odkaz (`<a target="_blank">`), takže funguje i prostřední tlačítko myši.
 - Přístupný název i tooltip: `Náhled: <název souboru>`.
-- Tlačítko je v řádku názvu, hned za odkazem na soubor. Odkaz, datum, velikost ani koš se nemění.
+- V zobrazení náhledů (`#attachment_thumbnails`) leží oko jako overlay v pravém horním rohu dlaždice: tlačítko 44 px, ikona 32 px, světlé kulaté pozadí se stínem. V seznamu je malé oko (16 px) hned za odkazem na soubor. Odkaz, datum, velikost ani koš se nemění.
 - Nepodporovaný typ tlačítko nemá.
 - Jira modul příloh překresluje. Pozorovatel DOM tlačítka doplní znovu a u jedné přílohy je vždy jen jedno.
 
 ## Tok náhledu
 
-1. Kliknutí v uživatelském gestu hned otevře `about:blank` v novém panelu (`window.open`). Až potom se příloha stahuje. Když prohlížeč panel zablokuje, skript nic dalšího nedělá a stažení názvem zůstává.
-2. `fetch` na stejný origin jako stránka, s cookies stránky (`credentials: "same-origin"`). Cíl musí být `http(s)` a origin `location.origin`. Typická adresa je `/secure/attachment/<id>/<název>`.
-3. Limit je 10 MiB (`10 * 1024 * 1024`). Rozhoduje `Content-Length`, a když chybí, velikost stažených bajtů. Nad limitem se obsah nezobrazí; v novém panelu je věta „Příloha je větší než 10 MB, náhled se neotevře.“
-4. Selhání sítě nebo odpověď mimo 2xx: panel zůstane otevřený s větou „Přílohu se nepodařilo načíst.“
-5. Titulek panelu je název souboru.
-6. Text se dekóduje podle `charset` v `Content-Type`. Když charset chybí, použije se UTF-8.
+1. Oko otevře v novém panelu adresu `/browse/<KLÍČ>?viewAttachment=<id>` (klíč z `meta[name="ajs-issue-key"]`, `#key-val` nebo z cesty; bez klíče aktuální cesta stránky). Skript běží od `document-start`. Když v adrese najde `viewAttachment`, vymění kořenový `<html>` dokumentu za vlastní prázdnou obálku. Parser Jiry pak doběhne do odpojeného starého stromu: skripty mimo dokument se nespustí a stylesheety nic neblokují. `window.stop()` se nepoužívá: přeruší parser před `<body>` a Chrome pak panel nikdy nevykreslí (ověřeno na IDSM-6362). Tampermonkey skript spustí až po prvních skriptech v hlavičce Jiry. Události `readystatechange`, `DOMContentLoaded` a `load` proto skript zastaví na `window` dřív, než se dostanou k handlerům Jiry, a uzly, které do `<html>`, `<head>` nebo `<body>` vloží někdo jiný, hned odstraní. Obnovení panelu celý postup zopakuje.
+2. `viewAttachment` musí být jen číslice, jinak se stránka chová jako běžné issue. Z adresy se nebere žádná URL ani název souboru.
+3. Metadata: `GET /rest/api/2/attachment/<id>` (název, MIME, velikost). Obsah: `GET /secure/attachment/<id>/<název>`, cestu skládá skript z id a názvu. Obojí `fetch` na stejný origin s cookies stránky (`credentials: "same-origin"`).
+4. Limit je 10 MiB (`10 * 1024 * 1024`). Rozhoduje `size` z REST, pak `Content-Length`, a když chybí, velikost stažených bajtů. Nad limitem se obsah nezobrazí; v panelu je věta „Příloha je větší než 10 MB, náhled se neotevře.“
+5. Selhání sítě, neznámé id nebo odpověď mimo 2xx: panel zůstane otevřený s větou „Přílohu se nepodařilo načíst.“ Nepodporovaný typ (např. ručně zadaná adresa se zipem): „Tento typ přílohy náhled nemá.“
+6. Titulek panelu je název souboru.
+7. Text se dekóduje podle `charset` v `Content-Type`. Když charset chybí, použije se UTF-8.
 
 ## Druhy souborů
 
@@ -50,9 +51,10 @@ Obsah běží v izolovaném `iframe` v novém panelu, ne jako dokument horní ú
 
 - Atribut `sandbox`: `allow-scripts allow-popups allow-forms allow-modals allow-downloads`.
 - `allow-same-origin` ani `allow-top-navigation` v atributu nejsou. Skripty tedy běží (vložený kód i D3 a fonty z absolutních adres), ale dokument má vlastní neprůhledný původ a nedosáhne na DOM ani cookies Jiry.
+- Rám má `color-scheme: light dark`, takže `prefers-color-scheme` uvnitř odpovídá tématu systému.
 - HTML se do rámu předá vlastností `iframe.srcdoc`. Nesmí se složit jako text do HTML obálky.
 - Horní panel se nesmí navigovat na blob URL přílohy. Taková adresa by zdědila původ Jiry a skripty by běžely s jejím přihlášením.
-- Obálku panelu skládá skript z DOM. Jediný rám vyplní okno.
+- Obálku panelu skládá skript z DOM. Jediný rám vyplní okno. Obálka má původ Jiry, ale obsahuje jen DOM skriptu; skripty stránky issue se nespustí, protože je parser vkládá do odpojeného stromu.
 - Hotovo je až tehdy, když náhled dashboardu z IDSM-6362 grafy opravdu vykreslí. Když je v tom zabrání CSP Jiry, způsob vložení se upraví dřív, než se doplněk označí za funkční.
 
 ### Text
@@ -64,7 +66,7 @@ Soubor `.json` a MIME `application/json` se zkusí naformátovat (`JSON.parse` a
 ### Obrázky a PDF
 
 - Rastrové obrázky a SVG jsou v obálce v `<img>`. SVG se neotevírá jako dokument, takže jeho skripty neběží.
-- PDF: už otevřený panel přejde na blob URL s typem `application/pdf` a soubor ukáže vestavěný prohlížeč PDF.
+- PDF: obálka má rám (bez `sandbox`, jinak by se prohlížeč PDF nespustil) s blob URL typu `application/pdf` a soubor ukáže vestavěný prohlížeč PDF. Panel si tak nechá svou adresu a jde obnovit.
 
 ## Rozhraní čisté logiky
 
@@ -74,19 +76,26 @@ Skript jde načíst z Node jako modul (stejný vzor jako `bookkit-file-manager.u
 - `isWithinPreviewLimit(byteLength)` → boolean, hranice 10 MiB včetně
 - `sandboxAttribute()` → přesně `allow-scripts allow-popups allow-forms allow-modals allow-downloads`
 - `formatJsonPreview(text)` → naformátovaný JSON, nebo původní text při neplatném JSON
+- `previewAttachmentId(search)` → id z `?viewAttachment=`, jen číslice, jinak `""`
+- `previewPageUrl({ origin, issueKey, pathname, attachmentId })` → adresa panelu náhledu
+- `attachmentContentPath(id, filename)` → `/secure/attachment/<id>/<zakódovaný název>`
 
 ## Ověření
 
-Node: `node --test test/jira-attachment-preview.test.js` pokrývá tabulku druhů (včetně `.json` + `text/plain` a `.html` + `application/x-sql`), hranici 10 MiB, zákaz `allow-same-origin` a formátování JSON.
+Node: `node --test test/jira-attachment-preview.test.js` pokrývá tabulku druhů (včetně `.json` + `text/plain` a `.html` + `application/x-sql`), hranici 10 MiB, zákaz `allow-same-origin`, formátování JSON a parametr `viewAttachment`.
+
+Chrome (puppeteer-core): `npm run test-jira-attachment-preview` ve složce `test` pustí falešnou stránku issue, REST a přílohy na lokálním serveru a skript vloží od začátku dokumentu jako Tampermonkey. Ověří umístění a velikost oka, překreslení modulu, otevření panelu kliknutím, všechny druhy náhledu, obnovení panelu, limity a chybové věty.
 
 Prohlížeč, přihlášená IndSoft Jira, issue IDSM-6362:
 
 - U obou HTML dashboardů je Náhled; klik na název soubor stáhne.
 - Náhled novějšího dashboardu ukáže vykreslené grafy (D3).
 - `06-ts-list-incident.json` je v novém panelu čitelný text.
+- Panel náhledu se opravdu vykreslí (screenshot projde, `requestAnimationFrame` proběhne), nejen že obsah je v DOM.
 - `07-manual-test-output-excerpt.txt` a jeden `.sql` jsou text v `<pre>`.
 - `screenshot-1.png` je obrázek.
 - Po chybě načtení zůstane v novém panelu chybová věta a odkaz na stažení na issue dál funguje.
+- F5 v panelu náhledu ukáže tentýž náhled znovu.
 
 ## Dokumentace
 

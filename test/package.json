@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "inspect-jsonata-models": "node inspect-jsonata-models.js",
-    "test-jsonata-java-checker": "node test-jsonata-java-checker.js"
+    "test-jsonata-java-checker": "node test-jsonata-java-checker.js",
+    "test-jira-attachment-preview": "node test-jira-attachment-preview.js"
   },
   "dependencies": {
     "puppeteer-core": "^24.40.0"
