@@ -4,7 +4,7 @@ Datum: 2026-10-16 · Autor: Lukáš Sedláček
 
 ## Cíl
 
-Na issue v IndSoft Jira (`jira.indsoft.local`) přidat ke podporované příloze tlačítko **Náhled**. Náhled otevře nový panel prohlížeče a soubor v něm zobrazí. Panel má vlastní adresu, takže jde obnovit (F5) i poslat dál. Klik na název přílohy dál stahuje soubor jako dnes.
+Na issue v IndSoft Jira (`jira.indsoft.local`) přidat ke podporované příloze tlačítko **Náhled**. Náhled otevře nový panel prohlížeče a soubor v něm zobrazí. Panel má vlastní adresu s názvem souboru, takže jde obnovit (F5) i poslat dál a po nahrání nové verze ukáže novou verzi. Otevřený panel si novou verzi načte sám. Z HTML přílohy se tak dá udělat dashboard, který se aktualizuje nahráním souboru. Klik na název přílohy dál stahuje soubor jako dnes.
 
 První ověření je HTML dashboard na [IDSM-6362](http://jira.indsoft.local/browse/IDSM-6362): grafy se vykreslí (stránka používá vložený JavaScript a D3 z CDN).
 
@@ -24,13 +24,15 @@ První ověření je HTML dashboard na [IDSM-6362](http://jira.indsoft.local/bro
 
 ## Tok náhledu
 
-1. Oko otevře v novém panelu adresu `/browse/<KLÍČ>?viewAttachment=<id>` (klíč z `meta[name="ajs-issue-key"]`, `#key-val` nebo z cesty; bez klíče aktuální cesta stránky). Skript běží od `document-start`. Když v adrese najde `viewAttachment`, vymění kořenový `<html>` dokumentu za vlastní prázdnou obálku. Parser Jiry pak doběhne do odpojeného starého stromu: skripty mimo dokument se nespustí a stylesheety nic neblokují. `window.stop()` se nepoužívá: přeruší parser před `<body>` a Chrome pak panel nikdy nevykreslí (ověřeno na IDSM-6362). Tampermonkey skript spustí až po prvních skriptech v hlavičce Jiry. Události `readystatechange`, `DOMContentLoaded` a `load` proto skript zastaví na `window` dřív, než se dostanou k handlerům Jiry, a uzly, které do `<html>`, `<head>` nebo `<body>` vloží někdo jiný, hned odstraní. Obnovení panelu celý postup zopakuje.
-2. `viewAttachment` musí být jen číslice, jinak se stránka chová jako běžné issue. Z adresy se nebere žádná URL ani název souboru.
-3. Metadata: `GET /rest/api/2/attachment/<id>` (název, MIME, velikost). Obsah: `GET /secure/attachment/<id>/<název>`, cestu skládá skript z id a názvu. Obojí `fetch` na stejný origin s cookies stránky (`credentials: "same-origin"`).
+1. Oko otevře v novém panelu adresu `/browse/<KLÍČ>?viewAttachment=<název souboru>` (klíč z `meta[name="ajs-issue-key"]`, `#key-val` nebo z cesty; bez klíče oko není). Název, ne id: nová verze souboru má v Jiře nové id, adresa ale platí dál. Skript běží od `document-start`. Když v adrese najde `viewAttachment`, vymění kořenový `<html>` dokumentu za vlastní prázdnou obálku. Parser Jiry pak doběhne do odpojeného starého stromu: skripty mimo dokument se nespustí a stylesheety nic neblokují. `window.stop()` se nepoužívá: přeruší parser před `<body>` a Chrome pak panel nikdy nevykreslí (ověřeno na IDSM-6362). Tampermonkey skript spustí až po prvních skriptech v hlavičce Jiry. Události `readystatechange`, `DOMContentLoaded`, `load` a `popstate` proto skript zastaví na `window` dřív, než se dostanou k handlerům Jiry, a uzly, které do `<html>`, `<head>` nebo `<body>` vloží někdo jiný, hned odstraní. Obnovení panelu celý postup zopakuje.
+2. Prázdný `viewAttachment` (nebo delší než 255 znaků) znamená běžné issue. Název z adresy se jen porovnává se seznamem příloh, do žádného požadavku se nedostane.
+3. Příloha: `GET /rest/api/2/issue/<KLÍČ>?fields=attachment`, z ní nejnovější příloha s přesně tímto názvem (nejvyšší id; Jira nechává každé nahrání jako samostatnou přílohu). Obsah: `GET /secure/attachment/<id>/<název>`, cestu skládá skript z id a názvu z odpovědi Jiry. Obojí `fetch` na stejný origin s cookies stránky (`credentials: "same-origin"`).
 4. Limit je 10 MiB (`10 * 1024 * 1024`). Rozhoduje `size` z REST, pak `Content-Length`, a když chybí, velikost stažených bajtů. Nad limitem se obsah nezobrazí; v panelu je věta „Příloha je větší než 10 MB, náhled se neotevře.“
-5. Selhání sítě, neznámé id nebo odpověď mimo 2xx: panel zůstane otevřený s větou „Přílohu se nepodařilo načíst.“ Nepodporovaný typ (např. ručně zadaná adresa se zipem): „Tento typ přílohy náhled nemá.“
+5. Selhání sítě nebo odpověď mimo 2xx: panel zůstane otevřený s větou „Přílohu se nepodařilo načíst.“ Issue nemá přílohu s tímto názvem: „Příloha s tímto názvem na issue není.“ Nepodporovaný typ (např. ručně zadaná adresa se zipem): „Tento typ přílohy náhled nemá.“
 6. Titulek panelu je název souboru.
 7. Text se dekóduje podle `charset` v `Content-Type`. Když charset chybí, použije se UTF-8.
+8. Aktualizace: když je panel viditelný, skript každých 30 s a hned po zviditelnění panelu znovu zjistí nejnovější přílohu s tím názvem. Má-li jiné id, obsah se načte a vykreslí znovu bez obnovení panelu. Beze změny se nic nepřekresluje. Když příloha zmizí (smazaná, nová ještě nenahraná), panel nechá poslední obsah a hledá dál. Chyba kontroly se jen zapíše do konzole.
+9. Zpět: nový panel nemá historii, proto skript před náhled vloží záznam s adresou issue (`replaceState` na adresu bez `viewAttachment`, `pushState` zpět na náhled), jen když `history.length` je 1. Back i Forward mezi issue a náhledem může Chrome provést jen změnou adresy v témže dokumentu (`popstate`); skript pak stránku načte znovu pro to, co adresa chce, v režimu náhledu i na běžném issue.
 
 ## Druhy souborů
 
@@ -76,15 +78,18 @@ Skript jde načíst z Node jako modul (stejný vzor jako `bookkit-file-manager.u
 - `isWithinPreviewLimit(byteLength)` → boolean, hranice 10 MiB včetně
 - `sandboxAttribute()` → přesně `allow-scripts allow-popups allow-forms allow-modals allow-downloads`
 - `formatJsonPreview(text)` → naformátovaný JSON, nebo původní text při neplatném JSON
-- `previewAttachmentId(search)` → id z `?viewAttachment=`, jen číslice, jinak `""`
-- `previewPageUrl({ origin, issueKey, pathname, attachmentId })` → adresa panelu náhledu
+- `previewAttachmentName(search)` → název souboru z `?viewAttachment=`, jinak `""`
+- `issueKeyFromPath(pathname)` → klíč z `/browse/<KLÍČ>`, jinak `""`
+- `previewPageUrl({ origin, issueKey, filename })` → adresa panelu náhledu, bez klíče `""`
+- `latestAttachmentByName(attachments, filename)` → nejnovější příloha s tímto názvem, nebo `null`
+- `issuePageUrl(previewHref)` → adresa issue za náhledem (bez `viewAttachment`)
 - `attachmentContentPath(id, filename)` → `/secure/attachment/<id>/<zakódovaný název>`
 
 ## Ověření
 
-Node: `node --test test/jira-attachment-preview.test.js` pokrývá tabulku druhů (včetně `.json` + `text/plain` a `.html` + `application/x-sql`), hranici 10 MiB, zákaz `allow-same-origin`, formátování JSON a parametr `viewAttachment`.
+Node: `node --test test/jira-attachment-preview.test.js` pokrývá tabulku druhů (včetně `.json` + `text/plain` a `.html` + `application/x-sql`), hranici 10 MiB, zákaz `allow-same-origin`, formátování JSON, parametr `viewAttachment` a výběr nejnovější přílohy podle názvu.
 
-Chrome (puppeteer-core): `npm run test-jira-attachment-preview` ve složce `test` pustí falešnou stránku issue, REST a přílohy na lokálním serveru a skript vloží od začátku dokumentu jako Tampermonkey. Ověří umístění a velikost oka, překreslení modulu, otevření panelu kliknutím, všechny druhy náhledu, obnovení panelu, limity a chybové věty.
+Chrome (puppeteer-core): `npm run test-jira-attachment-preview` ve složce `test` pustí falešnou stránku issue, REST a přílohy na lokálním serveru a skript vloží až po prvním skriptu hlavičky, jako to dělá Tampermonkey. Ověří umístění a velikost oka, překreslení modulu, otevření panelu kliknutím, Back a Forward, všechny druhy náhledu, vykreslení, obnovení panelu, novou verzi přílohy, smazání, limity a chybové věty.
 
 Prohlížeč, přihlášená IndSoft Jira, issue IDSM-6362:
 
@@ -96,9 +101,11 @@ Prohlížeč, přihlášená IndSoft Jira, issue IDSM-6362:
 - `screenshot-1.png` je obrázek.
 - Po chybě načtení zůstane v novém panelu chybová věta a odkaz na stažení na issue dál funguje.
 - F5 v panelu náhledu ukáže tentýž náhled znovu.
+- Back v novém panelu vrátí issue, Forward zase náhled.
+- Po nahrání nové verze dashboardu se otevřený panel do 30 s sám aktualizuje.
 
 ## Dokumentace
 
-- `@version 1.0.0`
+- `@version 1.1.0`
 - Nová sekce nahoře v `changelogs.md`
 - Řádek v tabulce Installation v `README.md` a krátká věta v Notes

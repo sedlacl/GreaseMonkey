@@ -99,17 +99,13 @@ const server = http.createServer((req, res) => {
     res.end(issuePage());
     return;
   }
-  const rest = url.pathname.match(/^\/rest\/api\/2\/attachment\/(\d+)$/);
-  if (rest) {
-    const file = FILES[rest[1]];
-    if (!file) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end("{}");
-      return;
-    }
-    const size = file.declaredBig ? BIG : bodyOf(file)?.length;
+  if (url.pathname === "/rest/api/2/issue/IDSM-6362" && url.searchParams.get("fields") === "attachment") {
+    const attachment = Object.entries(FILES).map(([id, file]) => {
+      const size = file.declaredBig ? BIG : bodyOf(file)?.length;
+      return { id, filename: file.name, mimeType: file.type.split(";")[0], ...(file.hideSize ? {} : { size }) };
+    });
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ id: rest[1], filename: file.name, mimeType: file.type.split(";")[0], ...(file.hideSize ? {} : { size }) }));
+    res.end(JSON.stringify({ key: "IDSM-6362", fields: { attachment } }));
     return;
   }
   const m = url.pathname.match(/^\/secure\/attachment\/(\d+)\/(.+)$/);
@@ -161,6 +157,7 @@ function check(name, ok, detail) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const TOO_LARGE = "Příloha je větší než 10 MB, náhled se neotevře.";
 const LOAD_FAILED = "Přílohu se nepodařilo načíst.";
+const NOT_FOUND = "Příloha s tímto názvem na issue není.";
 
 (async () => {
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -201,7 +198,7 @@ const LOAD_FAILED = "Přílohu se nepodařilo načíst.";
     const supported = state.filter((s) => s.name !== "archive.zip");
     check("zip has no eye", state.find((s) => s.name === "archive.zip").btns === 0);
     check("one eye per supported attachment, overlaid on the thumbnail", supported.every((s) => s.btns === 1 && s.inThumb), state.map((s) => `${s.name}:${s.btns}`));
-    check("eye link: reloadable issue URL, new tab", state[0].href === `${base}/browse/IDSM-6362?viewAttachment=1` && state[0].target === "_blank", state[0]);
+    check("eye link: reloadable issue URL with the file name, new tab", state[0].href === `${base}/browse/IDSM-6362?viewAttachment=dash.html` && state[0].target === "_blank", state[0]);
     check("aria-label and title", state[0].label === "Náhled: dash.html" && state[0].title === "Náhled: dash.html");
 
     const geometry = await page.evaluate(() => {
@@ -275,9 +272,27 @@ const LOAD_FAILED = "Přílohu se nepodařilo načíst.";
       const created = new Promise((resolve) => browser.once("targetcreated", resolve));
       await (await page.$(".gm-jap-btn")).click();
       const target = await created;
-      check("click opens new tab with the preview URL", target.url() === `${base}/browse/IDSM-6362?viewAttachment=1`, target.url());
+      check("click opens new tab with the preview URL", target.url() === `${base}/browse/IDSM-6362?viewAttachment=dash.html`, target.url());
+
+      // The opened tab starts without history. It needs the userscript too: inject and reload,
+      // which keeps the history as it is.
       const opened = await target.page();
-      await opened?.close();
+      await opened.evaluateOnNewDocument(INJECTED);
+      await opened.reload();
+      await sleep(2500);
+      check("history: the issue page sits behind the preview", (await opened.evaluate(() => history.length)) === 2);
+      await opened.reload();
+      await sleep(2500);
+      check("history: reload adds nothing", (await opened.evaluate(() => history.length)) === 2);
+      await opened.goBack();
+      await sleep(1500);
+      const back = await opened.evaluate(() => ({ url: location.href, module: !!document.querySelector("#attachmentmodule"), jira: window.__jiraBodyRan === true }));
+      check("history: Back shows the real issue page", back.url === `${base}/browse/IDSM-6362` && back.module && back.jira, back);
+      await opened.goForward();
+      await sleep(2500);
+      const forward = await opened.evaluate(() => ({ url: location.href, title: document.title, frame: !!document.querySelector("iframe.gm-jap-frame"), body: document.body?.innerText.slice(0, 80) }));
+      check("history: Forward shows the preview again", forward.title === "dash.html" && forward.frame, forward);
+      await opened.close();
     }
 
     // Content in the DOM is not enough: the tab must paint (window.stop() before <body> froze it).
@@ -290,16 +305,16 @@ const LOAD_FAILED = "Přílohu se nepodařilo načíst.";
       );
     }
 
-    async function preview(id, wait = 1500) {
+    async function preview(name, wait = 1500) {
       const p = await newPage();
-      await p.goto(`${base}/browse/IDSM-6362?viewAttachment=${id}`);
+      await p.goto(`${base}/browse/IDSM-6362?viewAttachment=${encodeURIComponent(name)}`);
       await sleep(wait);
       return p;
     }
 
     // HTML
     {
-      const p = await preview(1, 3500);
+      const p = await preview("dash.html", 3500);
       const top = await p.evaluate(() => ({
         title: document.title,
         url: location.href,
@@ -336,12 +351,40 @@ const LOAD_FAILED = "Přílohu se nepodařilo načíst.";
       await p.reload();
       await sleep(3500);
       const again = await inner();
-      check("html: reload shows the preview again", again.rects === 3 && p.url().endsWith("?viewAttachment=1") && (await p.title()) === "dash.html", again.rects);
+      check("html: reload shows the preview again", again.rects === 3 && p.url().endsWith("?viewAttachment=dash.html") && (await p.title()) === "dash.html", again.rects);
+
+      // a new version is uploaded under the same name: the open tab picks it up without a reload
+      FILES[12] = { ...FILES[1], body: DASHBOARD.replace("Dashboard č", "Dashboard v2") };
+      await p.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await sleep(3500);
+      const updated = await inner();
+      check("update: newer upload of the same name replaces the content", updated.h1 === "Dashboard v2" && updated.rects === 3, updated.h1);
+      const frameAfterUpdate = await p.evaluateHandle(() => document.querySelector("iframe"));
+      await p.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await sleep(800);
+      check("update: no reload while nothing changed", await p.evaluate((f) => document.querySelector("iframe") === f, frameAfterUpdate));
+
+      await p.reload();
+      await sleep(3500);
+      check("update: reload opens the newest upload", (await inner()).h1 === "Dashboard v2");
+
+      // both versions deleted: the open tab keeps what it shows
+      delete FILES[1];
+      delete FILES[12];
+      await p.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await sleep(800);
+      check("update: deleted attachment keeps the last content", (await inner()).h1 === "Dashboard v2");
       await p.close();
     }
 
     {
-      const p = await preview(2);
+      const p = await preview("dash.html");
+      check("deleted attachment: not-found message", (await p.evaluate(() => document.body.innerText.trim())) === NOT_FOUND);
+      await p.close();
+    }
+
+    {
+      const p = await preview("06-ts-list-incident.json");
       const r = await p.evaluate(() => ({ pre: document.querySelector("pre")?.textContent, title: document.title }));
       check("json: formatted in pre", r.pre === '{\n  "a": 1,\n  "b": [\n    "č"\n  ]\n}' && r.title === "06-ts-list-incident.json", r);
       check("json: the preview tab actually paints", await painted(p));
@@ -350,75 +393,75 @@ const LOAD_FAILED = "Přílohu se nepodařilo načíst.";
     }
 
     {
-      const p = await preview(3);
+      const p = await preview("q.sql");
       const r = await p.evaluate(() => document.querySelector("pre")?.textContent);
       check("sql: text in pre, UTF-8 default", r === "SEL \uFFFD", r);
       await p.close();
     }
 
     {
-      const p = await preview(4);
+      const p = await preview("w1250.txt");
       const r = await p.evaluate(() => document.querySelector("pre")?.textContent);
       check("txt: charset from Content-Type", r === "čž", r);
       await p.close();
     }
 
     {
-      const p = await preview(9);
+      const p = await preview("xss.txt");
       const r = await p.evaluate(() => ({ pre: document.querySelector("pre")?.textContent, markup: document.querySelectorAll("img,b").length }));
       check("txt: markup is not interpreted", r.markup === 0 && r.pre.startsWith("<img"), r);
       await p.close();
     }
 
     {
-      const p = await preview(5);
+      const p = await preview("screenshot-1.png");
       const r = await p.evaluate(() => ({ w: document.querySelector("img")?.naturalWidth, title: document.title }));
       check("png: shown in img", r.w === 1 && r.title === "screenshot-1.png", r);
       await p.close();
     }
 
     {
-      const p = await preview(10);
+      const p = await preview("doc.pdf");
       const r = await p.evaluate(() => ({ src: document.querySelector("iframe")?.src ?? "", sandbox: document.querySelector("iframe")?.hasAttribute("sandbox") }));
-      check("pdf: built-in viewer in a frame, tab keeps its URL", r.src.startsWith("blob:") && !r.sandbox && p.url().endsWith("?viewAttachment=10"), r);
+      check("pdf: built-in viewer in a frame, tab keeps its URL", r.src.startsWith("blob:") && !r.sandbox && p.url().endsWith("?viewAttachment=doc.pdf"), r);
       await p.close();
     }
 
     {
-      const p = await preview(6, 2500);
+      const p = await preview("big.log", 2500);
       check("big (no size, chunked): over-limit message", (await p.evaluate(() => document.body.innerText.trim())) === TOO_LARGE);
       await p.close();
     }
 
     {
-      const p = await preview(11);
+      const p = await preview("big-declared.txt");
       check("big (REST size): over-limit message", (await p.evaluate(() => document.body.innerText.trim())) === TOO_LARGE);
       await p.close();
     }
 
     {
-      const p = await preview(7);
+      const p = await preview("missing.txt");
       check("http 500: error message", (await p.evaluate(() => document.body.innerText.trim())) === LOAD_FAILED);
       await p.close();
     }
 
     {
-      const p = await preview(999);
-      check("unknown attachment id: error message", (await p.evaluate(() => document.body.innerText.trim())) === LOAD_FAILED);
+      const p = await preview("nope.txt");
+      check("unknown file name: not-found message", (await p.evaluate(() => document.body.innerText.trim())) === NOT_FOUND);
       await p.close();
     }
 
     {
-      const p = await preview(8);
+      const p = await preview("archive.zip");
       check("unsupported type: message", (await p.evaluate(() => document.body.innerText.trim())) === "Tento typ přílohy náhled nemá.");
       await p.close();
     }
 
     {
       const p = await newPage();
-      await p.goto(`${base}/browse/IDSM-6362?viewAttachment=..%2F1`);
+      await p.goto(`${base}/browse/IDSM-6362?viewAttachment=`);
       await sleep(600);
-      check("invalid id: normal issue page", await p.evaluate(() => !!document.querySelector("#attachmentmodule") && window.__jiraBodyRan === true));
+      check("empty file name: normal issue page", await p.evaluate(() => !!document.querySelector("#attachmentmodule") && window.__jiraBodyRan === true));
       await p.close();
     }
 

@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../jira-attachment-preview.user.js");
 
-test("SCRIPT_VERSION is 1.0.2", () => {
-  assert.equal(api.SCRIPT_VERSION, "1.0.2");
+test("SCRIPT_VERSION is 1.1.0", () => {
+  assert.equal(api.SCRIPT_VERSION, "1.1.0");
 });
 
 test("classifyAttachment: known extension decides, case-insensitive, last suffix", () => {
@@ -110,27 +110,48 @@ test("attachmentIdFromHref", () => {
   assert.equal(api.attachmentIdFromHref("/secure/attachment/abc/x"), "");
 });
 
-test("previewAttachmentId accepts only digits", () => {
-  assert.equal(api.previewAttachmentId("?viewAttachment=51156"), "51156");
-  assert.equal(api.previewAttachmentId("?a=1&viewAttachment=7"), "7");
-  assert.equal(api.previewAttachmentId("?viewAttachment=../../rest"), "");
-  assert.equal(api.previewAttachmentId("?viewAttachment=1%2F2"), "");
-  assert.equal(api.previewAttachmentId("?viewAttachement=51156"), "");
-  assert.equal(api.previewAttachmentId(""), "");
+test("previewAttachmentName: file name from ?viewAttachment", () => {
+  assert.equal(api.previewAttachmentName("?viewAttachment=IDSM-6362-dashboard.html"), "IDSM-6362-dashboard.html");
+  assert.equal(api.previewAttachmentName("?a=1&viewAttachment=a+b%20%C4%8D.txt"), "a b č.txt");
+  assert.equal(api.previewAttachmentName("?viewAttachment=%20%20"), "");
+  assert.equal(api.previewAttachmentName("?viewAttachment=" + "x".repeat(256)), "");
+  assert.equal(api.previewAttachmentName("?viewAttachement=a.txt"), "");
+  assert.equal(api.previewAttachmentName(""), "");
 });
 
-test("previewPageUrl: issue page with ?viewAttachment, path fallback", () => {
+test("issueKeyFromPath: only /browse/<KEY>", () => {
+  assert.equal(api.issueKeyFromPath("/browse/idsm-6362"), "IDSM-6362");
+  assert.equal(api.issueKeyFromPath("/browse/IDSM-6362/"), "IDSM-6362");
+  assert.equal(api.issueKeyFromPath("/projects/IDSM/issues/IDSM-6362"), "");
+  assert.equal(api.issueKeyFromPath("/browse/x/../y"), "");
+});
+
+test("previewPageUrl: /browse/<KEY>?viewAttachment=<file name>, nothing without a key", () => {
   assert.equal(
-    api.previewPageUrl({ origin: "http://jira.indsoft.local", issueKey: "idsm-6362", pathname: "/issues/", attachmentId: "51156" }),
-    "http://jira.indsoft.local/browse/IDSM-6362?viewAttachment=51156",
+    api.previewPageUrl({ origin: "http://jira.indsoft.local", issueKey: "idsm-6362", filename: "a b&č.html" }),
+    "http://jira.indsoft.local/browse/IDSM-6362?viewAttachment=a+b%26%C4%8D.html",
   );
+  assert.equal(api.previewPageUrl({ origin: "http://jira.indsoft.local", issueKey: "", filename: "a.html" }), "");
+  assert.equal(api.previewPageUrl({ origin: "http://jira.indsoft.local", issueKey: "x/../y", filename: "a.html" }), "");
+});
+
+test("latestAttachmentByName: newest upload of exactly that name", () => {
+  const list = [
+    { id: "100", filename: "dash.html", mimeType: "text/html", size: 5 },
+    { id: "120", filename: "dash.html", mimeType: "text/html", size: 7 },
+    { id: "130", filename: "Dash.html", mimeType: "text/html", size: 9 },
+    { id: "../1", filename: "dash.html" },
+  ];
+  assert.deepEqual(api.latestAttachmentByName(list, "dash.html"), { id: "120", filename: "dash.html", mimeType: "text/html", size: 7 });
+  assert.equal(api.latestAttachmentByName(list, "other.html"), null);
+  assert.equal(api.latestAttachmentByName(undefined, "dash.html"), null);
+});
+
+test("issuePageUrl drops only ?viewAttachment", () => {
+  assert.equal(api.issuePageUrl("http://jira.indsoft.local/browse/IDSM-6362?viewAttachment=dash.html"), "http://jira.indsoft.local/browse/IDSM-6362");
   assert.equal(
-    api.previewPageUrl({ origin: "http://jira.indsoft.local", issueKey: "", pathname: "/projects/IDSM/issues/", attachmentId: "1" }),
-    "http://jira.indsoft.local/projects/IDSM/issues/?viewAttachment=1",
-  );
-  assert.equal(
-    api.previewPageUrl({ origin: "http://jira.indsoft.local", issueKey: "x/../y", pathname: "", attachmentId: "1" }),
-    "http://jira.indsoft.local/?viewAttachment=1",
+    api.issuePageUrl("http://jira.indsoft.local/browse/IDSM-6362?filter=all&viewAttachment=a+b.txt"),
+    "http://jira.indsoft.local/browse/IDSM-6362?filter=all",
   );
 });
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         IndSoft JIRA - Attachment preview
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      1.0.2
-// @description  Adds a "Náhled" eye button to supported issue attachments (HTML, text, images, PDF) and opens the file in a reloadable new tab; HTML runs in a sandboxed frame.
+// @version      1.1.0
+// @description  Adds a "Náhled" eye button to supported issue attachments (HTML, text, images, PDF) and opens the file by name in a reloadable new tab that picks up new uploads; HTML runs in a sandboxed frame.
 // @author       Lukáš Sedláček
 // @match        *://jira.indsoft.local/*
 // @grant        none
@@ -26,7 +26,7 @@
   "use strict";
 
   const SCRIPT_FLAG = "__gmJiraAttachmentPreview";
-  const SCRIPT_VERSION = "1.0.2";
+  const SCRIPT_VERSION = "1.1.0";
   const STYLE_ID = "gm-jira-attachment-preview-style";
   const BUTTON_CLASS = "gm-jap-btn";
   const OVERLAY_CLASS = "gm-jap-overlay";
@@ -35,12 +35,16 @@
   const THUMBNAILS_SELECTOR = "#attachment_thumbnails";
   const ATTACHMENT_LINK_SELECTOR = 'a.attachment-title[href*="/secure/attachment/"], dt a[href*="/secure/attachment/"]';
   const PREVIEW_PARAM = "viewAttachment";
+  const ISSUE_KEY_PATTERN = /^[A-Z][A-Z0-9_]*-\d+$/iu;
+  const MAX_FILENAME_LENGTH = 255;
+  const UPDATE_CHECK_MS = 30 * 1000;
   const PREVIEW_LIMIT_BYTES = 10 * 1024 * 1024;
   const SANDBOX_TOKENS = Object.freeze(["allow-scripts", "allow-popups", "allow-forms", "allow-modals", "allow-downloads"]);
 
   const TEXT_TOO_LARGE = "Příloha je větší než 10 MB, náhled se neotevře.";
   const TEXT_LOAD_FAILED = "Přílohu se nepodařilo načíst.";
   const TEXT_UNSUPPORTED = "Tento typ přílohy náhled nemá.";
+  const TEXT_NOT_FOUND = "Příloha s tímto názvem na issue není.";
   const TEXT_LOADING = "Načítám přílohu…";
   const TEXT_DEFAULT_TITLE = "Náhled přílohy";
 
@@ -163,17 +167,60 @@
     return match ? match[1] : "";
   }
 
-  /** Attachment id from the preview tab's query string; only plain digits are accepted. */
-  function previewAttachmentId(search) {
-    const value = new URLSearchParams(String(search ?? "")).get(PREVIEW_PARAM) ?? "";
-    return /^\d{1,18}$/u.test(value) ? value : "";
+  /**
+   * Attachment file name from the preview tab's query string, or "". It is only compared with
+   * the file names Jira lists for the issue, never put into a request.
+   */
+  function previewAttachmentName(search) {
+    const value = (new URLSearchParams(String(search ?? "")).get(PREVIEW_PARAM) ?? "").trim();
+    return value.length <= MAX_FILENAME_LENGTH ? value : "";
   }
 
-  /** Reloadable address of the preview tab: the issue page with ?viewAttachment=<id>. */
-  function previewPageUrl({ origin, issueKey, pathname, attachmentId }) {
-    const key = /^[A-Z][A-Z0-9_]*-\d+$/iu.test(String(issueKey ?? "")) ? issueKey.toUpperCase() : "";
-    const path = key ? `/browse/${key}` : pathname || "/";
-    return `${origin}${path}?${PREVIEW_PARAM}=${encodeURIComponent(attachmentId)}`;
+  function normalizeIssueKey(value) {
+    const key = String(value ?? "").trim();
+    return ISSUE_KEY_PATTERN.test(key) ? key.toUpperCase() : "";
+  }
+
+  /** Issue key of the preview tab, which always lives at /browse/<KEY>. */
+  function issueKeyFromPath(pathname) {
+    return normalizeIssueKey(String(pathname ?? "").match(/^\/browse\/([^/]+)\/?$/u)?.[1]);
+  }
+
+  /**
+   * Reloadable address of the preview tab: /browse/<KEY>?viewAttachment=<file name>, or "" without a key.
+   * The name, not the id, so the link keeps working when a new version of the file is uploaded.
+   */
+  function previewPageUrl({ origin, issueKey, filename }) {
+    const key = normalizeIssueKey(issueKey);
+    if (!key || !filename) {
+      return "";
+    }
+    const url = new URL(`/browse/${key}`, origin);
+    url.searchParams.set(PREVIEW_PARAM, filename);
+    return url.href;
+  }
+
+  /** The newest attachment with exactly this file name; Jira keeps every upload and ids only grow. */
+  function latestAttachmentByName(attachments, filename) {
+    let latest = null;
+    for (const attachment of Array.isArray(attachments) ? attachments : []) {
+      if (String(attachment?.filename ?? "") !== filename || !/^\d{1,18}$/u.test(String(attachment.id ?? ""))) {
+        continue;
+      }
+      if (!latest || Number(attachment.id) > Number(latest.id)) {
+        latest = attachment;
+      }
+    }
+    return latest
+      ? { id: String(latest.id), filename, mimeType: String(latest.mimeType ?? ""), size: Number(latest.size) }
+      : null;
+  }
+
+  /** The issue page behind a preview address: the same URL without ?viewAttachment. */
+  function issuePageUrl(previewHref) {
+    const url = new URL(previewHref);
+    url.searchParams.delete(PREVIEW_PARAM);
+    return url.href;
   }
 
   /** Same-origin download path built from the id and file name, never taken from the URL. */
@@ -249,26 +296,25 @@
     if (!attachmentId) {
       return null;
     }
-    const filename = (link.textContent || "").trim() || filenameFromUrl(url);
+    const filename = filenameFromUrl(url) || (link.textContent || "").trim();
     const item = link.closest("li.attachment-content, li[data-attachment-id], li");
     const mimeType = mimeTypeFromDownloadUrl(item?.getAttribute("data-downloadurl"));
     if (!classifyAttachment({ filename, mimeType })) {
       return null;
     }
+    const previewUrl = previewPageUrl({ origin: location.origin, issueKey: currentIssueKey(), filename });
+    if (!previewUrl) {
+      return null;
+    }
     // In the thumbnail view the eye sits over the preview tile, in the list view right after the name.
     const thumb = link.closest(THUMBNAILS_SELECTOR) ? item?.querySelector(".attachment-thumb") : null;
-    return { attachmentId, filename, item, thumb };
+    return { filename, previewUrl, item, thumb };
   }
 
   function createButton(info) {
     const button = document.createElement("a");
     button.className = info.thumb ? `${BUTTON_CLASS} ${OVERLAY_CLASS}` : BUTTON_CLASS;
-    button.href = previewPageUrl({
-      origin: location.origin,
-      issueKey: currentIssueKey(),
-      pathname: location.pathname,
-      attachmentId: info.attachmentId,
-    });
+    button.href = info.previewUrl;
     button.target = "_blank";
     button.rel = "noopener";
     button.draggable = false;
@@ -370,7 +416,7 @@
    */
   function shieldFromJira(doc) {
     const swallow = (event) => event.stopImmediatePropagation();
-    for (const type of ["readystatechange", "DOMContentLoaded", "load"]) {
+    for (const type of ["readystatechange", "DOMContentLoaded", "load", "popstate"]) {
       window.addEventListener(type, swallow, true);
     }
     const sweep = (records) => {
@@ -382,6 +428,19 @@
     for (const target of [doc.documentElement, doc.head, doc.body]) {
       observer.observe(target, { childList: true });
     }
+  }
+
+  /**
+   * The preview opens in a new tab with nothing to go back to, so the issue page goes in behind it.
+   * A tab with history already (F5, forward from the issue) is left alone.
+   */
+  function putIssueBehindPreview() {
+    if (history.length !== 1) {
+      return;
+    }
+    const previewHref = location.href;
+    history.replaceState(null, "", issuePageUrl(previewHref));
+    history.pushState(null, "", previewHref);
   }
 
   /**
@@ -501,66 +560,108 @@
     replaceBody(doc, frame);
   }
 
-  async function fetchAttachmentMeta(attachmentId) {
-    const response = await fetch(`/rest/api/2/attachment/${encodeURIComponent(attachmentId)}`, {
+  /** Newest attachment of the issue with this file name, or null when there is none. */
+  async function fetchLatestAttachment(issueKey, filename) {
+    const response = await fetch(`/rest/api/2/issue/${encodeURIComponent(issueKey)}?fields=attachment`, {
       credentials: "same-origin",
       headers: { Accept: "application/json" },
     });
     if (!response.ok) {
-      return null;
+      throw new Error(`issue request failed: ${response.status}`);
     }
-    const meta = await response.json();
-    const filename = String(meta?.filename ?? "").trim();
-    return filename ? { filename, mimeType: String(meta.mimeType ?? ""), size: Number(meta.size) } : null;
+    const issue = await response.json();
+    return latestAttachmentByName(issue?.fields?.attachment, filename);
   }
 
-  async function runPreviewPage(attachmentId) {
-    const doc = takeOverDocument();
-    try {
-      const meta = await fetchAttachmentMeta(attachmentId);
-      if (!meta) {
-        showMessage(doc, TEXT_LOAD_FAILED);
-        return;
-      }
-      doc.title = meta.filename;
-      if (!classifyAttachment(meta)) {
-        showMessage(doc, TEXT_UNSUPPORTED);
-        return;
-      }
-      if (Number.isFinite(meta.size) && !isWithinPreviewLimit(meta.size)) {
-        showMessage(doc, TEXT_TOO_LARGE);
-        return;
-      }
+  async function showAttachment(doc, meta) {
+    if (!classifyAttachment(meta)) {
+      showMessage(doc, TEXT_UNSUPPORTED);
+      return;
+    }
+    if (Number.isFinite(meta.size) && !isWithinPreviewLimit(meta.size)) {
+      showMessage(doc, TEXT_TOO_LARGE);
+      return;
+    }
 
-      const response = await fetch(attachmentContentPath(attachmentId, meta.filename), { credentials: "same-origin" });
-      if (!response.ok) {
-        response.body?.cancel().catch(() => {});
-        showMessage(doc, TEXT_LOAD_FAILED);
-        return;
-      }
-      const bytes = await readLimited(response);
-      if (!bytes) {
-        showMessage(doc, TEXT_TOO_LARGE);
-        return;
-      }
-      const mimeType = response.headers.get("content-type") || meta.mimeType;
-      const kind = classifyAttachment({ filename: meta.filename, mimeType }) || classifyAttachment(meta);
-      if (kind === "pdf") {
-        renderPdf(doc, bytes);
-      } else if (kind === "image") {
-        renderImage(doc, bytes, meta.filename, mimeType);
+    const response = await fetch(attachmentContentPath(meta.id, meta.filename), { credentials: "same-origin" });
+    if (!response.ok) {
+      response.body?.cancel().catch(() => {});
+      showMessage(doc, TEXT_LOAD_FAILED);
+      return;
+    }
+    const bytes = await readLimited(response);
+    if (!bytes) {
+      showMessage(doc, TEXT_TOO_LARGE);
+      return;
+    }
+    const mimeType = response.headers.get("content-type") || meta.mimeType;
+    const kind = classifyAttachment({ filename: meta.filename, mimeType }) || classifyAttachment(meta);
+    if (kind === "pdf") {
+      renderPdf(doc, bytes);
+    } else if (kind === "image") {
+      renderImage(doc, bytes, meta.filename, mimeType);
+    } else {
+      const text = decodeText(bytes, mimeType);
+      if (kind === "html") {
+        renderHtml(doc, text);
       } else {
-        const text = decodeText(bytes, mimeType);
-        if (kind === "html") {
-          renderHtml(doc, text);
-        } else {
-          renderText(doc, shouldFormatJson({ filename: meta.filename, mimeType }) ? formatJsonPreview(text) : text);
-        }
+        renderText(doc, shouldFormatJson({ filename: meta.filename, mimeType }) ? formatJsonPreview(text) : text);
       }
+    }
+  }
+
+  /** While the tab is visible, looks for a newer upload every 30 s, and at once when the tab shows again. */
+  function watchForUpdates(check) {
+    let running = false;
+    const tick = async () => {
+      if (running || document.visibilityState !== "visible") {
+        return;
+      }
+      running = true;
+      try {
+        await check();
+      } catch (error) {
+        console.warn("[jira-attachment-preview] update check failed", error);
+      } finally {
+        running = false;
+      }
+    };
+    setInterval(tick, UPDATE_CHECK_MS);
+    document.addEventListener("visibilitychange", tick);
+  }
+
+  async function runPreviewPage(filename) {
+    const doc = takeOverDocument();
+    putIssueBehindPreview();
+    doc.title = filename;
+    const issueKey = issueKeyFromPath(location.pathname);
+    if (!issueKey) {
+      showMessage(doc, TEXT_LOAD_FAILED);
+      return;
+    }
+
+    // A new upload of the same name gets a new id; only then is the content loaded again.
+    let shownId = "";
+    const refresh = async () => {
+      const meta = await fetchLatestAttachment(issueKey, filename);
+      if (!meta) {
+        if (!shownId) {
+          showMessage(doc, TEXT_NOT_FOUND);
+        }
+        return;
+      }
+      if (meta.id !== shownId) {
+        shownId = meta.id;
+        await showAttachment(doc, meta);
+      }
+    };
+    try {
+      await refresh();
     } catch (error) {
       console.warn("[jira-attachment-preview] preview failed", error);
       showMessage(doc, TEXT_LOAD_FAILED);
     }
+    watchForUpdates(refresh);
   }
 
   // --- bootstrap ----------------------------------------------------------
@@ -571,9 +672,17 @@
     }
     window[SCRIPT_FLAG] = true;
 
-    const attachmentId = previewAttachmentId(location.search);
-    if (attachmentId) {
-      runPreviewPage(attachmentId);
+    const filename = previewAttachmentName(location.search);
+    // Back and Forward between the issue page and its preview may stay in this document and only
+    // change the address. Then the page is loaded again for what the address asks for.
+    // Registered first, so it runs before the preview tab swallows popstate for Jira.
+    window.addEventListener("popstate", () => {
+      if (previewAttachmentName(location.search) !== filename) {
+        location.reload();
+      }
+    }, true);
+    if (filename) {
+      runPreviewPage(filename);
     } else {
       runIssuePage();
     }
@@ -591,8 +700,11 @@
     charsetOfMimeType,
     decodeText,
     attachmentIdFromHref,
-    previewAttachmentId,
+    previewAttachmentName,
+    issueKeyFromPath,
     previewPageUrl,
+    latestAttachmentByName,
+    issuePageUrl,
     attachmentContentPath,
     PREVIEW_LIMIT_BYTES,
     SCRIPT_VERSION,

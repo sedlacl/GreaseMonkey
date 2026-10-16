@@ -7,6 +7,13 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## jira-attachment-preview.user.js
 
+### 1.1.0 — 2026-10-16
+
+- Panel náhledu hledá přílohu podle názvu: adresa je `…/browse/<issue>?viewAttachment=<název souboru>`. F5 i sdílený odkaz po nahrání nové verze souboru ukážou novou verzi, i když má v Jiře jiné id.
+- Otevřený panel každých 30 s (jen když je vidět) a hned po návratu do panelu zjistí, jestli nepřibyla novější verze, a obsah sám překreslí. Z HTML přílohy tak jde udělat průběžně aktualizovaný dashboard.
+- Když příloha na issue chybí, panel napíše „Příloha s tímto názvem na issue není.“; smazání během otevřeného náhledu nechá poslední obsah.
+- Tlačítko Zpět v panelu náhledu vrátí na issue, Vpřed zase na náhled.
+
 ### 1.0.2 — 2026-10-16
 
 - Oprava: v panelu náhledu se občas objevil banner Jiry („The Tomcat server.xml has an incorrect configuration“) a HTML dashboard měl jednou světlé, jindy tmavé téma. Tampermonkey totiž skript spustí až po prvních skriptech Jiry a jejich handlery po načtení zapisovaly do náhledu. Události načtení se k nim už nedostanou a cizí prvky skript z náhledu odstraní.
