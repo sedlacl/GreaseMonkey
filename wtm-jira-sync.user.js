@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.6.1
+// @version      0.6.2
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.6.1";
+  const SCRIPT_VERSION = "0.6.2";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -1845,12 +1845,14 @@
     }, nonce);
     injectAgent(nonce);
     let pending = 0;
+    // Judge each mutation on its own: render() changes OWN_CLASS nodes and the panel in one batch, and that must not re-trigger render().
+    const isOwnMutation = (m) => {
+      if ([...m.addedNodes, ...m.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains(OWN_CLASS))) return true;
+      const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
+      return Boolean(el && el.closest && el.closest("#gm-wjs-settings, #gm-wjs-panel"));
+    };
     const observer = new MutationObserver((mutations) => {
-      if (mutations.every((m) => [...m.addedNodes, ...m.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains(OWN_CLASS)))) return;
-      if (mutations.every((m) => {
-        const el = m.target.nodeType === 1 ? m.target : m.target.parentElement;
-        return el && el.closest && el.closest("#gm-wjs-settings, #gm-wjs-panel");
-      })) return;
+      if (mutations.every(isOwnMutation)) return;
       clearTimeout(pending);
       pending = setTimeout(() => {
         render();
