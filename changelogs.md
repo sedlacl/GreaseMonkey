@@ -39,6 +39,10 @@ Pravidlo: při každém bumpnutí `@version` doplň záznam zde (viz `.cursor/ru
 
 ## wtm-jira-sync.user.js
 
+### 0.6.3 — 2026-10-27
+
+- Dovolená a další nepřítomnosti, které WTM vykazuje automaticky na roli Co-worker, už nejsou „není v Jiře“ ani se nepočítají do „navíc“. Položka i den dostanou šedou značku „dovolená“ (u jiné nepřítomnosti „nepřítomnost“). Den jen s nepřítomností nemá „✓ sedí“, protože není s čím porovnávat. Pozná se podle kódu role `<uuIdentity>_coworker-role`, takže funguje pro každého uživatele i v jiné jazykové verzi WTM.
+
 ### 0.6.2 — 2026-10-16
 
 - Oprava: tlačítka (hlavně „Zapsat vše“) na první klik často nereagovala. Skript od 0.6.1 překresloval stránku i lištu dokola každých 300 ms, takže se tlačítko pod kurzorem během kliku vyměnilo. Vlastní překreslení už další překreslení nespouští.

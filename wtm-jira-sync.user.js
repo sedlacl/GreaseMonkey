@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WTM ← Jira sync
 // @namespace    https://github.com/sedlacl/GreaseMonkey
-// @version      0.6.2
+// @version      0.6.3
 // @description  Na stránce WTM „Výkazy za měsíc“ spáruje položky s worklogy v Jiře (jira.indsoft.local) a dorovná WTM podle Jiry.
 // @author       Lukáš Sedláček
 // @match        https://uuapp.plus4u.net/uu-specialistwtm-maing01/*
@@ -27,7 +27,7 @@
 })(function createWtmJiraSyncApi() {
   "use strict";
 
-  const SCRIPT_VERSION = "0.6.2";
+  const SCRIPT_VERSION = "0.6.3";
   const SCRIPT_FLAG = "__gmWtmJiraSync";
   const TZ = "Europe/Prague";
 
@@ -93,6 +93,11 @@
     return c ? `${key} ${c}` : key;
   }
 
+  // Absences (vacation, sick leave…) are reported automatically on the worker's own Co-worker role; Jira never has them.
+  function isAbsenceItem(raw) {
+    return /_coworker-role$/.test(String(raw.subjectCode || "")) || String(raw.category || "") === "VACATION";
+  }
+
   function normalizeWtmItems(list) {
     return (list || []).map((i) => {
       const from = toPragueParts(i.datetimeFrom);
@@ -114,6 +119,7 @@
         subjectName: i.subjectName || "",
         state: i.state || "",
         highRate: Boolean(i.highRate),
+        absence: isAbsenceItem(i),
       };
     });
   }
@@ -175,7 +181,7 @@
 
   function matchDay(worklogs, items, mapping) {
     const W = [...worklogs].sort(byFrom);
-    const I = [...items].sort(byFrom);
+    const I = items.filter((i) => !i.absence).sort(byFrom);
     const ok = [];
     const diff = [];
     pairBy(W, I, (w, i) => w.key === i.key && w.from === i.from && w.to === i.to && buildWtmDescription(w.key, w.comment) === i.description, ok);
@@ -188,7 +194,7 @@
     pairBy(W, I, keyless, looseDiff);
     ok.push(...looseOk.map((p) => ({ ...p, loose: true })));
     diff.push(...looseDiff.map((p) => ({ ...p, loose: true })));
-    return { ok, diff, missing: W, extra: I };
+    return { ok, diff, missing: W, extra: I, absence: items.filter((i) => i.absence) };
   }
 
   function matchMonth(worklogs, items, mapping) {
@@ -1287,6 +1293,8 @@
       anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-ok", title }, [loose ? "≈ " : "✓ ", jiraLink(pairOrItem.worklog.key)]));
     } else if (kind === "extra") {
       anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-extra" }, "není v Jiře"));
+    } else if (kind === "absence") {
+      anchor.after(h("span", { class: "gm-wjs-badge gm-wjs-muted", title: "Nepřítomnost – do Jiry se nevykazuje" }, absenceText(pairOrItem)));
     } else if (kind === "diff") {
       const w = pairOrItem.worklog;
       const badge = h("span", { class: "gm-wjs-badge gm-wjs-diff", title: pairOrItem.loose ? "Spárováno podle dne a labelu – položka ve WTM nemá klíč ticketu" : "Liší se od Jiry" }, ["≠ ", jiraLink(w.key)]);
@@ -1295,6 +1303,10 @@
       const msg = state.messages[`i${pairOrItem.item.id}`] || (action && action.blocked);
       card.el.append(h("span", { class: "gm-wjs-note" }, `Jira: ${w.from}–${w.to} · ${formatMinutes(durationMinutes(w.from, w.to))} · ${w.comment || "(bez komentáře)"}${msg ? ` – ${msg}` : ""}`));
     }
+  }
+
+  function absenceText(item) {
+    return item.key === "VACATION" ? "dovolená" : "nepřítomnost";
   }
 
   function takeCard(cards, item) {
@@ -1310,7 +1322,9 @@
     if (res.diff.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-diff", title: "Liší se od Jiry" }, `≠ ${res.diff.length}`));
     if (res.missing.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-missing", title: "Chybí ve WTM" }, `chybí ${res.missing.length}`));
     if (res.extra.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-extra", title: "Ve WTM navíc, není v Jiře" }, `navíc ${res.extra.length}`));
-    if (!badges.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-ok", title: "Všechny položky dne sedí s Jirou" }, "✓ sedí"));
+    // A day with only absences has nothing to compare with Jira.
+    if (!badges.length && res.ok.length) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-ok", title: "Všechny položky dne sedí s Jirou" }, "✓ sedí"));
+    for (const text of new Set(res.absence.map(absenceText))) badges.push(h("span", { class: "gm-wjs-badge gm-wjs-muted", title: "Nepřítomnost – do Jiry se nevykazuje" }, text));
     const runnable = actions.filter((a) => !a.blocked);
     const summary = h("span", { class: "gm-wjs-day" }, [h("span", {}, `Jira ${formatMinutes(jira)} · WTM ${formatMinutes(wtm)}`), ...badges]);
     // The day header toggles the accordion; keep the bulk write from doing that too.
@@ -1350,6 +1364,10 @@
       for (const i of res.extra) {
         const card = takeCard(cards, i);
         if (card) decorateCard(card, i, "extra");
+      }
+      for (const i of res.absence) {
+        const card = takeCard(cards, i);
+        if (card) decorateCard(card, i, "absence");
       }
       const allCards = findItemCards(sectionEl);
       for (const action of actions.filter((a) => a.type === "create")) {
@@ -1880,6 +1898,7 @@
     previousYearMonthDash,
     todayPrague,
     buildWtmDescription,
+    isAbsenceItem,
     normalizeWtmItems,
     normalizeJiraWorklogs,
     fetchJiraMonth,

@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const api = require("../wtm-jira-sync.user.js");
 
-test("SCRIPT_VERSION is 0.6.2", () => {
-  assert.equal(api.SCRIPT_VERSION, "0.6.2");
+test("SCRIPT_VERSION is 0.6.3", () => {
+  assert.equal(api.SCRIPT_VERSION, "0.6.3");
 });
 
 test("toPragueParts converts UTC to Prague (summer time)", () => {
@@ -56,12 +56,20 @@ test("normalizeWtmItems maps raw WTM items to Prague times", () => {
   ]);
   assert.deepEqual(items[0], {
     id: "a1", date: "2026-10-09", from: "07:45", to: "08:15", key: "CS-1", comment: "Analýza, Vývoj",
-    description: "CS-1 Analýza, Vývoj", subject: "https://example.test/artifactInfo?id=1", subjectName: "W_SLA", state: "active", highRate: true,
+    description: "CS-1 Analýza, Vývoj", subject: "https://example.test/artifactInfo?id=1", subjectName: "W_SLA", state: "active", highRate: true, absence: false,
   });
   assert.equal(items[1].highRate, false);
   assert.equal(items[1].key, "IDS-2");
   assert.equal(items[1].comment, "");
   assert.equal(items[1].subjectName, "");
+});
+
+test("isAbsenceItem recognises absences of any worker by the Co-worker role", () => {
+  assert.equal(api.isAbsenceItem({ category: "VACATION", subjectCode: "276-473-1_coworker-role", subjectName: "Co-worker" }), true);
+  assert.equal(api.isAbsenceItem({ category: "SICK_LEAVE", subjectCode: "1234-5678-1_coworker-role", subjectName: "Spolupracovník" }), true);
+  assert.equal(api.isAbsenceItem({ category: "VACATION", subjectCode: "" }), true);
+  assert.equal(api.isAbsenceItem({ category: "CS-1", subjectCode: "psd.sp53.rto-ps01", subjectName: "W_SLA" }), false);
+  assert.equal(api.isAbsenceItem({ category: "", subjectCode: "" }), false);
 });
 
 test("normalizeJiraWorklogs keeps only my worklogs inside the month", () => {
@@ -94,6 +102,15 @@ test("matchDay classifies ok, diff, missing and extra", () => {
   assert.deepEqual(res.diff.map((p) => p.item.id).sort(), ["i2", "i4"]);
   assert.deepEqual(res.missing.map((w) => w.key), ["CS-3"]);
   assert.deepEqual(res.extra.map((i) => i.id), ["i9"]);
+});
+
+test("matchDay keeps absences out of extra", () => {
+  const d = "2026-10-29";
+  const vacation = { ...I("v1", "VACATION", d, "09:00", "17:00", ""), absence: true };
+  const res = api.matchDay([W("CS-1", d, "18:00", "19:00")], [vacation, I("i9", "CS-9", d, "17:00", "18:00")]);
+  assert.deepEqual(res.absence.map((i) => i.id), ["v1"]);
+  assert.deepEqual(res.extra.map((i) => i.id), ["i9"]);
+  assert.deepEqual(res.missing.map((w) => w.key), ["CS-1"]);
 });
 
 test("matchDay pairs repeated tickets in start order", () => {
