@@ -1,5 +1,10 @@
 # GreaseMonkey scripts
 
+> [!IMPORTANT]
+> **This repository has moved to [indsoft/GreaseMonkey](https://github.com/indsoft/GreaseMonkey).**
+> Installed scripts switch to the new address on their own with the next Tampermonkey update – nothing to reinstall.
+> New installs, issues and changes: please use the new repository. This one is no longer updated.
+
 Small Tampermonkey helpers I use every day — Cursor usage KPIs, BookKit fulltext search, Message Registry previews, uuIdentity login fixes, and more.
 
 Want to try them? Use at your own risk.
